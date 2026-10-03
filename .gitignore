@@ -1,0 +1,33 @@
+# Dependencies and generated output
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# Credentials, environment files, and deployment state
+.env
+.env.*
+.vercel/
+.netlify/
+.npmrc
+.yarnrc
+.yarnrc.yml
+*.pem
+*.key
+*.p12
+*.pfx
+*.keystore
+*credentials*.json
+*service-account*.json
+*.tfstate*
+
+# Local evidence, archives, editor state, and logs
+evidence/
+.impeccable/
+.idea/
+.vscode/
+*.zip
+*.tar
+*.tar.gz
+.DS_Store
+*.log
