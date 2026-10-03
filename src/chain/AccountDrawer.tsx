@@ -1,7 +1,7 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { ArrowSquareOut, Check, LockKey, Wallet, X } from "@phosphor-icons/react";
 import { formatEther, isHash } from "viem";
-import { NETWORKS, parseAtomicAmount, type NetworkId } from "./networks.ts";
+import { NETWORKS, parseAtomicAmount, transactionExplorerUrl, type NetworkId } from "./networks.ts";
 import { readTransaction, type TransactionRead } from "./gateway.ts";
 import type { WalletState } from "./wallet.ts";
 
@@ -66,7 +66,7 @@ function TransactionLookup({ network }: { network: NetworkId }) {
         <strong>{result.status === "pending" ? "Pending on network" : result.status === "reverted" ? "Transaction reverted" : "Transaction included"}</strong>
         <span>{result.confirmations.toString()} confirmations · {NETWORKS[network].name}</span>
         <small>Block inclusion may change during a reorganization. This is a public transaction receipt, not a private trading receipt.</small>
-        <a href={`${NETWORKS[network].blockExplorers.default.url}/tx/${result.hash}`} target="_blank" rel="noreferrer">View on explorer <ArrowSquareOut /></a>
+        <a href={transactionExplorerUrl(network, result.hash)} target="_blank" rel="noreferrer">View on explorer <ArrowSquareOut /></a>
       </div>}
     </details>
   );

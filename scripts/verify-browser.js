@@ -20,16 +20,33 @@ const fill = async (selector, value) => {
 const read = () =>
   page.eval(() => JSON.parse(localStorage.getItem("edge-paper-exchange-v1")));
 const clickText = async (text, parent = "body") => {
-  const found = await page.eval(
-    `(() => { const root = document.querySelector(${JSON.stringify(parent)}); const button = [...root.querySelectorAll('button')].find(b => b.innerText.trim() === ${JSON.stringify(text)}); if (!button) return false; button.click(); return true; })()`,
-  );
-  if (!found) throw new Error(`Missing button ${text} in ${parent}`);
+  // Read data from a static function, then use the CLI's selector API. Do not
+  // build executable JavaScript from text, even in a local-only test script.
+  const buttons = await page.eval(() => [...document.querySelectorAll("button")].map((button, index) => {
+    button.dataset.zedgeCheckId = String(index);
+    const scopes = ["body", "dialog", ".account-panel", ".main-nav", ".portfolio-table", ".history-view"];
+    return { id: index, text: button.innerText.trim(), scopes: scopes.filter(scope => Boolean(button.closest(scope))) };
+  }));
+  const found = buttons.find(button => button.text === text && button.scopes.includes(parent));
+  if (!found || !Number.isSafeInteger(found.id) || found.id < 0) throw new Error(`Missing button ${text} in ${parent}`);
+  await page.click(`[data-zedge-check-id="${found.id}"]`);
   await settle();
 };
 const changeType = async (value) => {
-  await page.eval(
-    `(() => { const select = document.querySelector('[name="order-type"]'); select.value = ${JSON.stringify(value)}; select.dispatchEvent(new Event('change', { bubbles: true })); })()`,
-  );
+  if (value !== "market" && value !== "limit") throw new Error("Unknown order type");
+  if (value === "limit") {
+    await page.eval(() => {
+      const select = document.querySelector('[name="order-type"]');
+      select.value = "limit";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+  } else {
+    await page.eval(() => {
+      const select = document.querySelector('[name="order-type"]');
+      select.value = "market";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+  }
   await settle();
 };
 const settings = () => page.click('[aria-label="Demo account settings"]');
@@ -310,7 +327,7 @@ check(
     restored.paused,
   "Paper account and playback preferences survive reload",
 );
-await page.click('[aria-label="How EDGE works"]');
+await page.click('[aria-label="How ZEDGE works"]');
 await page.click(".faq:first-of-type summary");
 check(
   await page.eval(() =>
@@ -323,7 +340,7 @@ check(
 await close();
 check(
   await page.eval(() => document.documentElement.scrollWidth <= innerWidth),
-  "Desktop has no horizontal page overflow",
+  "Current viewport has no horizontal page overflow",
 );
 console.log(
   JSON.stringify(

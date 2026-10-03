@@ -97,6 +97,7 @@ test("production chains, malformed domains and wrong wallet are rejected", async
   assert.throws(() => new EvaluationSession({ ...domain, chainId: 26514 } as unknown as EvaluationDomain, session.account, epoch), /evaluation networks/);
   assert.throws(() => new EvaluationSession({ ...domain, origin: "https://zedge.example/path" }, session.account, epoch), /canonical/);
   assert.throws(() => new EvaluationSession({ ...domain, applicationId: "18446744073709551616" }, session.account, epoch), /domain/);
+  assert.throws(() => new EvaluationSession({ ...domain, applicationId: 1 } as unknown as EvaluationDomain, session.account, epoch), /domain/);
   await assert.rejects(session.unlock(Wallet.createRandom()), /Wrong signer/);
   assert.equal(session.unlocked, false);
 });

@@ -50,10 +50,11 @@ function validateDomain(value: EvaluationDomain): EvaluationDomain {
   if (![31337, 2651420, 84532].includes(value.chainId)) {
     throw new Error("This adapter is limited to evaluation networks.");
   }
-  if (!addressPattern.test(value.endpoint) || value.endpoint === zeroAddress ||
-      !/^[1-9][0-9]{0,19}$/.test(value.applicationId) ||
+  if (typeof value.endpoint !== "string" || !addressPattern.test(value.endpoint) || value.endpoint === zeroAddress ||
+      typeof value.applicationId !== "string" || !/^[1-9][0-9]{0,19}$/.test(value.applicationId) ||
       BigInt(value.applicationId) > (1n << 64n) - 1n ||
-      !hashPattern.test(value.applicationFingerprint) || !hashPattern.test(value.rulesHash)) {
+      typeof value.applicationFingerprint !== "string" || typeof value.rulesHash !== "string" ||
+      !hashPattern.test(value.applicationFingerprint) || !hashPattern.test(value.rulesHash) || typeof value.origin !== "string") {
     throw new Error("Invalid deployment domain.");
   }
   const url = new URL(value.origin);
@@ -68,14 +69,16 @@ function validateDomain(value: EvaluationDomain): EvaluationDomain {
 }
 
 function validateEpoch(epoch: EncryptionEpoch): EncryptionEpoch {
-  if (!/^[1-9][0-9]{0,9}$/.test(epoch.id) ||
-      !/^(0x)?04[0-9a-f]{264}$/.test(epoch.enclavePublicKey)) {
+  if (!epoch || typeof epoch !== "object" || Array.isArray(epoch) ||
+      Object.keys(epoch).sort().join(",") !== "enclavePublicKey,id" ||
+      typeof epoch.id !== "string" || !/^[1-9][0-9]{0,9}$/.test(epoch.id) ||
+      typeof epoch.enclavePublicKey !== "string" || !/^(0x)?04[0-9a-f]{264}$/.test(epoch.enclavePublicKey)) {
     throw new Error("Invalid encryption epoch or uncompressed P-521 key.");
   }
   return Object.freeze({ id: epoch.id, enclavePublicKey: epoch.enclavePublicKey });
 }
 
-function requestIdValid(id: string) { return /^[a-zA-Z0-9:._-]{1,128}$/.test(id); }
+function requestIdValid(id: string) { return typeof id === "string" && /^[a-zA-Z0-9:._-]{1,128}$/.test(id); }
 
 /** A memory-only handle. Lock releases references and invalidates in-flight work;
  * JavaScript/WebCrypto cannot promise physical erasure of wallet signatures/keys.
@@ -89,7 +92,7 @@ export class EvaluationSession {
 
   constructor(domain: EvaluationDomain, account: string, epoch: EncryptionEpoch) {
     this.domain = validateDomain(domain);
-    if (!addressPattern.test(account) || account === zeroAddress) throw new Error("Invalid account.");
+    if (typeof account !== "string" || !addressPattern.test(account) || account === zeroAddress) throw new Error("Invalid account.");
     this.account = account;
     this.epoch = validateEpoch(epoch);
   }

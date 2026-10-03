@@ -6,7 +6,7 @@ export const NETWORKS = {
     name: "Horizen testnet",
     nativeCurrency: { name: "Test Ether", symbol: "ETH", decimals: 18 },
     rpcUrls: { default: { http: ["https://horizen-testnet.rpc.caldera.xyz/http"] } },
-    blockExplorers: { default: { name: "Horizen testnet explorer", url: "https://horizen-testnet.explorer.caldera.xyz" } },
+    blockExplorers: { default: { name: "Horizen testnet explorer", url: "https://explorer-testnet.horizen.io" } },
     testnet: true,
   }),
   26514: defineChain({
@@ -14,7 +14,7 @@ export const NETWORKS = {
     name: "Horizen",
     nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
     rpcUrls: { default: { http: ["https://horizen.calderachain.xyz/http"] } },
-    blockExplorers: { default: { name: "Horizen explorer", url: "https://horizen.explorer.caldera.xyz" } },
+    blockExplorers: { default: { name: "Horizen explorer", url: "https://explorer.horizen.io" } },
   }),
 } as const;
 
@@ -23,6 +23,18 @@ export const DEFAULT_NETWORK: NetworkId = 2651420;
 
 export function isNetworkId(value: unknown): value is NetworkId {
   return value === 2651420 || value === 26514;
+}
+
+export function transactionExplorerUrl(network: NetworkId, hash: string): string {
+  if (!isNetworkId(network)) throw new Error("Unsupported explorer network.");
+  if (typeof hash !== "string" || hash.length !== 66 || !/^0x[0-9a-fA-F]{64}$/.test(hash)) {
+    throw new Error("Invalid transaction hash.");
+  }
+  // Keep the link origin independent of input, manifests and provider responses.
+  const origin = network === 2651420
+    ? "https://explorer-testnet.horizen.io"
+    : "https://explorer.horizen.io";
+  return new URL(`/tx/${encodeURIComponent(hash)}`, origin).href;
 }
 
 export function parseChainId(value: unknown): number {

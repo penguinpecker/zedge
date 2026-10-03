@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import { keccak256, type Address, type Hex } from "viem";
 import { appMode } from "./mode.ts";
-import { DEFAULT_NETWORK, parseAtomicAmount, parseChainId, publicError } from "./networks.ts";
+import { DEFAULT_NETWORK, parseAtomicAmount, parseChainId, publicError, transactionExplorerUrl, type NetworkId } from "./networks.ts";
 import { firstAccount } from "./wallet.ts";
 import { parseManifest, requireTradingReady, verifyDeployment, type ConfiguredManifest, type DeploymentReader } from "./manifest.ts";
 import { observationPrice } from "./gateway.ts";
@@ -66,6 +66,19 @@ test("wallet errors expose actionable categories without echoing sensitive provi
   assert.match(publicError({ code: -32002 }), /already waiting/);
   assert.match(publicError({ code: 4902 }), /not configured/);
   assert.doesNotMatch(publicError(new Error("private-order-plaintext")), /private-order-plaintext/);
+});
+
+test("transaction explorer links accept only full hashes on allowlisted HTTPS origins", () => {
+  const hash = `0x${"aB".repeat(32)}`;
+  assert.equal(transactionExplorerUrl(2651420, hash), `https://explorer-testnet.horizen.io/tx/${hash}`);
+  assert.equal(transactionExplorerUrl(26514, hash), `https://explorer.horizen.io/tx/${hash}`);
+  for (const invalid of [
+    "javascript:alert(1)", "//attacker.example/tx/1", "../settings", "/tx/1?redirect=evil",
+    `${hash}?redirect=evil`, `${hash}#fragment`, `${hash}/../settings`, `${hash}\n`,
+    `${hash}\r`, `${hash}" onclick="alert(1)`, "%30x" + "ab".repeat(32),
+    "0x" + "g".repeat(64), "0x" + "a".repeat(63), "0x" + "a".repeat(65),
+  ]) assert.throws(() => transactionExplorerUrl(2651420, invalid), /Invalid transaction hash/);
+  assert.throws(() => transactionExplorerUrl(1 as NetworkId, hash), /Unsupported explorer network/);
 });
 
 test("deployment manifests fail closed on unknown versions, chain, addresses and policies", () => {
