@@ -6,6 +6,10 @@ A complete interactive interface for short-duration Bitcoin and Ethereum predict
 
 **Privacy architecture:** [Horizen/Vela research and production build plan](research/README.md), including private order books, collateral accounting, settlement, recovery, and Builder Fund research. This is a proposed next phase; the application below remains a paper-trading demo.
 
+**SDK learnings:** [learnings.txt](learnings.txt) records supported primitives, public-order/private-fill limits, operator metadata, sensitive logging, and the implementation work still required.
+
+**Product specification:** [Features, screens, popups, and interaction requirements](research/product-requirements.md) distinguishes existing demo behavior from the production work required.
+
 ## Run
 
 Use Node.js 22.12 or newer. No API keys or environment variables are required.
