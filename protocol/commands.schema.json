@@ -1,0 +1,833 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/penguinpecker/zedge/protocol/commands.schema.json",
+  "title": "ZEDGE canonical engine command v1",
+  "description": "Structural checks only. Engine additionally enforces canonical JSON order/omission, domain, authorization, nonce, oracle timing, capacities and accounting. AuthenticatedContext is never accepted here.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "domain",
+    "id",
+    "nonce",
+    "op"
+  ],
+  "properties": {
+    "domain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "chainId",
+        "endpoint",
+        "applicationId",
+        "rulesVersion"
+      ],
+      "properties": {
+        "chainId": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000000000000
+        },
+        "endpoint": {
+          "type": "string",
+          "pattern": "^0x[0-9a-f]{40}$",
+          "not": {
+            "const": "0x0000000000000000000000000000000000000000"
+          }
+        },
+        "applicationId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9_.-]+$"
+        },
+        "rulesVersion": {
+          "const": 1
+        }
+      }
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^0x[0-9a-f]{40}:[1-9][0-9]{0,15}$"
+    },
+    "nonce": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000000000000000
+    },
+    "op": {
+      "enum": [
+        "register",
+        "deposit",
+        "create_round",
+        "open_round",
+        "checkpoint",
+        "mint",
+        "merge",
+        "place_order",
+        "cancel_order",
+        "cancel_all",
+        "resolve_round",
+        "void_round",
+        "redeem",
+        "request_withdrawal",
+        "cancel_withdrawal",
+        "export_withdrawal",
+        "confirm_claim"
+      ]
+    },
+    "account": {
+      "type": "string",
+      "pattern": "^0x[0-9a-f]{40}$",
+      "not": {
+        "const": "0x0000000000000000000000000000000000000000"
+      }
+    },
+    "roundId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "round": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "asset",
+        "feed",
+        "start",
+        "end",
+        "cutoff",
+        "observationWindow",
+        "openingDeadline",
+        "resolutionDeadline"
+      ],
+      "properties": {
+        "asset": {
+          "enum": [
+            "BTC",
+            "ETH"
+          ]
+        },
+        "feed": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9_.-]+$"
+        },
+        "start": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000000000000
+        },
+        "end": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000000000000
+        },
+        "cutoff": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000000000000
+        },
+        "observationWindow": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 60
+        },
+        "openingDeadline": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000000000000
+        },
+        "resolutionDeadline": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000000000000
+        }
+      }
+    },
+    "amount": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000000000000000
+    },
+    "outcome": {
+      "enum": [
+        "up",
+        "down"
+      ]
+    },
+    "side": {
+      "enum": [
+        "buy",
+        "sell"
+      ]
+    },
+    "price": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 99
+    },
+    "quantity": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000000000000000,
+      "multipleOf": 1000
+    },
+    "tif": {
+      "enum": [
+        "gtc",
+        "ioc"
+      ]
+    },
+    "expiry": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000000000000000
+    },
+    "maxFee": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1000000000000000
+    },
+    "orderId": {
+      "type": "string",
+      "pattern": "^0x[0-9a-f]{40}:[1-9][0-9]{0,15}$"
+    },
+    "withdrawalId": {
+      "type": "string",
+      "pattern": "^0x[0-9a-f]{40}:[1-9][0-9]{0,15}$"
+    },
+    "destination": {
+      "type": "string",
+      "pattern": "^0x[0-9a-f]{40}$",
+      "not": {
+        "const": "0x0000000000000000000000000000000000000000"
+      }
+    },
+    "evidence": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "observedAt": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000000000000000
+    },
+    "oraclePrice": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000000000000000
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "op": {
+            "const": "register"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "domain",
+          "id",
+          "nonce",
+          "op",
+          "account"
+        ],
+        "properties": {
+          "roundId": false,
+          "round": false,
+          "amount": false,
+          "outcome": false,
+          "side": false,
+          "price": false,
+          "quantity": false,
+          "tif": false,
+          "expiry": false,
+          "maxFee": false,
+          "orderId": false,
+          "withdrawalId": false,
+          "destination": false,
+          "evidence": false,
+          "observedAt": false,
+          "oraclePrice": false
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "op": {
+            "const": "deposit"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "domain",
+          "id",
+          "nonce",
+          "op",
+          "amount",
+          "evidence",
+          "account"
+        ],
+        "properties": {
+          "roundId": false,
+          "round": false,
+          "outcome": false,
+          "side": false,
+          "price": false,
+          "quantity": false,
+          "tif": false,
+          "expiry": false,
+          "maxFee": false,
+          "orderId": false,
+          "withdrawalId": false,
+          "destination": false,
+          "observedAt": false,
+          "oraclePrice": false
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "op": {
+            "const": "create_round"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "domain",
+          "id",
+          "nonce",
+          "op",
+          "round"
+        ],
+        "properties": {
+          "account": false,
+          "roundId": false,
+          "amount": false,
+          "outcome": false,
+          "side": false,
+          "price": false,
+          "quantity": false,
+          "tif": false,
+          "expiry": false,
+          "maxFee": false,
+          "orderId": false,
+          "withdrawalId": false,
+          "destination": false,
+          "evidence": false,
+          "observedAt": false,
+          "oraclePrice": false
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "op": {
+            "const": "open_round"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "domain",
+          "id",
+          "nonce",
+          "op",
+          "roundId",
+          "evidence",
+          "observedAt",
+          "oraclePrice"
+        ],
+        "properties": {
+          "account": false,
+          "round": false,
+          "amount": false,
+          "outcome": false,
+          "side": false,
+          "price": false,
+          "quantity": false,
+          "tif": false,
+          "expiry": false,
+          "maxFee": false,
+          "orderId": false,
+          "withdrawalId": false,
+          "destination": false
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "op": {
+            "const": "checkpoint"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "domain",
+          "id",
+          "nonce",
+          "op"
+        ],
+        "properties": {
+          "account": false,
+          "roundId": false,
+          "round": false,
+          "amount": false,
+          "outcome": false,
+          "side": false,
+          "price": false,
+          "quantity": false,
+          "tif": false,
+          "expiry": false,
+          "maxFee": false,
+          "orderId": false,
+          "withdrawalId": false,
+          "destination": false,
+          "evidence": false,
+          "observedAt": false,
+          "oraclePrice": false
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "op": {
+            "const": "mint"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "domain",
+          "id",
+          "nonce",
+          "op",
+          "roundId",
+          "quantity",
+          "account"
+        ],
+        "properties": {
+          "round": false,
+          "amount": false,
+          "outcome": false,
+          "side": false,
+          "price": false,
+          "tif": false,
+          "expiry": false,
+          "maxFee": false,
+          "orderId": false,
+          "withdrawalId": false,
+          "destination": false,
+          "evidence": false,
+          "observedAt": false,
+          "oraclePrice": false
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "op": {
+            "const": "merge"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "domain",
+          "id",
+          "nonce",
+          "op",
+          "roundId",
+          "quantity",
+          "account"
+        ],
+        "properties": {
+          "round": false,
+          "amount": false,
+          "outcome": false,
+          "side": false,
+          "price": false,
+          "tif": false,
+          "expiry": false,
+          "maxFee": false,
+          "orderId": false,
+          "withdrawalId": false,
+          "destination": false,
+          "evidence": false,
+          "observedAt": false,
+          "oraclePrice": false
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "op": {
+            "const": "place_order"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "domain",
+          "id",
+          "nonce",
+          "op",
+          "roundId",
+          "outcome",
+          "side",
+          "price",
+          "quantity",
+          "tif",
+          "expiry",
+          "account"
+        ],
+        "properties": {
+          "round": false,
+          "amount": false,
+          "orderId": false,
+          "withdrawalId": false,
+          "destination": false,
+          "evidence": false,
+          "observedAt": false,
+          "oraclePrice": false
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "op": {
+            "const": "cancel_order"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "domain",
+          "id",
+          "nonce",
+          "op",
+          "orderId",
+          "account"
+        ],
+        "properties": {
+          "roundId": false,
+          "round": false,
+          "amount": false,
+          "outcome": false,
+          "side": false,
+          "price": false,
+          "quantity": false,
+          "tif": false,
+          "expiry": false,
+          "maxFee": false,
+          "withdrawalId": false,
+          "destination": false,
+          "evidence": false,
+          "observedAt": false,
+          "oraclePrice": false
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "op": {
+            "const": "cancel_all"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "domain",
+          "id",
+          "nonce",
+          "op",
+          "account"
+        ],
+        "properties": {
+          "round": false,
+          "amount": false,
+          "outcome": false,
+          "side": false,
+          "price": false,
+          "quantity": false,
+          "tif": false,
+          "expiry": false,
+          "maxFee": false,
+          "orderId": false,
+          "withdrawalId": false,
+          "destination": false,
+          "evidence": false,
+          "observedAt": false,
+          "oraclePrice": false
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "op": {
+            "const": "resolve_round"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "domain",
+          "id",
+          "nonce",
+          "op",
+          "roundId",
+          "evidence",
+          "observedAt",
+          "oraclePrice"
+        ],
+        "properties": {
+          "account": false,
+          "round": false,
+          "amount": false,
+          "outcome": false,
+          "side": false,
+          "price": false,
+          "quantity": false,
+          "tif": false,
+          "expiry": false,
+          "maxFee": false,
+          "orderId": false,
+          "withdrawalId": false,
+          "destination": false
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "op": {
+            "const": "void_round"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "domain",
+          "id",
+          "nonce",
+          "op",
+          "roundId",
+          "evidence"
+        ],
+        "properties": {
+          "account": false,
+          "round": false,
+          "amount": false,
+          "outcome": false,
+          "side": false,
+          "price": false,
+          "quantity": false,
+          "tif": false,
+          "expiry": false,
+          "maxFee": false,
+          "orderId": false,
+          "withdrawalId": false,
+          "destination": false,
+          "observedAt": false,
+          "oraclePrice": false
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "op": {
+            "const": "redeem"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "domain",
+          "id",
+          "nonce",
+          "op",
+          "roundId",
+          "account"
+        ],
+        "properties": {
+          "round": false,
+          "amount": false,
+          "outcome": false,
+          "side": false,
+          "price": false,
+          "quantity": false,
+          "tif": false,
+          "expiry": false,
+          "maxFee": false,
+          "orderId": false,
+          "withdrawalId": false,
+          "destination": false,
+          "evidence": false,
+          "observedAt": false,
+          "oraclePrice": false
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "op": {
+            "const": "request_withdrawal"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "domain",
+          "id",
+          "nonce",
+          "op",
+          "amount",
+          "destination",
+          "account"
+        ],
+        "properties": {
+          "roundId": false,
+          "round": false,
+          "outcome": false,
+          "side": false,
+          "price": false,
+          "quantity": false,
+          "tif": false,
+          "expiry": false,
+          "maxFee": false,
+          "orderId": false,
+          "withdrawalId": false,
+          "evidence": false,
+          "observedAt": false,
+          "oraclePrice": false
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "op": {
+            "const": "cancel_withdrawal"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "domain",
+          "id",
+          "nonce",
+          "op",
+          "withdrawalId",
+          "account"
+        ],
+        "properties": {
+          "roundId": false,
+          "round": false,
+          "amount": false,
+          "outcome": false,
+          "side": false,
+          "price": false,
+          "quantity": false,
+          "tif": false,
+          "expiry": false,
+          "maxFee": false,
+          "orderId": false,
+          "destination": false,
+          "evidence": false,
+          "observedAt": false,
+          "oraclePrice": false
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "op": {
+            "const": "export_withdrawal"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "domain",
+          "id",
+          "nonce",
+          "op",
+          "withdrawalId",
+          "evidence"
+        ],
+        "properties": {
+          "account": false,
+          "roundId": false,
+          "round": false,
+          "amount": false,
+          "outcome": false,
+          "side": false,
+          "price": false,
+          "quantity": false,
+          "tif": false,
+          "expiry": false,
+          "maxFee": false,
+          "orderId": false,
+          "destination": false,
+          "observedAt": false,
+          "oraclePrice": false
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "op": {
+            "const": "confirm_claim"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "domain",
+          "id",
+          "nonce",
+          "op",
+          "withdrawalId",
+          "evidence"
+        ],
+        "properties": {
+          "account": false,
+          "roundId": false,
+          "round": false,
+          "amount": false,
+          "outcome": false,
+          "side": false,
+          "price": false,
+          "quantity": false,
+          "tif": false,
+          "expiry": false,
+          "maxFee": false,
+          "orderId": false,
+          "destination": false,
+          "observedAt": false,
+          "oraclePrice": false
+        }
+      }
+    }
+  ]
+}

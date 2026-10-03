@@ -4,7 +4,9 @@ A complete interactive interface for short-duration Bitcoin and Ethereum predict
 
 **Live:** https://zedge-markets.vercel.app
 
-**Privacy architecture:** [Horizen/Vela research and production build plan](research/README.md), including private order books, collateral accounting, settlement, recovery, and Builder Fund research. This is a proposed next phase; the application below remains a paper-trading demo.
+**Implementation work:** [Contracts](contracts/README.md), [the collateralized Go matching engine](engine/README.md), [protocol](protocol/README.md), and [security checks and remaining release work](security/README.md) are now in development. Run `http://127.0.0.1:4188/?mode=chain` for the separate real-chain interface. It reads Horizen and supports wallet connection; private trading/funding stays unavailable until the required deployments and integrations are verified. No contracts have been deployed by this build.
+
+**Privacy architecture:** [Horizen/Vela research and production build plan](research/README.md), including private order books, collateral accounting, settlement, recovery, and Builder Fund research. The public application below remains a paper-trading demo; the new foundations do not yet constitute a deployed confidential exchange.
 
 **SDK learnings:** [learnings.txt](learnings.txt) records supported primitives, public-order/private-fill limits, operator metadata, sensitive logging, and the implementation work still required.
 

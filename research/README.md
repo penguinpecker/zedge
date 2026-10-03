@@ -4,7 +4,7 @@
 
 **Decision:** retain the selected ZEDGE V1 interface and build an original, deterministic, fully collateralized prediction-market engine. Isolate Vela behind an integration boundary. Use Vela first for encrypted orders, account state, and participant receipts in an approved test environment. Production activation depends on the gates below.
 
-The current public application remains a paper-trading prototype. This research does not add a live order book, wallet, privacy service, or production deployment.
+The current public application remains a paper-trading prototype. Implementation has started in [contracts](../contracts/README.md), [engine](../engine/README.md), the isolated chain interface and SDK crypto evaluation. See the [security/implementation record](../security/README.md) for actual work and unresolved boundaries. This research itself does not establish a deployed private exchange.
 
 ## Read the research
 

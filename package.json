@@ -8,14 +8,20 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview --host 127.0.0.1 --port 4188",
     "lint": "oxlint --deny-warnings src",
-    "test": "node --experimental-strip-types --test src/lib/market.test.ts"
+    "test": "node --experimental-strip-types --test src/lib/market.test.ts src/chain/*.test.ts",
+    "check": "npm run lint && npm test && npm run build",
+    "test:engine": "cd engine && go test -race ./... && go vet ./...",
+    "test:contracts": "cd contracts && forge test",
+    "test:crypto": "npm --prefix adapters/vela/crypto run check && npm --prefix adapters/vela/crypto test",
+    "test:protocol": "node scripts/verify-protocol.mjs"
   },
   "dependencies": {
-    "@phosphor-icons/react": "^2.1.10",
     "@fontsource-variable/manrope": "^5.2.8",
     "@fontsource/ibm-plex-mono": "^5.2.7",
+    "@phosphor-icons/react": "^2.1.10",
     "react": "^19.2.8",
-    "react-dom": "^19.2.8"
+    "react-dom": "^19.2.8",
+    "viem": "2.57.2"
   },
   "devDependencies": {
     "@types/node": "^24.13.3",

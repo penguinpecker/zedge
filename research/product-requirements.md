@@ -12,7 +12,7 @@ Reviewed 2026-10-04. This document turns the selected V1 interface and the priva
 - **Conditional:** depends on an explicit product, deployment, provider, or operating decision. No dormant button should imply availability.
 - **Backend:** an authoritative service, contract, ledger, or verified encrypted receipt is required. Browser state cannot grant balances, fills, cancellations, or settlement.
 
-Requirement IDs are stable. `REQ-*` defines behavior; `UI-*` defines a route or screen; `DLG-*` defines a dialog or drawer; `INT-*` defines a small interaction; `STATE-*` defines a reusable state; `QA-*` defines acceptance scenarios. A dialog inherits the shared interaction contract below and adds its specific validations and outcomes.
+Requirement IDs are stable. `REQ-*` defines behavior; `UI-*` defines a route or screen; `DLG-*` defines an interaction flow, not a requirement for a separate popup; `INT-*` defines a small interaction; `STATE-*` defines a reusable state; `QA-*` defines acceptance scenarios. The presentation decisions below consolidate those flows without removing their authorization or financial requirements.
 
 Source baseline: [current V1 README](../README.md), [App.tsx](../src/App.tsx), [TradeTicket.tsx](../src/components/TradeTicket.tsx), [MarketBoard.tsx](../src/components/MarketBoard.tsx), [AccountPanels.tsx](../src/components/AccountPanels.tsx), [Primitives.tsx](../src/components/Primitives.tsx), [market.ts](../src/lib/market.ts), [architecture](private-orderbook-architecture.md), [Vela review](vela-protocol.md), [latest SDK learnings](../learnings.txt). Read the latest learnings alongside the older research: recipient metadata and the raw-result logging path add privacy gates.
 
@@ -32,6 +32,52 @@ Source baseline: [current V1 README](../README.md), [App.tsx](../src/App.tsx), [
 | Accessibility/mobile | Native dialogs, focus handling, skip link, reduced motion, responsive layouts | Every new async and financial flow needs equivalent behavior and verification |
 
 The demo's 1% fee, five-second cutoff, three-second resolution delay, seed balances, playback controls, and synthetic probability model are not production parameters. Retain the chosen charcoal/lime ZEDGE V1 identity; this inventory is not a redesign request.
+
+## Privacy-led interface revision
+
+The 45 `DLG-*` entries cover behavior; they must **not become 45 standalone popups**. Keep the selected V1 layout and make private trading a persistent account experience. Protected fields are private by design after the deployment is verified, not through a per-order privacy toggle. This is the implementation direction; it does not imply that the backend is deployed.
+
+| Privacy feature | Where it belongs | Required interaction |
+| --- | --- | --- |
+| Private orderbook | Existing round workspace, **Orderbook → Quotes / My orders** | Quotes shows only the selected published information and its age. My orders shows the user's exact orders after unlock. Unlock never reveals the global private book. |
+| Private fills and order management | Persistent **Orders / Fills** tabs | Partial fills and cancellation progress update inline. Open an activity drawer for a receipt. No automatic popup on each fill. |
+| Private balances | Header/account context and Portfolio | Distinguish available, reserved and withdrawing amounts. Locked or unreadable is not zero. The balance eye button only masks the display; account lock clears private data from the session. |
+| Private positions and P&L | Positions tab and Portfolio | Selling prefills the existing ticket. Show cost-basis method and exact round; no second trading ticket in a popup. |
+| Private trading history | History | Filter locally authorized records and open individual receipts. Unknown key epochs or failed decryption show unavailable records rather than empty history. |
+| Private LP inventory | Separate liquidity workspace | Mint/merge and inventory controls belong to LPs. The exchange still needs real funded liquidity even if retail users do not see LP controls. |
+| Controlled private reports | History export and Help/support | Preview fields, time range and recipient before disclosure. An authorized protocol audit follows its separate governed policy; it is not a voluntary support toggle. |
+| Conditional private orders | Later | Add only when trigger, price, cutoff and authorization behavior actually exists. No disabled stop-loss/take-profit menus in the first release. |
+
+Use **six reusable surface families**. The same review component may serve multiple operations, but it must preserve their distinct amounts, signatures, consequences and confirmed stages.
+
+| Surface | Flow coverage | Presentation |
+| --- | --- | --- |
+| Search | `DLG-01` | One search drawer/command palette. |
+| Account access | `DLG-02`, `DLG-03`, `DLG-05`, `DLG-06`, `DLG-08`, `DLG-09` | Progressive connect → network → key setup/unlock. Wallet connection, secret key-derivation signature and key registration remain separate authorizations. No stacked app dialogs. |
+| Action review | `DLG-13`, `DLG-14`, `DLG-15`, `DLG-17`, `DLG-19`, `DLG-23`, `DLG-26`, `DLG-27`, `DLG-32` | Shared sheet with action-specific fields. Approval, deposit, redemption, withdrawal and public claim are separate operations even when presented in one funding flow. |
+| Activity detail | `DLG-16`, `DLG-18`, `DLG-24`, `DLG-25`, `DLG-30` | Durable operation timeline and receipts, opened on request. A submitted transaction is not order acceptance, a fill or a credited balance. |
+| Information | `DLG-07`, `DLG-29`, `DLG-33`, `DLG-42` | Contextual rules/privacy/help drawer. Keep essential fees, cutoff and public funding metadata visible at the decision itself. Technical fingerprints belong in expanded details. |
+| Sensitive change | `DLG-10`, destructive part of `DLG-38`, disclosure step of `DLG-36`/`DLG-37` | Confirm key changes, irreversible local key deletion or chosen private disclosure. Name the exact consequence and recovery limitation; no generic “Confirm” prompt. |
+
+Remaining flows use persistent views, lightweight controls or audience-specific surfaces:
+
+| Flow coverage | Disposition |
+| --- | --- |
+| `DLG-04` | Account popover with disconnect; explain that disconnect does not cancel orders or move funds. |
+| `DLG-11` | Recovery information on Account & Privacy; offer only recovery procedures actually implemented. |
+| `DLG-28` | Prefill the existing sell ticket and use its normal review; no additional sell-position dialog. |
+| `DLG-34` | Notification popover. Financial status remains in durable Activity. |
+| `DLG-35` | Settings page or inline preferences. |
+| `DLG-36`, `DLG-37` | History/Help forms; use Sensitive change only for the final private-data disclosure step. |
+| Local lock in `DLG-38` | Immediate inline action, no confirmation. Distinguish locking from deleting recovery material. |
+| `DLG-21`, `DLG-22` | LP workspace; use shared review/activity components where appropriate. |
+| `DLG-44`, `DLG-45` | Separate authenticated audit/operator console, absent from the retail bundle. |
+| `DLG-39`, `DLG-40`, `DLG-41` | Demo only; never mounted as real-chain funding or execution controls. |
+| `DLG-12`, `DLG-20`, `DLG-31`, `DLG-43` | Conditional on actual session delegation, bridging, disputes or eligibility integrations. No pretend controls. |
+
+Routine single-order cancellation, local locking, filters and tab changes stay inline. A pending cancel remains pending until confirmed; an earlier fill can still win the race. Review is required for signed financial changes, changed price/fee terms and sensitive disclosure. Round rollover, account/network changes and unknown submission reconciliation retain their existing requirements after consolidation.
+
+Acceptance additions: switching to chain mode cannot mount demo account state; locking during an asynchronous signature cannot silently unlock the account again; changing wallet/network invalidates earlier verification; no global book appears after unlocking; incomplete history is not exported as complete without disclosure; mobile modal sheets trap/restore focus while inline panels do not.
 
 ## Product contract and explicit boundaries
 
@@ -217,13 +263,13 @@ Paths below describe logical routes; the implementation may retain hash routing.
 
 ### Shared interaction contract (applies to every DLG)
 
-**Modal mechanics:** one active task dialog; transitions replace its step rather than stacking arbitrary popups. A secondary explanation can be a nonmodal popover. Use a drawer/full-screen presentation on small screens with identical semantics. Title, close control, active step, primary/secondary actions, focus trap/restore and keyboard behavior are required.
+**Presentation mechanics:** apply the privacy-led consolidation above. For an actual modal, use one active task dialog; transitions replace its step rather than stacking arbitrary popups. A secondary explanation can be a nonmodal popover. Modal drawers/full-screen sheets require a title, close control, appropriate step/actions, focus trap/restore and keyboard behavior. Persistent pages, inline panels and nonmodal popovers must not acquire a modal focus trap. The wallet provider's own signing prompt is separate from the app's surface.
 
 **Fields:** labels include units; required/optional status and errors are associated programmatically. Preserve valid user input through recoverable errors. Validate locally for feedback and authoritatively before mutation. Disable duplicate submission while preserving a readable reason. A loading spinner never hides amount, destination, market or chosen action.
 
 **Async states:** every operation supports idle, validation error, awaiting wallet, rejected by wallet, submitted/unknown, pending, confirmed, rejected/failed and reconciliation as relevant. Read-only dialogs support loading, data, empty, stale and unavailable. A receipt/operation ID survives dialog dismissal and refresh. The user can close a pending dialog to return to the app; closing does not cancel a broadcast/accepted operation.
 
-**Dismissal:** Escape/backdrop closes ordinary read-only views; explicit close/back are always available. Warn only when discarding meaningful unsent input. For a pending wallet/chain action, explain it continues and offer “View activity.” Do not trap users in indefinite spinners. Reopening restores the correct account/round/operation, not a new submission. Browser back and mobile back behave consistently.
+**Dismissal:** Escape/backdrop closes ordinary read-only overlays; persistent views use normal navigation. Explicit close/back is available on overlays. Warn only when discarding meaningful unsent input. For a pending wallet/chain action, explain it continues and offer “View activity.” Do not trap users in indefinite spinners. Reopening restores the correct account/round/operation, not a new submission. Browser back and mobile back behave consistently.
 
 **Completion:** success copy names the confirmed stage. Preserve transaction/reference links and next action. On failure state whether any funds/order change happened, retain safe retry context, and query unknown outcomes before resubmitting. No automatic wallet request when a dialog is reopened. User-facing errors omit secret payloads.
 

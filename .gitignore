@@ -31,3 +31,13 @@ evidence/
 *.tar.gz
 .DS_Store
 *.log
+
+# Contract/compiler outputs and local deployment transactions
+contracts/lib/
+contracts/out/
+contracts/cache/
+contracts/broadcast/
+adapters/**/build/
+*.wasm
+security/reports/
+engine/coverage.out

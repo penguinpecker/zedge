@@ -325,3 +325,37 @@ Update this record when code, permissions, deployment configuration or tests
 change. Keep "supported primitive", "custom application work", "inferred risk"
 and "demonstrated deployment behavior" distinct. Never promote a proposal or a
 successful local emulator run into a production confidentiality claim.
+
+Implementation checkpoint — 2026-10-04
+--------------------------------------
+Original contracts, a deterministic Go collateralized matching engine, canonical
+protocol definitions, isolated Vela SDK crypto tests and a separate real-chain
+frontend now exist. See security/README.md for the actual implementation boundary.
+No funded public-chain deployment or native Vela guest integration is complete.
+
+The interface plan now treats the 45 DLG entries as behavior coverage and uses
+six shared surface families: search, account access, action review, activity
+detail, information and sensitive-change confirmation. Private orderbook/fills,
+balances, positions, history and P&L belong in persistent account views. Privacy
+is not a per-order toggle. Demo and chain components mount separately.
+
+New evidence from actual SDK tests: the key helper appends signer.getAddress()
+verbatim. Different address casing can derive different keys for the same wallet.
+The evaluation wrapper supplies a canonical lowercase address and binds the
+challenge to deployment, origin and epoch. Regression tests cover casing,
+receipt-domain property order and lock races during wallet signing/account reads.
+
+The pinned SDK has one underlying unresolved elliptic advisory,
+GHSA-848j-6mx2-7j84, reported as two Low npm entries including its parent. It is
+isolated from the frontend; automated tests do not remove that dependency risk.
+
+Local EVM round results drive test ledger lifecycles for all four market types.
+Native Go and TinyGo WASI outputs match. Test oracle evidence is unsigned and the
+collateral fixture only supplies token identity. These tests do not demonstrate
+live Pyth verification, token custody, Nitro attestation or operator privacy.
+
+Production still requires supported Vela access/terms, authentic request and
+commit-time verification, real oracle deployment, native guest integration,
+encrypted persistence/archival, custody/exit recovery, capacity tests and an
+independent security audit. A funded deployment wallet alone cannot close these
+dependencies. No claim of "production-ready" follows from compiling this build.

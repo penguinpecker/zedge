@@ -1,0 +1,11 @@
+node_modules/
+lib/
+out/
+cache/
+broadcast/
+reports/*.json
+reports/*.sarif
+reports/*.txt
+lcov.info
+.env
+.env.*
