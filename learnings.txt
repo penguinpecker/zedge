@@ -1,0 +1,327 @@
+ZEDGE — HORIZEN / VELA SDK AND CONFIDENTIAL TRADING LEARNINGS
+Source review date: 2026-10-04 (Asia/Kolkata)
+
+Purpose
+-------
+Record the source-backed findings from our Vela research, especially whether
+public orders can coexist with private fills, what the SDK supplies, and what
+ZEDGE must implement or validate before a production privacy claim.
+
+Evidence level: source inspection, independent agent cross-checks, and the
+read-only network observations recorded in the research reports. We have not
+demonstrated these flows in a running ZEDGE Nitro enclave, audited the platform,
+benchmarked production execution, or observed a live deployment leaking data.
+The current ZEDGE application remains a paper-trading interface.
+
+Reviewed versions
+-----------------
+SDK: @horizen/vela-common-ts 0.2.0
+SDK commit: c9d28e4107d08ed4a570449a577ac07089891344
+Vela core: v0.2.0
+Core commit: 335724c95ba7b58d64ec97bbb67d18640123278e
+Shared Go types commit: fb4e716f197a4d761350f5d93a97708b5d972bee
+
+The SDK's npm version and GitHub source were cross-checked during the review.
+These pins identify inspected code, not the version of an unknown hosted
+deployment. Recheck releases and the actual deployment before integration.
+
+1. DIRECT ANSWER: PUBLIC ORDERS AND PRIVATE FILLS
+------------------------------------------------
+Yes: an application can publish selected order information while keeping fill
+records, account balances, and positions in encrypted state and returning
+encrypted personal receipts.
+
+That does not mean the occurrence, price, size, or participants of every fill
+will remain secret. Public order flow, exact book changes, receipt metadata,
+funding transfers, and the application's own outputs can reveal information.
+Executing inside a TEE does not undo information disclosed outside it.
+
+Example: if all relevant orders and deterministic priority are public, a
+100-share Up ask at 60 cents and a crossing 40-share buy may make the resulting
+40-share fill at 60 cents reconstructible without decrypting its receipt.
+
+A displayed remaining quantity falling from 100 to 60 reveals a 40-share
+reduction. That alone does not distinguish a fill from cancellation/amendment;
+public cancellation information or other observations may remove the ambiguity.
+
+Public quotes or initial order announcements disclose less than a complete,
+continuously updated, individually identified order book. Withholding updates
+can also make announced liquidity stale. The interface must label what its
+public feed represents and must not present stale announcements as guaranteed
+executable liquidity.
+
+2. WHAT THE SDK AND PLATFORM ACTUALLY SUPPLY
+-------------------------------------------
+Encrypted order instructions:
+  The SDK has encryptForTee(). It obtains the configured enclave public key and
+  encrypts the payload. submitRequest() submits supplied bytes; it does not
+  automatically call encryptForTee(). [S1]
+
+Encrypted personal execution receipts:
+  User events support arbitrary recipient-encrypted application data. ZEDGE can
+  define fill, order-status, balance, and position response schemas. There is no
+  built-in prediction-market fill schema or exchange engine. [S1, S2, S3]
+
+Confidential balances, positions, and P&L:
+  The platform encrypts persisted application state. We can implement account
+  and share ledgers inside it, subject to correct authorization/accounting and
+  the output/logging issues described below. Encryption is not proof of
+  solvency or financial correctness. [S2, S3]
+
+Public quotes and selected liquidity:
+  AppEvent is an intentionally public output channel. The application chooses
+  which fields to publish. Full exact depth, aggregate depth, and delayed quotes
+  have different information-disclosure consequences. [S1, S2, S4]
+
+Limit orders, partial fills, cancellation, minting, merging and redemption:
+  These are custom ZEDGE application logic. The generic SDK does not implement
+  the matching rules, collateral model, market lifecycle, or settlement oracle.
+
+Private conditional orders:
+  A possible later application feature, not a supplied order type. Trigger
+  thresholds can be private state, but authenticated price/time inputs, workload,
+  output policy and deadline handling still need engineering and validation.
+
+Hidden wallet identities and funding:
+  Not supplied by the normal request/deposit/withdrawal flow. Gas sponsorship
+  does not hide the recorded sender or facilitator. [S4, S5]
+
+Hidden per-fill public token transfers:
+  A normal public ERC-20 or outcome-token transfer exposes information even if
+  a TEE decided to perform it. Internal collateral/share ledger updates can
+  avoid a public token transfer for each fill; later funding and withdrawal
+  activity remains observable.
+
+Fast, fair five-minute markets:
+  The SDK establishes neither a latency guarantee nor fair sequencing. Measure
+  the full request/cancel/settlement path and validate timing before promising
+  the experience. A fast chart or submission acknowledgement is not a fill.
+
+3. ACTUAL INPUT, STATE, AND OUTPUT FLOW
+--------------------------------------
+Proposed ZEDGE flow using the reviewed primitives:
+
+  Browser encrypts a signed/authorized order intent
+    -> on-chain request and outside-enclave manager
+    -> enclave decrypts and runs custom ZEDGE WASM
+    -> internal collateral/share ledger and order state change
+    -> encrypted participant receipts + deliberately selected public outputs
+    -> signed state transition accepted on chain
+
+Normal PROCESS payloads are decrypted before WASM execution. Sending plaintext
+through ordinary submitRequest() is not a valid public-order toggle. The
+contract-trigger TRUSTPROCESS path is a separate plaintext-input route. For a
+public order feed, encrypt the ordinary request and explicitly publish approved
+order or quote fields as application output. [S3]
+
+The application result separates State, user Events, AppEvents, Withdrawals,
+Report, Fuel and Error. User-event contents are encrypted for registered user
+keys. AppEvents are not encrypted by that path. The SDK's getCurrentUserEvents()
+decrypts user events, whereas getAppEvents() reads public application data.
+Do not place private fill fields into AppEvents, withdrawals, error messages,
+logs, analytics, URLs or other public output channels. [S1, S2, S3]
+
+4. WHAT PUBLIC CHAIN OBSERVERS CAN STILL SEE
+-------------------------------------------
+The standard flow exposes request/application identifiers, sender/facilitator,
+funding amounts and assets, timing, state roots, completion/error information,
+runtime fees/refunds, and withdrawal recipient/token/amount. Encrypted events
+still expose event count, ciphertext lengths, request association and subtypes.
+UserEvent itself has no public recipient-address field. [S4, S5, S6]
+
+An application subtype meaning FILL can disclose that a fill occurred even when
+the contents are encrypted. Optional seeded subtypes obscure semantic labels,
+but do not remove timing, counts, request linkage or other inference. [S3, S7]
+
+The public application fee is the Vela runtime fee, not necessarily ZEDGE's
+trading commission. Computation-dependent fees can become another information
+channel. Public roots are commitments, not a public plaintext account ledger
+or a proof that the custom financial rules are correct. [S3, S6]
+
+Traders learn their own executions and can disclose them. Do not promise that
+fills are secret from everybody or that encrypted execution is anonymous.
+
+5. VERIFIED OPERATOR METADATA: RECEIPT RECIPIENTS
+------------------------------------------------
+The stock outside-enclave manager receives more information than the public
+UserEvent shows:
+
+  a. common.Event includes plaintext UserID, serialized as userId, alongside
+     ciphertext. UpdatePayload includes these events. [S8]
+  b. encryptEvents() encrypts event contents but retains the UserID field. [S3]
+  c. The executor communication response returns the update payload to the
+     manager. [S9]
+  d. The blockchain client copies ciphertext and subtype into the on-chain
+     event arrays and omits UserID there. [S10]
+
+Consequently, emitting a maker receipt and a taker receipt for one match can
+let the operator associate both recipient wallets with the same request.
+This is source-evidenced recipient metadata disclosure; it is not evidence
+that the manager decrypts the encrypted receipts.
+
+Hiding trading relationships from the operator requires additional work on
+the notification/output protocol. Deferred retrieval, batching, padding or
+removing unnecessary recipient metadata are design candidates, not existing
+SDK guarantees. Their remaining correlation and availability risks need review.
+
+6. SOURCE-IDENTIFIED SENSITIVE LOGGING PATH
+------------------------------------------
+The reviewed WASM runtime logs the complete raw deposit result at INFO before
+parsing it. DepositResult contains application State and user Events. These
+are application outputs before the executor's later encryption step. [S2, S11]
+
+The executor defaults to the network logger and INFO network level. The same
+logger is supplied to the runtime; the provided network logger writes messages
+over its connection, and the manager includes a receiving log server. [S12]
+
+This is a concrete output path requiring removal/redaction and verification in
+the target deployment. Do not claim account state is hidden from the operator
+solely because persisted state and user receipts are encrypted.
+
+Confidence boundary: this finding comes from static source tracing. We have
+not observed a real Nitro deployment leaking state, demonstrated an exploit,
+or established how any third-party hosted deployment is configured.
+
+7. OTHER SDK DETAILS THAT AFFECT IMPLEMENTATION
+----------------------------------------------
+- The documented VelaClient boolean is labeled useSoftwareTEE, but the reviewed
+  implementation calls it useAlternativeSign and uses it for wallet signing.
+  It is not a hardware-attestation or privacy switch. [S1, S13]
+- User encryption-key derivation uses a wallet signature over a default
+  challenge formed from "horizen" and the wallet address. The signature must be
+  treated as sensitive key-derivation material, not a shareable login proof.
+  Default app/origin/chain separation and wallet compatibility need review. [S14]
+- Re-association changes the current response key; it does not re-encrypt old
+  events. Historical decryption needs the corresponding historical keys.
+  decryptAndFilterEvents() uses current keys and skips decryption failures.
+  The UI must distinguish undecryptable history from no history. [S1, S3]
+- A request ID or successful submission is not an accepted order or a fill.
+  Track submission, processing, confirmation, partial fills and settlement as
+  distinct application states. [S1]
+- The 50-record history cap mentioned in documentation belongs to the Nova
+  sample. It is not an established Vela platform-wide storage ceiling. ZEDGE
+  needs an explicit encrypted history/retention and recovery design; see the
+  pinned sample evidence in research/vela-protocol.md.
+
+8. RECOMMENDED ZEDGE DESIGN
+---------------------------
+Proposed product promise:
+  Public market prices and selected liquidity information, with encrypted
+  personal execution records and positions, subject to disclosed metadata.
+
+Implementation requirements:
+- Fully collateralized binary outcome shares. Lock one collateral unit to
+  create one Up plus one Down share; the normal resolved payout is 1/0.
+- Original deterministic matching and accounting, separate from Vela adapters.
+- Integer balances, funded reservations, partial fills, safe cumulative fee
+  rounding, cancellation races and replay/idempotency protection.
+- Internal collateral/share transfers per fill; no automatic public token
+  movement for every execution.
+- Public quotes or deliberately chosen aggregated/delayed liquidity. Do not
+  promise an exact public live book and completely uninferable executions.
+- Private receipts and account views with explicit key-epoch handling.
+- Remove sensitive logging and resolve host-visible recipient metadata if the
+  promise includes confidentiality of relationships from the service operator.
+- Verify the enclave measurement, application fingerprint, governance and real
+  deployment configuration. A software emulator is not hardware confidentiality.
+
+The first complete test slice remains one BTC 15-minute market. Add ETH and
+5-minute rounds after measured settlement, cancellation, capacity and recovery
+tests. These are proposed engineering steps, not implemented ZEDGE features.
+
+9. PRODUCTION GATES FROM THE BROADER RESEARCH
+--------------------------------------------
+- Availability/licensing: the reviewed public release is documented for
+  local/testnet use. The inspected BSL licenses grant non-production rights but
+  no production-use grant. Obtain applicable permission and a supported,
+  verified deployment; public source access alone is insufficient.
+- Timing: the guest ABI lacks an authenticated chain-time parameter. A
+  pre-cutoff checkpoint processed after the outcome is visible does not by
+  itself solve late execution. Define and enforce commitment/cancellation rules.
+- Request integrity: review binding of canonical sender, token/amount, request
+  type, payload, domain and ordering across the host/enclave boundary.
+- Sequencing: the manager prefers trigger requests, but the reviewed contract
+  accepts either queue head. Normal manager scheduling is not a contract-level
+  global priority guarantee.
+- Oracle: a signed price proves authenticity, not necessarily selection of the
+  first eligible boundary observation. Stork is documented on current Horizen;
+  the Pyth deployment found was on legacy EON, not established on the new L3.
+  The production oracle and exact observation rule remain unresolved.
+- Recovery: claim() releases already approved pending claims. It does not
+  independently release every private balance if execution stops permanently.
+  State/key restoration and the selected emergency exit require design/tests.
+- Capacity: upstream sequential-processing estimates are not a measured SLA.
+  Benchmark actual placement, cancellation and settlement under adverse load.
+- Security: independent version-specific reviews, remediated findings, output
+  inspection, governance and operating permissions remain launch requirements.
+
+The Builder Fund, collateral/network details, funding obligations, oracle
+comparison, source pins, financial invariants and release criteria are retained
+in the full reports below. No funding application or vendor contact has been
+submitted as part of this research.
+
+10. FULL RESEARCH RECORDS IN THIS REPOSITORY
+-------------------------------------------
+research/README.md
+research/vela-protocol.md
+research/private-orderbook-architecture.md
+research/horizen-builder-program.md
+
+SOURCE REFERENCES
+-----------------
+Repository source links below identify the inspected commits. Documentation and
+service availability can change; the review date is recorded above.
+
+[S1] SDK client: encryption, submission, public/private event readers, claims
+https://github.com/HorizenOfficial/vela-common-ts/blob/c9d28e4107d08ed4a570449a577ac07089891344/src/blockchain/client.ts
+
+[S2] WASM result types, including DepositResult and ProcessResult
+https://github.com/HorizenOfficial/vela-common-go/blob/fb4e716f197a4d761350f5d93a97708b5d972bee/wasm/types/results.go
+
+[S3] Executor: input decryption (664), fees (715), state encryption (760),
+     recipient event encryption/metadata (1101)
+https://github.com/HorizenOfficial/vela/blob/335724c95ba7b58d64ec97bbb67d18640123278e/pkg/executor/executor.go
+
+[S4] Public request, completion, UserEvent and AppEvent definitions
+https://github.com/HorizenOfficial/vela/blob/335724c95ba7b58d64ec97bbb67d18640123278e/contracts/contracts/interfaces/IProcessorEndpoint.sol
+
+[S5] Request and withdrawal structures
+https://github.com/HorizenOfficial/vela/blob/335724c95ba7b58d64ec97bbb67d18640123278e/contracts/contracts/Structs.sol
+
+[S6] Public stateUpdate arguments, custody, withdrawals and claim handling
+https://github.com/HorizenOfficial/vela/blob/335724c95ba7b58d64ec97bbb67d18640123278e/contracts/contracts/ProcessorEndpoint.sol
+
+[S7] Optional event subtype generator
+https://github.com/HorizenOfficial/vela/blob/335724c95ba7b58d64ec97bbb67d18640123278e/pkg/executor/subtype.go
+
+[S8] Event.UserID and UpdatePayload.Events
+https://github.com/HorizenOfficial/vela/blob/335724c95ba7b58d64ec97bbb67d18640123278e/pkg/common/types.go#L113
+
+[S9] Executor response returning the update payload
+https://github.com/HorizenOfficial/vela/blob/335724c95ba7b58d64ec97bbb67d18640123278e/pkg/communication/server.go#L450
+
+[S10] Blockchain conversion retaining ciphertext/subtype but omitting UserID
+https://github.com/HorizenOfficial/vela/blob/335724c95ba7b58d64ec97bbb67d18640123278e/pkg/blockchain/client.go#L444
+
+[S11] Raw WASM deposit-result INFO log
+https://github.com/HorizenOfficial/vela/blob/335724c95ba7b58d64ec97bbb67d18640123278e/pkg/wasm/wasmtime_runtime.go#L582
+
+[S12] Logger defaults, wiring, network output, and receiving service
+https://github.com/HorizenOfficial/vela/blob/335724c95ba7b58d64ec97bbb67d18640123278e/pkg/executor/config.go#L125
+https://github.com/HorizenOfficial/vela/blob/335724c95ba7b58d64ec97bbb67d18640123278e/cmd/executor/main.go#L44
+https://github.com/HorizenOfficial/vela/blob/335724c95ba7b58d64ec97bbb67d18640123278e/pkg/logger/zeronetworklogger.go#L164
+https://github.com/HorizenOfficial/vela/blob/335724c95ba7b58d64ec97bbb67d18640123278e/cmd/manager/main.go#L113
+
+[S13] SDK documentation with constructor argument discrepancy
+https://docs.horizen.io/vela/reference/typescript-client/
+
+[S14] Wallet-derived encryption key and default challenge
+https://github.com/HorizenOfficial/vela-common-ts/blob/c9d28e4107d08ed4a570449a577ac07089891344/src/crypto/wallet.ts
+https://github.com/HorizenOfficial/vela-common-ts/blob/c9d28e4107d08ed4a570449a577ac07089891344/src/constants.ts
+
+Revalidation rule
+-----------------
+Update this record when code, permissions, deployment configuration or tests
+change. Keep "supported primitive", "custom application work", "inferred risk"
+and "demonstrated deployment behavior" distinct. Never promote a proposal or a
+successful local emulator run into a production confidentiality claim.
