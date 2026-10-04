@@ -81,6 +81,12 @@ opera-browser-cli run < scripts/verify-browser.js
 
 The browser script resets only this app's local paper account, exercises its order lifecycle, and exports a local CSV.
 
+## Help and policy pages
+
+Both interfaces link to `/terms`, `/privacy`, `/risk-disclosure`, `/market-rules` and `/support`. These are separate, directly addressable pages; `?mode=chain` preserves the return path to the chain interface. Reading them never initializes a demo account or connects a wallet. Vercel rewrites support direct visits and reloads.
+
+The Terms and Privacy Policy describe the current preview. They are not final terms for a funded exchange. Before launch, confirm the operator's legal identity, applicable jurisdictions and eligibility, a working private support/privacy contact, actual providers and retention periods, and the final trading/custody policies with qualified counsel. No operator, license, legal venue or email address is invented in the preview.
+
 ## Local data and credentials
 
 The demo account stays in browser local storage. It uses the legacy `edge-paper-exchange-v1` key to preserve existing accounts. It does not sync account data to a server.

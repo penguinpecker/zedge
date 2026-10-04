@@ -28,6 +28,7 @@ import {
 import { MarketCards, MarketDetail } from "./components/MarketBoard";
 import { Coin, Direction, Modal, Toast } from "./components/Primitives";
 import { DEFAULT_FORM, TradeTicket } from "./components/TradeTicket";
+import SiteFooter from "./components/SiteFooter";
 import type { TicketForm } from "./components/TradeTicket";
 import {
   availableShares,
@@ -410,22 +411,22 @@ export default function App() {
         ) : (
           <History state={state} dispatch={dispatch} />
         )}
-        <footer className="app-footer">
-          <div>
+        <SiteFooter
+          mode="demo"
+          status={<>
             <span className={`status-dot ${state.paused ? "paused" : ""}`} />
             <span>{state.paused ? "Demo paused" : "Demo feed running"}</span>
             <span className="footer-divider">/</span>
             <span>{state.speed}× playback</span>
             <span className="footer-divider">/</span>
             <time className="mono">{timeText(state.now)} UTC</time>
-          </div>
-          <div>
-            <span>Made for the next move.</span>
+          </>}
+          action={
             <button onClick={() => setDialog("help")}>
               About ZEDGE <ArrowUpRight size={12} />
             </button>
-          </div>
-        </footer>
+          }
+        />
         {storageUnavailable && (
           <p className="storage-warning" role="status">
             Browser storage is unavailable. This demo session will reset when
