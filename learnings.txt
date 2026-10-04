@@ -452,3 +452,51 @@ arguments and compiler matched. Horizen Blockscout accepted both source bundles
 and publishes matching inputs, but currently classifies them partially verified.
 Independently checked creation data and full runtime hashes match our artifacts;
 do not describe the explorer's partial classification as a perfect/full match.
+
+Streams integration and whole-system review — 2026-10-04
+-----------------------------------------------------
+Engine/protocol v2 now uses exact positive int192 prices as decimal strings with
+18-decimal precision. It binds the actual registry round ID and rules hash using
+Solidity-compatible ABI/Keccak encoding. Full signed observation intervals and
+report hashes survive snapshots. Native Go and TinyGo WASI output match across
+four local EVM BTC/ETH 5m/15m scenarios, including a one-atom ETH decline.
+A safe archive operation removes only terminal rounds with no remaining shares,
+collateral or reservations; lifetime account/evidence limits still need operations
+and migration design. AuthenticatedContext remains an external trust boundary.
+
+The frontend mainnet manifest now binds and verifies the actual four application
+contracts and their upstream dependencies on both chains. It reads public round
+state using exact precision. This does not turn the demo into private trading.
+Funding, orders and encrypted balances remain unavailable in chain mode.
+
+The new keeper fetches exact historical boundary reports using official Chainlink
+HMAC authentication, then eth_calls the real adapter before publishing. It has a
+fixed method/target allowlist, persistent gas reservations, exclusive durable
+journal, sign-before-send crash tracking, canonical receipt reconciliation and
+strict source/destination deadlines. Report-access loss blocks new markets while
+cached settlement and timeout recovery remain available. No paid API credentials
+were supplied and no keeper signed mainnet transaction has been submitted.
+
+The public CollateralizedOutcomeVault mints collateral-backed Up/Down ERC1155
+pairs, merges pairs and redeems fixed settled/void payouts. It has no administrator
+or TEE signer withdrawal authority. It is tested but not deployed or connected to
+private custody. Holdings and transfers are PUBLIC. Do not relabel this primitive
+as private settlement or claim that it solves encrypted-ledger recovery.
+
+Current upstream Vela documentation still distinguishes local Docker/coordinated
+Base Sepolia usage from planned production Base support. Production licensing,
+request/commit domain and time binding, canonical private custody transitions,
+and usable latest-state recovery remain release gates. See the source-linked
+research/vela-integration-refresh.md and security/WHOLE-SYSTEM-REVIEW.md.
+
+Public RPC operational finding — 2026-10-04
+------------------------------------------
+The deployed browser encountered Horizen HTTP429 (bandwidth limit) with an
+advertised Retry-After of 900 seconds. Local full-route RPC verification had passed;
+the failed browser visit did not establish a current verified route. Keep these
+observations separate. The app correctly withheld unverified data.
+The original repeated check used 113 RPC methods (20 runtime downloads,70 getters,
+21 storage reads,2 chain identities) before block/round/anchor reads. Short market
+poll intervals must not repeat that whole workload per visitor. Provider backoff,
+bounded read-only verification freshness and hidden-tab pause are availability
+requirements; they do not make the public endpoint a production availability SLA.

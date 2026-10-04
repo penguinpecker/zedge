@@ -13,7 +13,15 @@ const carol = "0x3333333333333333333333333333333333333333"
 const auth = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 func config() Config {
-	return Config{Domain: Domain{ChainID: 2651420, Endpoint: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", ApplicationID: "zedge-test", RulesVersion: 1}, Authority: auth, Collateral: "0xcccccccccccccccccccccccccccccccccccccccc", FeeBps: 100}
+	c := Config{Domain: Domain{ChainID: 2651420, Endpoint: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", ApplicationID: "zedge-test", RulesVersion: Version}, Authority: auth, Collateral: "0xcccccccccccccccccccccccccccccccccccccccc", FeeBps: 100,
+		Oracle: RegistryConfig{ChainID: 2651420, Registry: "0xdddddddddddddddddddddddddddddddddddddddd", Oracle: "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", BTCFeedID: BTCStreamsFeed, ETHFeedID: ETHStreamsFeed, Decimals: 18, ObservationWindow: 10, OpeningGrace: 20, SettlementGrace: 290, CutoffBuffer: 5}}
+	c.Oracle.RulesHash, _ = RegistryRulesHash(c)
+	return c
+}
+
+// Unsigned observations are deterministic test inputs, never authentication.
+func testObservation(price string, at uint32) *StreamsObservation {
+	return &StreamsObservation{FeedID: BTCStreamsFeed, Price: price, ValidFromTimestamp: at / 300 * 300, ObservationsTimestamp: at, ExpiresAt: at + 86400, ReportHash: "0x" + hash([]byte(fmt.Sprint(price, at))), Decimals: 18}
 }
 
 type harness struct {
@@ -89,10 +97,10 @@ func (h *harness) setup(accounts ...string) {
 		h.must(Command{Op: Register}, a, 1)
 		h.deposit(a, 200*AtomScale)
 	}
-	spec := RoundSpec{Asset: "BTC", Feed: "BTCUSD", Start: 900, End: 1800, Cutoff: 1795, ObservationWindow: 10, OpeningDeadline: 930, ResolutionDeadline: 2100}
+	spec, _ := NewRoundSpec(config(), "BTC", 900, 900)
 	r := h.must(Command{Op: CreateRound, Round: &spec}, auth, 1)
 	h.round = r.RoundID
-	h.must(Command{Op: OpenRound, RoundID: h.round, OraclePrice: 97000_000000, ObservedAt: 900, Evidence: hash([]byte("open"))}, auth, 900)
+	h.must(Command{Op: OpenRound, RoundID: h.round, Observation: testObservation("97000000000000000000000", 900), Evidence: hash([]byte("open"))}, auth, 900)
 }
 func (h *harness) mint(who string, q uint64) {
 	h.must(Command{Op: Mint, RoundID: h.round, Quantity: q}, who, 0)
@@ -210,7 +218,7 @@ func TestResolutionTieUpAndRedemption(t *testing.T) {
 	h.mint(alice, 10*AtomScale)
 	h.order(alice, Sell, 60, 10*AtomScale, GTC)
 	h.order(bob, Buy, 60, 10*AtomScale, IOC)
-	h.must(Command{Op: ResolveRound, RoundID: h.round, ObservedAt: 1800, OraclePrice: 97000_000000, Evidence: hash([]byte("close"))}, auth, 1800)
+	h.must(Command{Op: ResolveRound, RoundID: h.round, Observation: testObservation("97000000000000000000000", 1800), Evidence: hash([]byte("close"))}, auth, 1800)
 	r := h.must(Command{Op: Redeem, RoundID: h.round}, bob, 0)
 	if r.Amount != 10*AtomScale {
 		t.Fatal("winner payout incorrect")
@@ -446,11 +454,11 @@ func FuzzCommandSequences(f *testing.F) {
 		if mode == 2 {
 			h.must(Command{Op: VoidRound, RoundID: h.round, Evidence: hash([]byte("fuzz-void"))}, auth, 2101)
 		} else {
-			price := uint64(1)
+			price := "1"
 			if mode == 1 {
-				price = 97000_000000
+				price = "97000000000000000000000"
 			}
-			h.must(Command{Op: ResolveRound, RoundID: h.round, OraclePrice: price, ObservedAt: 1800, Evidence: hash([]byte("fuzz-close"))}, auth, 1800)
+			h.must(Command{Op: ResolveRound, RoundID: h.round, Observation: testObservation(price, 1800), Evidence: hash([]byte("fuzz-close"))}, auth, 1800)
 		}
 		for _, who := range []string{alice, bob, carol} {
 			h.must(Command{Op: Redeem, RoundID: h.round}, who, 0)

@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/penguinpecker/zedge/protocol/commands.schema.json",
-  "title": "ZEDGE canonical engine command v1",
-  "description": "Structural checks only. Engine additionally enforces canonical JSON order/omission, domain, authorization, nonce, oracle timing, capacities and accounting. AuthenticatedContext is never accepted here.",
+  "title": "ZEDGE canonical engine command v2",
+  "description": "Structural checks only. Engine additionally enforces canonical JSON, exact positive int192 prices, Solidity registry rules/round identity, authenticated context, nonce, capacities and conservation. AuthenticatedContext is never accepted here.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -41,7 +41,7 @@
           "pattern": "^[A-Za-z0-9_.-]+$"
         },
         "rulesVersion": {
-          "const": 1
+          "const": 2
         }
       }
     },
@@ -68,6 +68,7 @@
         "cancel_all",
         "resolve_round",
         "void_round",
+        "archive_round",
         "redeem",
         "request_withdrawal",
         "cancel_withdrawal",
@@ -92,6 +93,7 @@
       "required": [
         "asset",
         "feed",
+        "registryRoundId",
         "start",
         "end",
         "cutoff",
@@ -108,9 +110,7 @@
         },
         "feed": {
           "type": "string",
-          "minLength": 1,
-          "maxLength": 64,
-          "pattern": "^[A-Za-z0-9_.-]+$"
+          "pattern": "^0x0003[0-9a-f]{60}$"
         },
         "start": {
           "type": "integer",
@@ -141,6 +141,13 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 1000000000000000
+        },
+        "registryRoundId": {
+          "type": "string",
+          "pattern": "^0x[0-9a-f]{64}$",
+          "not": {
+            "const": "0x0000000000000000000000000000000000000000000000000000000000000000"
+          }
         }
       }
     },
@@ -207,15 +214,54 @@
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
     },
-    "observedAt": {
-      "type": "integer",
-      "minimum": 1,
-      "maximum": 1000000000000000
-    },
-    "oraclePrice": {
-      "type": "integer",
-      "minimum": 1,
-      "maximum": 1000000000000000
+    "observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "feedId",
+        "price",
+        "validFromTimestamp",
+        "observationsTimestamp",
+        "expiresAt",
+        "reportHash",
+        "decimals"
+      ],
+      "properties": {
+        "feedId": {
+          "type": "string",
+          "pattern": "^0x0003[0-9a-f]{60}$"
+        },
+        "price": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]{0,57}$",
+          "description": "Exact positive int192 atoms at 18 decimals; engine additionally enforces <=3138550867693340381917894711603833208051177722232017256447."
+        },
+        "validFromTimestamp": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "observationsTimestamp": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "expiresAt": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "reportHash": {
+          "type": "string",
+          "pattern": "^0x[0-9a-f]{64}$",
+          "not": {
+            "const": "0x0000000000000000000000000000000000000000000000000000000000000000"
+          }
+        },
+        "decimals": {
+          "const": 18
+        }
+      }
     }
   },
   "allOf": [
@@ -250,8 +296,7 @@
           "withdrawalId": false,
           "destination": false,
           "evidence": false,
-          "observedAt": false,
-          "oraclePrice": false
+          "observation": false
         }
       }
     },
@@ -286,8 +331,7 @@
           "orderId": false,
           "withdrawalId": false,
           "destination": false,
-          "observedAt": false,
-          "oraclePrice": false
+          "observation": false
         }
       }
     },
@@ -322,8 +366,7 @@
           "withdrawalId": false,
           "destination": false,
           "evidence": false,
-          "observedAt": false,
-          "oraclePrice": false
+          "observation": false
         }
       }
     },
@@ -343,8 +386,7 @@
           "op",
           "roundId",
           "evidence",
-          "observedAt",
-          "oraclePrice"
+          "observation"
         ],
         "properties": {
           "account": false,
@@ -394,8 +436,7 @@
           "withdrawalId": false,
           "destination": false,
           "evidence": false,
-          "observedAt": false,
-          "oraclePrice": false
+          "observation": false
         }
       }
     },
@@ -430,8 +471,7 @@
           "withdrawalId": false,
           "destination": false,
           "evidence": false,
-          "observedAt": false,
-          "oraclePrice": false
+          "observation": false
         }
       }
     },
@@ -466,8 +506,7 @@
           "withdrawalId": false,
           "destination": false,
           "evidence": false,
-          "observedAt": false,
-          "oraclePrice": false
+          "observation": false
         }
       }
     },
@@ -501,8 +540,7 @@
           "withdrawalId": false,
           "destination": false,
           "evidence": false,
-          "observedAt": false,
-          "oraclePrice": false
+          "observation": false
         }
       }
     },
@@ -537,8 +575,7 @@
           "withdrawalId": false,
           "destination": false,
           "evidence": false,
-          "observedAt": false,
-          "oraclePrice": false
+          "observation": false
         }
       }
     },
@@ -572,8 +609,7 @@
           "withdrawalId": false,
           "destination": false,
           "evidence": false,
-          "observedAt": false,
-          "oraclePrice": false
+          "observation": false
         }
       }
     },
@@ -593,8 +629,7 @@
           "op",
           "roundId",
           "evidence",
-          "observedAt",
-          "oraclePrice"
+          "observation"
         ],
         "properties": {
           "account": false,
@@ -644,8 +679,7 @@
           "orderId": false,
           "withdrawalId": false,
           "destination": false,
-          "observedAt": false,
-          "oraclePrice": false
+          "observation": false
         }
       }
     },
@@ -680,8 +714,7 @@
           "withdrawalId": false,
           "destination": false,
           "evidence": false,
-          "observedAt": false,
-          "oraclePrice": false
+          "observation": false
         }
       }
     },
@@ -716,8 +749,7 @@
           "orderId": false,
           "withdrawalId": false,
           "evidence": false,
-          "observedAt": false,
-          "oraclePrice": false
+          "observation": false
         }
       }
     },
@@ -752,8 +784,7 @@
           "orderId": false,
           "destination": false,
           "evidence": false,
-          "observedAt": false,
-          "oraclePrice": false
+          "observation": false
         }
       }
     },
@@ -788,8 +819,7 @@
           "maxFee": false,
           "orderId": false,
           "destination": false,
-          "observedAt": false,
-          "oraclePrice": false
+          "observation": false
         }
       }
     },
@@ -824,8 +854,42 @@
           "maxFee": false,
           "orderId": false,
           "destination": false,
-          "observedAt": false,
-          "oraclePrice": false
+          "observation": false
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "op": {
+            "const": "archive_round"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "domain",
+          "id",
+          "nonce",
+          "op",
+          "roundId"
+        ],
+        "properties": {
+          "account": false,
+          "round": false,
+          "amount": false,
+          "outcome": false,
+          "side": false,
+          "price": false,
+          "quantity": false,
+          "tif": false,
+          "expiry": false,
+          "maxFee": false,
+          "orderId": false,
+          "withdrawalId": false,
+          "destination": false,
+          "evidence": false,
+          "observation": false
         }
       }
     }

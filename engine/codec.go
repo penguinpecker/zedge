@@ -127,7 +127,7 @@ func DecodeCommand(b []byte) (Command, error) {
 	return c, nil
 }
 func New(c Config) (*State, error) {
-	s := &State{Version: Version, Config: c, JournalHash: hash([]byte("ZEDGE_ENGINE_V1")), Accounts: []Account{}, Rounds: []Round{}, Orders: []Order{}, Withdrawals: []Withdrawal{}, ExternalEvidence: []string{}}
+	s := &State{Version: Version, Config: c, JournalHash: hash([]byte("ZEDGE_ENGINE_V2")), Accounts: []Account{}, Rounds: []Round{}, Orders: []Order{}, Withdrawals: []Withdrawal{}, ExternalEvidence: []string{}, ArchiveRoot: hash([]byte("ZEDGE_ARCHIVES_V2"))}
 	if e := Validate(s); e != nil {
 		return nil, e
 	}
@@ -201,8 +201,12 @@ func (s *State) consumeEvidence(e string) error {
 	s.ExternalEvidence = append(s.ExternalEvidence, e)
 	return nil
 }
-func validateSpec(r RoundSpec) error {
-	if (r.Asset != "BTC" && r.Asset != "ETH") || !identifier(r.Feed) || r.Start == 0 || r.End <= r.Start || r.End-r.Start != 300 && r.End-r.Start != 900 || r.Start%(r.End-r.Start) != 0 || r.Cutoff <= r.Start || r.Cutoff >= r.End || r.End > MaxAtoms || r.ObservationWindow > 60 || r.OpeningDeadline < r.Start+r.ObservationWindow || r.OpeningDeadline >= r.Cutoff || r.ResolutionDeadline < r.End+r.ObservationWindow || r.ResolutionDeadline-r.End > 86400 {
+func validateSpec(c Config, r RoundSpec) error {
+	if r.End <= r.Start {
+		return fail("invalid round specification")
+	}
+	expected, err := NewRoundSpec(c, r.Asset, r.End-r.Start, r.Start)
+	if err != nil || r != expected {
 		return fail("invalid round specification")
 	}
 	return nil
@@ -224,8 +228,9 @@ func validateFields(c Command) error {
 	case OpenRound, ResolveRound:
 		z.RoundID = ""
 		z.Evidence = ""
-		z.ObservedAt = 0
-		z.OraclePrice = 0
+		z.Observation = nil
+	case ArchiveRound:
+		z.RoundID = ""
 	case VoidRound:
 		z.RoundID = ""
 		z.Evidence = ""

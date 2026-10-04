@@ -99,32 +99,32 @@ func TestAuthenticatedObservationWindowsAndTimeouts(t *testing.T) {
 	h := newHarness(t)
 	h.setup(alice)
 	h.mint(alice, AtomScale)
-	h.reject(Command{Op: ResolveRound, RoundID: h.round, ObservedAt: 1811, OraclePrice: 1, Evidence: hash([]byte("late-feed"))}, auth, 1811)
-	h.reject(Command{Op: ResolveRound, RoundID: h.round, ObservedAt: 1810, OraclePrice: 1, Evidence: hash([]byte("late-proof"))}, auth, 2101)
+	h.reject(Command{Op: ResolveRound, RoundID: h.round, Observation: testObservation("1", 1811), Evidence: hash([]byte("late-feed"))}, auth, 1811)
+	h.reject(Command{Op: ResolveRound, RoundID: h.round, Observation: testObservation("1", 1810), Evidence: hash([]byte("late-proof"))}, auth, 2101)
 	h.reject(Command{Op: VoidRound, RoundID: h.round, Evidence: hash([]byte("void"))}, auth, 2100)
-	h.must(Command{Op: ResolveRound, RoundID: h.round, ObservedAt: 1810, OraclePrice: 1, Evidence: hash([]byte("close-window"))}, auth, 2100)
+	h.must(Command{Op: ResolveRound, RoundID: h.round, Observation: testObservation("1", 1810), Evidence: hash([]byte("close-window"))}, auth, 2100)
 	m, _ := h.s.round(h.round)
-	if m.Outcome != Down || m.CloseObservedAt != 1810 {
+	if m.Outcome != Down || m.Closing.ObservationsTimestamp != 1810 {
 		t.Fatal("wrong boundary result")
 	}
 	bad, _ := clone(h.s)
-	bad.Rounds[0].CloseObservedAt = 1811
+	bad.Rounds[0].Closing.ObservationsTimestamp = 1811
 	if e := Validate(bad); e == nil {
 		t.Fatal("invalid observation in restored state")
 	}
 	missing := newHarness(t)
 	missing.must(Command{Op: Register}, alice, 1)
-	spec := RoundSpec{Asset: "ETH", Feed: "ETHUSD", Start: 900, End: 1200, Cutoff: 1195, ObservationWindow: 10, OpeningDeadline: 930, ResolutionDeadline: 1300}
+	spec, _ := NewRoundSpec(config(), "ETH", 300, 900)
 	r := missing.must(Command{Op: CreateRound, Round: &spec}, auth, 1)
-	missing.reject(Command{Op: OpenRound, RoundID: r.RoundID, ObservedAt: 911, OraclePrice: 3000_000000, Evidence: hash([]byte("late"))}, auth, 920)
-	missing.reject(Command{Op: OpenRound, RoundID: r.RoundID, ObservedAt: 910, OraclePrice: 3000_000000, Evidence: hash([]byte("good"))}, auth, 931)
+	missing.reject(Command{Op: OpenRound, RoundID: r.RoundID, Observation: testObservation("3000000000000000000000", 911), Evidence: hash([]byte("late"))}, auth, 920)
+	missing.reject(Command{Op: OpenRound, RoundID: r.RoundID, Observation: testObservation("3000000000000000000000", 910), Evidence: hash([]byte("good"))}, auth, 931)
 	missing.reject(Command{Op: VoidRound, RoundID: r.RoundID, Evidence: hash([]byte("missing"))}, auth, 930)
 	missing.must(Command{Op: VoidRound, RoundID: r.RoundID, Evidence: hash([]byte("missing"))}, auth, 931)
 }
 
 func TestRoundIDBindsAllRulesAndDeployment(t *testing.T) {
 	c := config()
-	r := RoundSpec{Asset: "BTC", Feed: "BTCUSD", Start: 900, End: 1800, Cutoff: 1795, ObservationWindow: 10, OpeningDeadline: 930, ResolutionDeadline: 2100}
+	r, _ := NewRoundSpec(c, "BTC", 900, 900)
 	id := RoundID(c, r)
 	c.Domain.ChainID++
 	if id == RoundID(c, r) {

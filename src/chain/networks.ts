@@ -19,7 +19,7 @@ export const NETWORKS = {
 } as const;
 
 export type NetworkId = keyof typeof NETWORKS;
-export const DEFAULT_NETWORK: NetworkId = 2651420;
+export const DEFAULT_NETWORK: NetworkId = 26514;
 
 export function isNetworkId(value: unknown): value is NetworkId {
   return value === 2651420 || value === 26514;

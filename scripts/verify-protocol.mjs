@@ -54,15 +54,15 @@ try {
     assert.equal(receipt.status, 'success'); assert.ok(receipt.contractAddress);
     return receipt.contractAddress;
   };
-  const mockOracle = await artifact({ file: 'MockBoundaryOracle', contract: 'MockBoundaryOracle' });
+  const mockOracle = await artifact({ file: 'MockStreamsBoundaryOracle', contract: 'MockStreamsBoundaryOracle' });
   const mockToken = await artifact({ file: 'MockBoundaryOracle', contract: 'MockCollateral' });
-  const registryBuild = await artifact({ file: 'RoundRegistry', contract: 'RoundRegistry' });
+  const registryBuild = await artifact({ file: 'StreamsRoundRegistry', contract: 'StreamsRoundRegistry' });
   const oracle = await deploy(mockOracle);
   const collateral = await deploy(mockToken);
-  const btcFeedId = keccak256(stringToHex('BTCUSD'));
-  const ethFeedId = keccak256(stringToHex('ETHUSD'));
-  const config = { oracle, collateral, btcFeedId, ethFeedId, btcExponent: -8, ethExponent: -8,
-    observationWindow: 10, openingGrace: 20, settlementGrace: 60, cutoffBuffer: 5, maxConfidenceBps: 100 };
+  const btcFeedId = '0x00039d9e45394f473ab1f050a1b963e6b05351e52d71e507509ada0c95ed75b8';
+  const ethFeedId = '0x000362205e10b3a147d02792eccee483dca6c7b44ecce7012cb8c6e0b68b3ae9';
+  const config = { oracle, collateral, btcFeedId, ethFeedId, btcDecimals: 18, ethDecimals: 18,
+    observationWindow: 10, openingGrace: 20, settlementGrace: 60, cutoffBuffer: 5 };
   const registry = await deploy(registryBuild, [config]);
   const read = (functionName, args = []) => client.readContract({ address: registry, abi: registryBuild.abi, functionName, args });
   const write = async (functionName, args, value = 0n) => {
@@ -77,28 +77,31 @@ try {
     const start = (latest.timestamp / BigInt(duration) + 1n) * BigInt(duration);
     await write('createRound', [asset, duration, start]);
     const registryRoundId = await read('roundIdFor', [asset, duration, start]);
-    const opening = asset === 0 ? 9_700_000_000_000n : 350_000_000_000n;
+    const opening = asset === 0 ? 97_000n * 10n ** 18n : 3_500n * 10n ** 18n;
     const closing = asset === 0 ? opening : opening - 1n;
     const observation = (price, timestamp) => encodeAbiParameters([
-      { type: 'tuple', components: [{ name: 'price', type: 'int64' }, { name: 'confidence', type: 'uint64' }, { name: 'exponent', type: 'int32' }, { name: 'publishTime', type: 'uint64' }] },
-    ], [{ price, confidence: 1n, exponent: -8, publishTime: timestamp }]);
+      { type: 'tuple', components: [{ name: 'price', type: 'int192' }, { name: 'validFromTimestamp', type: 'uint32' }, { name: 'observationsTimestamp', type: 'uint32' }, { name: 'expiresAt', type: 'uint32' }, { name: 'reportHash', type: 'bytes32' }, { name: 'decimals', type: 'uint8' }] },
+    ], [{ price, validFromTimestamp: Number(timestamp), observationsTimestamp: Number(timestamp), expiresAt: Number(timestamp + 3600n), reportHash: keccak256(stringToHex(`UNSIGNED_LOCAL_FIXTURE:${asset}:${price}:${timestamp}`)), decimals: 18 }]);
     await client.request({ method: 'evm_setNextBlockTimestamp', params: [Number(start)] });
-    await write('recordOpening', [registryRoundId, observation(opening, start)], 1n);
+    await write('recordOpening', [registryRoundId, observation(opening, start)]);
     assert.equal(await read('canTrade', [registryRoundId]), true);
     const opened = await read('getRound', [registryRoundId]);
     await client.request({ method: 'evm_setNextBlockTimestamp', params: [Number(opened.cutoff)] });
     await client.request({ method: 'evm_mine', params: [] });
     assert.equal(await read('canTrade', [registryRoundId]), false);
     await client.request({ method: 'evm_setNextBlockTimestamp', params: [Number(opened.end)] });
-    await write('resolveRound', [registryRoundId, observation(closing, opened.end)], 1n);
+    await write('resolveRound', [registryRoundId, observation(closing, opened.end)]);
     const round = await read('getRound', [registryRoundId]);
     const expectedOutcome = closing >= opening ? 'up' : 'down';
     assert.equal(round.outcome, expectedOutcome === 'up' ? 1 : 2);
     const fixture = {
       source: 'local-evm-test-fixture', chainId: 31337, registry: registry.toLowerCase(), collateral: collateral.toLowerCase(), registryRoundId,
-      spec: { asset: asset === 0 ? 'BTC' : 'ETH', feed: (asset === 0 ? btcFeedId : ethFeedId).slice(2), start: Number(start), end: Number(round.end), cutoff: Number(round.cutoff), observationWindow: config.observationWindow,
+      oracle: { chainId: 31337, registry: registry.toLowerCase(), oracle: oracle.toLowerCase(), rulesHash: await read('rulesHash'), btcFeedId, ethFeedId, decimals: 18,
+        observationWindow: config.observationWindow, openingGrace: config.openingGrace, settlementGrace: config.settlementGrace, cutoffBuffer: config.cutoffBuffer },
+      spec: { asset: asset === 0 ? 'BTC' : 'ETH', feed: asset === 0 ? btcFeedId : ethFeedId, registryRoundId, start: Number(start), end: Number(round.end), cutoff: Number(round.cutoff), observationWindow: config.observationWindow,
         openingDeadline: Number(round.openingDeadline), resolutionDeadline: Number(round.resolutionDeadline) },
-      openingPrice: Number(opening), closingPrice: Number(closing), openingObservedAt: Number(round.opening.publishTime), closingObservedAt: Number(round.closing.publishTime),
+      opening: { feedId: asset === 0 ? btcFeedId : ethFeedId, ...round.opening, price: round.opening.price.toString() },
+      closing: { feedId: asset === 0 ? btcFeedId : ethFeedId, ...round.closing, price: round.closing.price.toString() },
       openedAt: Number(round.openedAt), resolvedAt: Number(round.resolvedAt), expectedOutcome,
     };
     const input = JSON.stringify(fixture);

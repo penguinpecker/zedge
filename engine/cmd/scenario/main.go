@@ -16,19 +16,18 @@ import (
 )
 
 type fixture struct {
-	Source            string           `json:"source"`
-	ChainID           uint64           `json:"chainId"`
-	Registry          string           `json:"registry"`
-	Collateral        string           `json:"collateral"`
-	RegistryRoundID   string           `json:"registryRoundId"`
-	Spec              engine.RoundSpec `json:"spec"`
-	OpeningPrice      uint64           `json:"openingPrice"`
-	ClosingPrice      uint64           `json:"closingPrice"`
-	OpeningObservedAt uint64           `json:"openingObservedAt"`
-	ClosingObservedAt uint64           `json:"closingObservedAt"`
-	OpenedAt          uint64           `json:"openedAt"`
-	ResolvedAt        uint64           `json:"resolvedAt"`
-	ExpectedOutcome   engine.Outcome   `json:"expectedOutcome"`
+	Source          string                    `json:"source"`
+	ChainID         uint64                    `json:"chainId"`
+	Registry        string                    `json:"registry"`
+	Collateral      string                    `json:"collateral"`
+	RegistryRoundID string                    `json:"registryRoundId"`
+	Spec            engine.RoundSpec          `json:"spec"`
+	Oracle          engine.RegistryConfig     `json:"oracle"`
+	Opening         engine.StreamsObservation `json:"opening"`
+	Closing         engine.StreamsObservation `json:"closing"`
+	OpenedAt        uint64                    `json:"openedAt"`
+	ResolvedAt      uint64                    `json:"resolvedAt"`
+	ExpectedOutcome engine.Outcome            `json:"expectedOutcome"`
 }
 
 const alice = "0x1111111111111111111111111111111111111111"
@@ -64,10 +63,10 @@ func run() error {
 	if d.Decode(new(any)) != io.EOF {
 		return fmt.Errorf("trailing input")
 	}
-	if f.Source != "local-evm-test-fixture" || f.ChainID != 31337 || f.Spec.Start < 2 || f.OpenedAt < f.Spec.Start || f.ResolvedAt < f.Spec.End || len(f.RegistryRoundID) != 66 {
+	if f.Source != "local-evm-test-fixture" || f.ChainID != 31337 || f.Spec.Start < 2 || f.OpenedAt < f.Spec.Start || f.ResolvedAt < f.Spec.End || len(f.RegistryRoundID) != 66 || f.RegistryRoundID != f.Spec.RegistryRoundID || f.Oracle.ChainID != f.ChainID || f.Oracle.Registry != f.Registry {
 		return fmt.Errorf("only explicit local EVM fixtures are accepted")
 	}
-	cfg := engine.Config{Domain: engine.Domain{ChainID: 31337, Endpoint: f.Registry, ApplicationID: "local-conformance", RulesVersion: 1}, Authority: authority, Collateral: f.Collateral, FeeBps: 100}
+	cfg := engine.Config{Domain: engine.Domain{ChainID: 31337, Endpoint: f.Registry, ApplicationID: "local-conformance", RulesVersion: engine.Version}, Authority: authority, Collateral: f.Collateral, FeeBps: 100, Oracle: f.Oracle}
 	s, err := engine.New(cfg)
 	if err != nil {
 		return err
@@ -101,7 +100,7 @@ func run() error {
 		return err
 	}
 	round := r.RoundID
-	if _, err = apply(engine.Command{Op: engine.OpenRound, RoundID: round, OraclePrice: f.OpeningPrice, ObservedAt: f.OpeningObservedAt, Evidence: evidence(f.RegistryRoundID + ":open")}, authority, f.OpenedAt, true); err != nil {
+	if _, err = apply(engine.Command{Op: engine.OpenRound, RoundID: round, Observation: &f.Opening, Evidence: evidence(f.RegistryRoundID + ":open")}, authority, f.OpenedAt, true); err != nil {
 		return err
 	}
 	if _, err = apply(engine.Command{Op: engine.Mint, RoundID: round, Quantity: 100 * engine.AtomScale}, alice, f.OpenedAt, false); err != nil {
@@ -121,7 +120,7 @@ func run() error {
 	if _, err = apply(engine.Command{Op: engine.CancelOrder, OrderID: ask.OrderID}, alice, f.OpenedAt, false); err != nil {
 		return err
 	}
-	if _, err = apply(engine.Command{Op: engine.ResolveRound, RoundID: round, OraclePrice: f.ClosingPrice, ObservedAt: f.ClosingObservedAt, Evidence: evidence(f.RegistryRoundID + ":close")}, authority, f.ResolvedAt, true); err != nil {
+	if _, err = apply(engine.Command{Op: engine.ResolveRound, RoundID: round, Observation: &f.Closing, Evidence: evidence(f.RegistryRoundID + ":close")}, authority, f.ResolvedAt, true); err != nil {
 		return err
 	}
 	if s.Rounds[0].Outcome != f.ExpectedOutcome {

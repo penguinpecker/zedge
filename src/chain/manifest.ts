@@ -1,5 +1,6 @@
 import { getAddress, isAddress, keccak256, type Address, type Hex } from "viem";
 import { isNetworkId, type NetworkId } from "./networks.ts";
+import { parseStreamsManifest, type StreamsManifest } from "./streams-manifest.ts";
 
 export type ContractPin = { address: Address; runtimeCodeHash: Hex };
 export type UnavailableManifest = { schemaVersion: 1; chainId: NetworkId; status: "unavailable"; reason: string };
@@ -12,7 +13,7 @@ export type ConfiguredManifest = {
   contracts: { registry: ContractPin; oracle: ContractPin; provider: ContractPin; collateral: ContractPin };
   parameters: { observationWindow: string; openingGrace: string; settlementGrace: string; cutoffBuffer: string; maxConfidenceBps: string; btcFeedId: Hex; ethFeedId: Hex; btcExponent: number; ethExponent: number; rulesHash: Hex; collateralDecimals: number };
 };
-export type DeploymentManifest = UnavailableManifest | ConfiguredManifest;
+export type DeploymentManifest = UnavailableManifest | ConfiguredManifest | StreamsManifest;
 
 function object(value: unknown, name: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`Invalid ${name}.`);
@@ -44,6 +45,7 @@ function integerString(value: unknown, max: bigint, zero = false): string {
 
 export function parseManifest(value: unknown, expectedChain: NetworkId): DeploymentManifest {
   const record = object(value, "deployment manifest");
+  if (record.schemaVersion === 2) return parseStreamsManifest(value, expectedChain);
   if (record.schemaVersion !== 1 || !isNetworkId(record.chainId) || record.chainId !== expectedChain) throw new Error("Deployment version or network does not match.");
   if (record.status === "unavailable") {
     keys(record, ["schemaVersion", "chainId", "status", "reason"]);
@@ -90,7 +92,7 @@ export const PROXY_SLOTS = [
   "0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50",
 ] as const satisfies readonly Hex[];
 
-export type VerifiedDeployment = { manifest: ConfiguredManifest; verified: true };
+export type VerifiedDeployment = { manifest: ConfiguredManifest | StreamsManifest; verified: true };
 
 // A manifest is trusted only as part of a reviewed app release. Matching hashes
 // establish release identity, not a contract audit or a verified TEE deployment.

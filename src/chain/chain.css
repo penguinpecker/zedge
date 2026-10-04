@@ -162,3 +162,7 @@
   .chain-network-warning { flex-direction: column; align-items: flex-start; }
   .chain-status-banner { align-items: flex-start; padding: 13px; }
 }
+
+.chain-market-detail > .chain-details { margin: 0 24px 20px; padding-top: 14px; }
+.chain-details code, .chain-account-values dd, .chain-address-list dt { overflow-wrap: anywhere; }
+.chain-account-values dt { flex-shrink: 0; }

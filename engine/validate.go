@@ -6,7 +6,7 @@ import "strconv"
 // bounds on every transition and snapshot load. It is not an authenticity proof;
 // the adapter must authenticate the previous state commitment.
 func Validate(s *State) error {
-	if s == nil || s.Version != Version || !domainValid(s.Config.Domain) || !address(s.Config.Authority) || !address(s.Config.Collateral) || s.Config.FeeBps > 1000 || !isHex(s.JournalHash, 64) {
+	if s == nil || s.Version != Version || !domainValid(s.Config.Domain) || !address(s.Config.Authority) || !address(s.Config.Collateral) || !registryValid(s.Config) || s.Config.FeeBps > 1000 || !isHex(s.JournalHash, 64) {
 		return fail("invalid configuration/state version")
 	}
 	if s.Accounts == nil || s.Rounds == nil || s.Orders == nil || s.Withdrawals == nil || s.ExternalEvidence == nil || len(s.Accounts) > MaxAccounts || len(s.Rounds) > MaxRounds || len(s.Orders) > MaxOrders || len(s.Withdrawals) > MaxWithdrawals || len(s.ExternalEvidence) > 4096 {
@@ -35,6 +35,9 @@ func Validate(s *State) error {
 	}
 	if s.Sequence > MaxAtoms || s.Time > MaxAtoms {
 		return fail("sequence/time capacity")
+	}
+	if !isHex(s.ArchiveRoot, 64) || s.ArchivedRounds > s.Sequence || s.ArchivedRounds == 0 && s.ArchiveRoot != hash([]byte("ZEDGE_ARCHIVES_V2")) {
+		return fail("invalid archive commitment")
 	}
 	if s.AuthorityNonce > 0 && (!isHex(s.AuthorityDigest, 64) || s.AuthorityReceipt.CommandID != commandID(s.Config.Authority, s.AuthorityNonce) || s.AuthorityReceipt.Sequence > s.Sequence) {
 		return fail("invalid authority receipt")
@@ -100,7 +103,7 @@ func Validate(s *State) error {
 	}
 	for i := range s.Rounds {
 		m := &s.Rounds[i]
-		if e = validateSpec(m.Spec); e != nil {
+		if e = validateSpec(s.Config, m.Spec); e != nil {
 			return e
 		}
 		if m.ID != RoundID(s.Config, m.Spec) || i > 0 && s.Rounds[i-1].ID >= m.ID {
@@ -137,33 +140,34 @@ func Validate(s *State) error {
 		}
 		switch m.Status {
 		case "scheduled":
-			if m.OpenPrice != 0 || m.ClosePrice != 0 || m.OpenObservedAt != 0 || m.CloseObservedAt != 0 || m.Outcome != "" || m.Locked != 0 || u != 0 || d != 0 || m.OpenEvidence != "" || m.CloseEvidence != "" {
+			if m.Opening != nil || m.Closing != nil || m.Outcome != "" || m.Locked != 0 || u != 0 || d != 0 || m.OpenEvidence != "" || m.CloseEvidence != "" {
 				return fail("invalid scheduled round")
 			}
 		case "open":
-			if m.OpenPrice == 0 || m.OpenPrice > MaxAtoms || !isHex(m.OpenEvidence, 64) || m.ClosePrice != 0 || m.CloseObservedAt != 0 || m.CloseEvidence != "" || m.Outcome != "" || m.Locked != u || u != d || m.OpenObservedAt < m.Spec.Start || m.OpenObservedAt > m.Spec.Start+m.Spec.ObservationWindow || m.OpenObservedAt > s.Time {
+			if validateObservation(m.Opening, m.Spec.Feed, m.Spec.Start, m.Spec.ObservationWindow, s.Time) != nil || !isHex(m.OpenEvidence, 64) || m.Closing != nil || m.CloseEvidence != "" || m.Outcome != "" || m.Locked != u || u != d {
 				return fail("unbacked open round")
 			}
 		case "resolved":
-			if !isHex(m.OpenEvidence, 64) || !isHex(m.CloseEvidence, 64) || m.OpenPrice == 0 || m.ClosePrice == 0 || m.OpenPrice > MaxAtoms || m.ClosePrice > MaxAtoms || s.Time < m.Spec.End || m.OpenObservedAt < m.Spec.Start || m.OpenObservedAt > m.Spec.Start+m.Spec.ObservationWindow || m.CloseObservedAt < m.Spec.End || m.CloseObservedAt > m.Spec.End+m.Spec.ObservationWindow || m.CloseObservedAt > s.Time {
+			if !isHex(m.OpenEvidence, 64) || !isHex(m.CloseEvidence, 64) || s.Time < m.Spec.End || validateObservation(m.Opening, m.Spec.Feed, m.Spec.Start, m.Spec.ObservationWindow, s.Time) != nil || validateObservation(m.Closing, m.Spec.Feed, m.Spec.End, m.Spec.ObservationWindow, s.Time) != nil {
 				return fail("invalid resolution")
 			}
 			out := Down
-			if m.ClosePrice >= m.OpenPrice {
+			comparison, _ := CompareOraclePrices(m.Closing.Price, m.Opening.Price)
+			if comparison >= 0 {
 				out = Up
 			}
 			if m.Outcome != out || out == Up && m.Locked != u || out == Down && m.Locked != d {
 				return fail("settlement collateral mismatch")
 			}
 		case "void":
-			if m.Outcome != Void || !isHex(m.CloseEvidence, 64) || s.Time <= m.Spec.ResolutionDeadline && m.OpenPrice != 0 || s.Time <= m.Spec.OpeningDeadline && m.OpenPrice == 0 || m.Locked != u/2+d/2 || m.ClosePrice != 0 || m.CloseObservedAt != 0 {
+			if m.Outcome != Void || !isHex(m.CloseEvidence, 64) || s.Time <= m.Spec.ResolutionDeadline && m.Opening != nil || s.Time <= m.Spec.OpeningDeadline && m.Opening == nil || m.Locked != u/2+d/2 || m.Closing != nil {
 				return fail("void collateral mismatch")
 			}
-			if m.OpenPrice == 0 {
-				if m.OpenObservedAt != 0 || m.OpenEvidence != "" || u != 0 || d != 0 {
+			if m.Opening == nil {
+				if m.OpenEvidence != "" || u != 0 || d != 0 {
 					return fail("invalid missing-opening void")
 				}
-			} else if m.OpenPrice > MaxAtoms || !isHex(m.OpenEvidence, 64) || m.OpenObservedAt < m.Spec.Start || m.OpenObservedAt > m.Spec.Start+m.Spec.ObservationWindow {
+			} else if validateObservation(m.Opening, m.Spec.Feed, m.Spec.Start, m.Spec.ObservationWindow, s.Time) != nil || !isHex(m.OpenEvidence, 64) {
 				return fail("invalid void opening")
 			}
 		default:

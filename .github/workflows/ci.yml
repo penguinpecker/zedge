@@ -25,6 +25,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check
+      - run: npm run test:keeper
       - run: node --test contracts/scripts/broadcast-hybrid.test.mjs contracts/scripts/broadcast-hybrid-smoke.test.mjs
       - run: npm audit --audit-level=low
 
@@ -46,6 +47,7 @@ jobs:
       - run: go vet ./...
       - run: go test -race -cover ./...
       - run: go test -run='^$' -fuzz=FuzzCommandSequences -fuzztime=30s -parallel=2
+      - run: go test -run='^$' -fuzz=FuzzExactOraclePriceComparison -fuzztime=20s -parallel=2
       - run: go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
       - run: govulncheck ./...
 

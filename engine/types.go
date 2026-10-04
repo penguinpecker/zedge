@@ -4,7 +4,7 @@
 package engine
 
 const (
-	Version                 = 1
+	Version                 = 2
 	AtomScale        uint64 = 1_000_000
 	Lot              uint64 = 1_000
 	MaxAtoms         uint64 = 1_000_000_000_000_000
@@ -53,6 +53,7 @@ const (
 	CancelAll         Operation = "cancel_all"
 	ResolveRound      Operation = "resolve_round"
 	VoidRound         Operation = "void_round"
+	ArchiveRound      Operation = "archive_round"
 	Redeem            Operation = "redeem"
 	RequestWithdrawal Operation = "request_withdrawal"
 	CancelWithdrawal  Operation = "cancel_withdrawal"
@@ -67,10 +68,40 @@ type Domain struct {
 	RulesVersion  uint32 `json:"rulesVersion"`
 }
 type Config struct {
-	Domain     Domain `json:"domain"`
-	Authority  string `json:"authority"`
-	Collateral string `json:"collateral"`
-	FeeBps     uint64 `json:"feeBps"`
+	Domain     Domain         `json:"domain"`
+	Authority  string         `json:"authority"`
+	Collateral string         `json:"collateral"`
+	FeeBps     uint64         `json:"feeBps"`
+	Oracle     RegistryConfig `json:"oracle"`
+}
+
+// RegistryConfig pins the exact public Streams registry policy. The adapter
+// authenticates its canonical deployment/code; these values are not proof.
+type RegistryConfig struct {
+	ChainID           uint64 `json:"chainId"`
+	Registry          string `json:"registry"`
+	Oracle            string `json:"oracle"`
+	RulesHash         string `json:"rulesHash"`
+	BTCFeedID         string `json:"btcFeedId"`
+	ETHFeedID         string `json:"ethFeedId"`
+	Decimals          uint8  `json:"decimals"`
+	ObservationWindow uint64 `json:"observationWindow"`
+	OpeningGrace      uint64 `json:"openingGrace"`
+	SettlementGrace   uint64 `json:"settlementGrace"`
+	CutoffBuffer      uint64 `json:"cutoffBuffer"`
+}
+
+// StreamsObservation mirrors the authenticated schema-v3 boundary result.
+// Price is an exact positive int192 decimal string at 18 decimals, never a
+// JSON number, float, rounded uint64, or collateral-denominated amount.
+type StreamsObservation struct {
+	FeedID                string `json:"feedId"`
+	Price                 string `json:"price"`
+	ValidFromTimestamp    uint32 `json:"validFromTimestamp"`
+	ObservationsTimestamp uint32 `json:"observationsTimestamp"`
+	ExpiresAt             uint32 `json:"expiresAt"`
+	ReportHash            string `json:"reportHash"`
+	Decimals              uint8  `json:"decimals"`
 }
 
 // AuthenticatedContext is a trusted adapter input, NEVER part of user JSON.
@@ -87,6 +118,7 @@ type AuthenticatedContext struct {
 type RoundSpec struct {
 	Asset              string `json:"asset"`
 	Feed               string `json:"feed"`
+	RegistryRoundID    string `json:"registryRoundId"`
 	Start              uint64 `json:"start"`
 	End                uint64 `json:"end"`
 	Cutoff             uint64 `json:"cutoff"`
@@ -99,27 +131,26 @@ type RoundSpec struct {
 // The adapter binds its canonical digest to authorization and verified context.
 // Only fields relevant to Op may be nonzero; unknown JSON fields are rejected.
 type Command struct {
-	Domain       Domain      `json:"domain"`
-	ID           string      `json:"id"`
-	Nonce        uint64      `json:"nonce"`
-	Op           Operation   `json:"op"`
-	Account      string      `json:"account,omitempty"`
-	RoundID      string      `json:"roundId,omitempty"`
-	Round        *RoundSpec  `json:"round,omitempty"`
-	Amount       uint64      `json:"amount,omitempty"`
-	Outcome      Outcome     `json:"outcome,omitempty"`
-	Side         Side        `json:"side,omitempty"`
-	Price        uint64      `json:"price,omitempty"`
-	Quantity     uint64      `json:"quantity,omitempty"`
-	TIF          TimeInForce `json:"tif,omitempty"`
-	Expiry       uint64      `json:"expiry,omitempty"`
-	MaxFee       uint64      `json:"maxFee,omitempty"`
-	OrderID      string      `json:"orderId,omitempty"`
-	WithdrawalID string      `json:"withdrawalId,omitempty"`
-	Destination  string      `json:"destination,omitempty"`
-	Evidence     string      `json:"evidence,omitempty"`
-	ObservedAt   uint64      `json:"observedAt,omitempty"`
-	OraclePrice  uint64      `json:"oraclePrice,omitempty"`
+	Domain       Domain              `json:"domain"`
+	ID           string              `json:"id"`
+	Nonce        uint64              `json:"nonce"`
+	Op           Operation           `json:"op"`
+	Account      string              `json:"account,omitempty"`
+	RoundID      string              `json:"roundId,omitempty"`
+	Round        *RoundSpec          `json:"round,omitempty"`
+	Amount       uint64              `json:"amount,omitempty"`
+	Outcome      Outcome             `json:"outcome,omitempty"`
+	Side         Side                `json:"side,omitempty"`
+	Price        uint64              `json:"price,omitempty"`
+	Quantity     uint64              `json:"quantity,omitempty"`
+	TIF          TimeInForce         `json:"tif,omitempty"`
+	Expiry       uint64              `json:"expiry,omitempty"`
+	MaxFee       uint64              `json:"maxFee,omitempty"`
+	OrderID      string              `json:"orderId,omitempty"`
+	WithdrawalID string              `json:"withdrawalId,omitempty"`
+	Destination  string              `json:"destination,omitempty"`
+	Evidence     string              `json:"evidence,omitempty"`
+	Observation  *StreamsObservation `json:"observation,omitempty"`
 }
 
 type Holding struct {
@@ -139,19 +170,17 @@ type Account struct {
 	LastReceipt  Receipt   `json:"lastReceipt"`
 }
 type Round struct {
-	ID              string    `json:"id"`
-	Spec            RoundSpec `json:"spec"`
-	Status          string    `json:"status"`
-	OpenPrice       uint64    `json:"openPrice"`
-	OpenObservedAt  uint64    `json:"openObservedAt"`
-	ClosePrice      uint64    `json:"closePrice"`
-	CloseObservedAt uint64    `json:"closeObservedAt"`
-	OpenEvidence    string    `json:"openEvidence"`
-	CloseEvidence   string    `json:"closeEvidence"`
-	Outcome         Outcome   `json:"outcome"`
-	Locked          uint64    `json:"locked"`
-	UpSupply        uint64    `json:"upSupply"`
-	DownSupply      uint64    `json:"downSupply"`
+	ID            string              `json:"id"`
+	Spec          RoundSpec           `json:"spec"`
+	Status        string              `json:"status"`
+	Opening       *StreamsObservation `json:"opening,omitempty"`
+	Closing       *StreamsObservation `json:"closing,omitempty"`
+	OpenEvidence  string              `json:"openEvidence"`
+	CloseEvidence string              `json:"closeEvidence"`
+	Outcome       Outcome             `json:"outcome"`
+	Locked        uint64              `json:"locked"`
+	UpSupply      uint64              `json:"upSupply"`
+	DownSupply    uint64              `json:"downSupply"`
 }
 type Order struct {
 	ID             string  `json:"id"`
@@ -194,17 +223,27 @@ type Fill struct {
 // safe to publish or forward wholesale to either trader. Adapter must project
 // account-specific receipts and omit counterparty IDs.
 type Receipt struct {
-	Sequence         uint64      `json:"sequence"`
-	CommandID        string      `json:"commandId"`
-	Account          string      `json:"account,omitempty"`
-	Status           string      `json:"status"`
-	OrderID          string      `json:"orderId,omitempty"`
-	RoundID          string      `json:"roundId,omitempty"`
-	WithdrawalID     string      `json:"withdrawalId,omitempty"`
-	Amount           uint64      `json:"amount,omitempty"`
-	Fills            []Fill      `json:"fills,omitempty"`
-	ReleasedOrders   []string    `json:"releasedOrders,omitempty"`
-	PublicWithdrawal *Withdrawal `json:"publicWithdrawal,omitempty"`
+	Sequence         uint64        `json:"sequence"`
+	CommandID        string        `json:"commandId"`
+	Account          string        `json:"account,omitempty"`
+	Status           string        `json:"status"`
+	OrderID          string        `json:"orderId,omitempty"`
+	RoundID          string        `json:"roundId,omitempty"`
+	WithdrawalID     string        `json:"withdrawalId,omitempty"`
+	Amount           uint64        `json:"amount,omitempty"`
+	Fills            []Fill        `json:"fills,omitempty"`
+	ReleasedOrders   []string      `json:"releasedOrders,omitempty"`
+	PublicWithdrawal *Withdrawal   `json:"publicWithdrawal,omitempty"`
+	Archive          *RoundArchive `json:"archive,omitempty"`
+}
+
+// RoundArchive is a terminal, fully redeemed round record. An adapter must
+// durably retain it in the same commit as the new state and verify its hash.
+type RoundArchive struct {
+	Count        uint64 `json:"count"`
+	PreviousRoot string `json:"previousRoot"`
+	Round        Round  `json:"round"`
+	Hash         string `json:"hash"`
 }
 type State struct {
 	Version          uint32       `json:"version"`
@@ -225,4 +264,6 @@ type State struct {
 	PaidOut          uint64       `json:"paidOut"`
 	Fees             uint64       `json:"fees"`
 	ExternalEvidence []string     `json:"externalEvidence"`
+	ArchivedRounds   uint64       `json:"archivedRounds"`
+	ArchiveRoot      string       `json:"archiveRoot"`
 }

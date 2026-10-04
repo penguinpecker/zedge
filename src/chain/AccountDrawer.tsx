@@ -79,7 +79,7 @@ export default function AccountDrawer({ view, onView, onClose, network, wallet, 
   const sameNetwork = wallet.session?.chainId === network;
   let amountError = "";
   if (amount) {
-    try { parseAtomicAmount(amount, 18); } catch { amountError = "Use a positive decimal amount without separators."; }
+    try { parseAtomicAmount(amount, 6); } catch { amountError = "Use a positive decimal amount without separators."; }
   }
   useLayoutEffect(() => {
     const element = dialog.current;
@@ -144,7 +144,7 @@ export default function AccountDrawer({ view, onView, onClose, network, wallet, 
           <h3>What stays public</h3><p className="chain-copy">On-chain transactions, including deposits and withdrawals, are public.</p>
           <h3>Keys and account access</h3><p className="chain-copy">Key setup and recovery are not available yet.</p>
           <button className="button" disabled>Key rotation unavailable</button>
-          <h3>Recovery and withdrawals</h3><p className="chain-copy">Withdrawals are unavailable. Claims can only release withdrawals that have already been approved.</p>
+          <h3>Recovery and withdrawals</h3><p className="chain-copy">No custody contract or claim facility is connected. The public market contracts cannot hold or release your trading funds.</p>
           <button className="button" disabled>Recovery unavailable</button>
           <h3>Your session</h3><p className="chain-copy">Disconnect from ZEDGE here. Manage saved permissions in your wallet.</p>
           {wallet.session && <button className="button" onClick={wallet.disconnect}>Disconnect from app</button>}

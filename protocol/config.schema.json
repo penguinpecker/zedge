@@ -1,0 +1,145 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/penguinpecker/zedge/protocol/config.schema.json",
+  "title": "ZEDGE engine configuration v2",
+  "description": "Bootstrap configuration, not a user command. Engine recomputes the exact Streams registry rulesHash and validates cross-field scheduling bounds; adapter must authenticate deployment/runtime identity.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "domain",
+    "authority",
+    "collateral",
+    "feeBps",
+    "oracle"
+  ],
+  "properties": {
+    "domain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "chainId",
+        "endpoint",
+        "applicationId",
+        "rulesVersion"
+      ],
+      "properties": {
+        "chainId": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000000000000
+        },
+        "endpoint": {
+          "type": "string",
+          "pattern": "^0x[0-9a-f]{40}$",
+          "not": {
+            "const": "0x0000000000000000000000000000000000000000"
+          }
+        },
+        "applicationId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9_.-]+$"
+        },
+        "rulesVersion": {
+          "const": 2
+        }
+      }
+    },
+    "authority": {
+      "type": "string",
+      "pattern": "^0x[0-9a-f]{40}$",
+      "not": {
+        "const": "0x0000000000000000000000000000000000000000"
+      }
+    },
+    "collateral": {
+      "type": "string",
+      "pattern": "^0x[0-9a-f]{40}$",
+      "not": {
+        "const": "0x0000000000000000000000000000000000000000"
+      }
+    },
+    "feeBps": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1000
+    },
+    "oracle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "chainId",
+        "registry",
+        "oracle",
+        "rulesHash",
+        "btcFeedId",
+        "ethFeedId",
+        "decimals",
+        "observationWindow",
+        "openingGrace",
+        "settlementGrace",
+        "cutoffBuffer"
+      ],
+      "properties": {
+        "chainId": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000000000000
+        },
+        "registry": {
+          "type": "string",
+          "pattern": "^0x[0-9a-f]{40}$",
+          "not": {
+            "const": "0x0000000000000000000000000000000000000000"
+          }
+        },
+        "oracle": {
+          "type": "string",
+          "pattern": "^0x[0-9a-f]{40}$",
+          "not": {
+            "const": "0x0000000000000000000000000000000000000000"
+          }
+        },
+        "rulesHash": {
+          "type": "string",
+          "pattern": "^0x[0-9a-f]{64}$",
+          "not": {
+            "const": "0x0000000000000000000000000000000000000000000000000000000000000000"
+          }
+        },
+        "btcFeedId": {
+          "type": "string",
+          "pattern": "^0x0003[0-9a-f]{60}$"
+        },
+        "ethFeedId": {
+          "type": "string",
+          "pattern": "^0x0003[0-9a-f]{60}$"
+        },
+        "decimals": {
+          "const": 18
+        },
+        "observationWindow": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 60
+        },
+        "openingGrace": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 299
+        },
+        "settlementGrace": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400
+        },
+        "cutoffBuffer": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 299
+        }
+      }
+    }
+  }
+}

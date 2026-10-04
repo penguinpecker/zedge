@@ -7,7 +7,7 @@ import (
 
 func systemOp(o Operation) bool {
 	switch o {
-	case Deposit, CreateRound, OpenRound, Checkpoint, ResolveRound, VoidRound, ExportWithdrawal, ConfirmClaim:
+	case Deposit, CreateRound, OpenRound, Checkpoint, ResolveRound, VoidRound, ArchiveRound, ExportWithdrawal, ConfirmClaim:
 		return true
 	}
 	return false
@@ -135,6 +135,18 @@ func copyReceipt(r Receipt) Receipt {
 		w := *r.PublicWithdrawal
 		r.PublicWithdrawal = &w
 	}
+	if r.Archive != nil {
+		a := *r.Archive
+		if a.Round.Opening != nil {
+			o := *a.Round.Opening
+			a.Round.Opening = &o
+		}
+		if a.Round.Closing != nil {
+			o := *a.Round.Closing
+			a.Round.Closing = &o
+		}
+		r.Archive = &a
+	}
 	return r
 }
 
@@ -151,6 +163,8 @@ func (s *State) execute(c Command, r *Receipt) error {
 		return nil
 	case Checkpoint:
 		return nil
+	case ArchiveRound:
+		return s.archiveRound(c, r)
 	case Deposit:
 		if c.Amount == 0 || c.Amount > MaxAtoms {
 			return fail("invalid deposit amount")
@@ -174,7 +188,7 @@ func (s *State) execute(c Command, r *Receipt) error {
 		if c.Round == nil {
 			return fail("missing round")
 		}
-		if e := validateSpec(*c.Round); e != nil {
+		if e := validateSpec(s.Config, *c.Round); e != nil {
 			return e
 		}
 		if s.Time >= c.Round.Start {
@@ -195,12 +209,12 @@ func (s *State) execute(c Command, r *Receipt) error {
 		if e != nil {
 			return e
 		}
-		if m.Status != "scheduled" || s.Time < m.Spec.Start || s.Time > m.Spec.OpeningDeadline || c.ObservedAt < m.Spec.Start || c.ObservedAt > m.Spec.Start+m.Spec.ObservationWindow || c.ObservedAt > s.Time || c.OraclePrice == 0 || c.OraclePrice > MaxAtoms || !isHex(c.Evidence, 64) {
+		if m.Status != "scheduled" || s.Time < m.Spec.Start || s.Time > m.Spec.OpeningDeadline || validateObservation(c.Observation, m.Spec.Feed, m.Spec.Start, m.Spec.ObservationWindow, s.Time) != nil || !isHex(c.Evidence, 64) {
 			return fail("invalid opening observation")
 		}
 		m.Status = "open"
-		m.OpenPrice = c.OraclePrice
-		m.OpenObservedAt = c.ObservedAt
+		opening := *c.Observation
+		m.Opening = &opening
 		m.OpenEvidence = c.Evidence
 		r.RoundID = m.ID
 		return nil
@@ -247,14 +261,18 @@ func (s *State) execute(c Command, r *Receipt) error {
 			return fail("missing settlement evidence")
 		}
 		if c.Op == ResolveRound {
-			if m.Status != "open" || s.Time < m.Spec.End || s.Time > m.Spec.ResolutionDeadline || c.ObservedAt < m.Spec.End || c.ObservedAt > m.Spec.End+m.Spec.ObservationWindow || c.ObservedAt > s.Time || c.OraclePrice == 0 || c.OraclePrice > MaxAtoms {
+			if m.Status != "open" || s.Time < m.Spec.End || s.Time > m.Spec.ResolutionDeadline || validateObservation(c.Observation, m.Spec.Feed, m.Spec.End, m.Spec.ObservationWindow, s.Time) != nil {
 				return fail("invalid closing observation")
 			}
 			m.Status = "resolved"
-			m.ClosePrice = c.OraclePrice
-			m.CloseObservedAt = c.ObservedAt
+			closing := *c.Observation
+			m.Closing = &closing
 			m.Outcome = Down
-			if c.OraclePrice >= m.OpenPrice {
+			comparison, e := CompareOraclePrices(closing.Price, m.Opening.Price)
+			if e != nil {
+				return e
+			}
+			if comparison >= 0 {
 				m.Outcome = Up
 			}
 		} else {

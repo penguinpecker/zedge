@@ -42,7 +42,7 @@ test("mode is selected before either app mounts, defaults to demo only, with exp
   assert.equal(appMode("?mode=demo", "#/trade/btc-5m"), "demo");
   assert.equal(appMode("?mode=demo", "#/chain"), "demo");
   assert.equal(appMode("?mode=chainish", "#/chainish"), "demo");
-  assert.equal(DEFAULT_NETWORK, 2651420);
+  assert.equal(DEFAULT_NETWORK, 26514);
 });
 
 test("atomic amounts preserve precision beyond safe Number range and reject ambiguous input", () => {
@@ -114,10 +114,10 @@ test("altered contract identity, collateral, provider or rules fail verification
   }
 });
 
-test("the current release declares both networks unavailable and cannot enable trading", async () => {
+test("mainnet exposes only the public Streams registry while testnet and trading remain unavailable", async () => {
   for (const id of [2651420, 26514] as const) {
     const data = JSON.parse(await readFile(new URL(`../../public/deployments/${id}.json`, import.meta.url), "utf8")) as unknown;
-    assert.equal(parseManifest(data, id).status, "unavailable");
+    assert.equal(parseManifest(data, id).status, id === 26514 ? "configured" : "unavailable");
   }
   assert.throws(requireTradingReady, /No transaction was submitted/);
 });
