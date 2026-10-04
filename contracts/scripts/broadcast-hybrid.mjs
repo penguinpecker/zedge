@@ -25,8 +25,10 @@ const PROFILE = {
 };
 const NAMES = ['ChainlinkStreamsBoundaryOracle', 'BaseStreamsPublisher', 'HorizenStreamsOracle', 'StreamsRoundRegistry'];
 const GAS_ORACLE = '0x420000000000000000000000000000000000000F';
+const BASE_RECEIPT_RPC = 'https://mainnet.base.org';
 const json = value => JSON.stringify(value, (_, v) => typeof v === 'bigint' ? v.toString() : v, 2);
 const eq = (a, b) => String(a).toLowerCase() === String(b).toLowerCase();
+const validBlockHash = value => typeof value === 'string' && /^0x[0-9a-f]{64}$/i.test(value) && !/^0x0{64}$/i.test(value);
 const demand = condition => { if (!condition) throw new Error('Preflight mismatch'); };
 let phase = 'argument validation';
 
@@ -101,6 +103,84 @@ export function demandSigningAge(plan, runStartedAt, signedCount) {
   demand(Date.now() >= runStartedAt && Date.now() - runStartedAt <= 900000);
 }
 
+export function validateRecoveryCheckpoint(checkpoint, plan, planHash) {
+  demand(checkpoint.schemaVersion === 1 && checkpoint.status === 'prepared');
+  demand(eq(checkpoint.planHash, planHash) && eq(checkpoint.deployer, plan.deployer));
+  demand(Array.isArray(checkpoint.transactions) && checkpoint.transactions.length > 0 && checkpoint.transactions.length <= 4);
+  const startedAt = Date.parse(checkpoint.startedAt);
+  demand(Number.isFinite(startedAt) && startedAt >= Date.parse(plan.createdAt)
+    && startedAt - Date.parse(plan.createdAt) <= 300000);
+  demandSigningAge(plan, startedAt, checkpoint.transactions.length);
+  for (let i = 0; i < checkpoint.transactions.length; i++) {
+    const entry = checkpoint.transactions[i]; const intent = plan.intents[i];
+    demand(entry.name === intent.name && entry.chainId === intent.chainId && entry.nonce === intent.nonce);
+    demand(eq(entry.predictedAddress, intent.predictedAddress) && eq(entry.initCodeHash, intent.initCodeHash));
+    demand(/^0x[0-9a-f]{64}$/i.test(entry.transactionHash));
+    demand(['signed-awaiting-submission', 'submitted', 'confirmed'].includes(entry.status));
+    // A broadcast can only leave its last recorded entry uncertain.
+    demand(i === checkpoint.transactions.length - 1 || entry.status === 'confirmed');
+  }
+  return startedAt;
+}
+
+function transactionFor(intent) {
+  return { type: 'eip1559', chainId: intent.chainId, nonce: intent.nonce, data: intent.initCode, value: 0n,
+    gas: BigInt(intent.gasLimit), maxFeePerGas: BigInt(intent.maxFeePerGas), maxPriorityFeePerGas: BigInt(intent.maxPriorityFeePerGas) };
+}
+
+async function feeUpperBound(client, intent, blockNumber) {
+  const transaction = transactionFor(intent);
+  const wire = serializeTransaction(transaction, { r: `0x${'ff'.repeat(32)}`, s: `0x${'ff'.repeat(32)}`, yParity: 1 });
+  const l1Fee = await client.readContract({ address: GAS_ORACLE, abi: parseAbi(['function getL1FeeUpperBound(uint256) view returns (uint256)']), functionName: 'getL1FeeUpperBound', args: [BigInt((wire.length - 2) / 2)], blockNumber });
+  const operatorFee = await client.readContract({ address: GAS_ORACLE, abi: parseAbi(['function getOperatorFee(uint256) view returns (uint256)']), functionName: 'getOperatorFee', args: [transaction.gas], blockNumber });
+  return transaction.gas * transaction.maxFeePerGas + 2n * (l1Fee + operatorFee);
+}
+
+export async function verifyRecordedTransaction(reader, client, intent, entry) {
+  // getTransactionReceipt fails closed for a pending or unknown hash; recovery never submits it again.
+  const receipt = await reader.getTransactionReceipt({ hash: entry.transactionHash });
+  demand(validBlockHash(receipt.blockHash));
+  demand(eq(receipt.transactionHash, entry.transactionHash) && receipt.status === 'success');
+  demand(eq(receipt.contractAddress, intent.predictedAddress));
+  const [tx, block, head] = await Promise.all([
+    reader.getTransaction({ hash: entry.transactionHash }),
+    reader.getBlock({ blockNumber: receipt.blockNumber }),
+    reader.getBlockNumber({ cacheTime: 0 }),
+  ]);
+  demand(validBlockHash(block.hash) && validBlockHash(tx.blockHash));
+  demand(head >= receipt.blockNumber + 1n && block.number === receipt.blockNumber && eq(block.hash, receipt.blockHash));
+  demand(eq(tx.hash, entry.transactionHash) && eq(tx.blockHash, receipt.blockHash) && tx.blockNumber === receipt.blockNumber);
+  demand(tx.to === null && tx.value === 0n && eq(tx.from, intent.from) && tx.nonce === intent.nonce);
+  demand(tx.chainId === intent.chainId && tx.type === 'eip1559');
+  demand(eq(tx.input, intent.initCode) && eq(keccak256(tx.input), intent.initCodeHash));
+  demand(tx.gas === BigInt(intent.gasLimit) && tx.maxFeePerGas === BigInt(intent.maxFeePerGas)
+    && tx.maxPriorityFeePerGas === BigInt(intent.maxPriorityFeePerGas));
+  const code = await client.getCode({ address: intent.predictedAddress });
+  demand(code && code !== '0x' && eq(keccak256(code), intent.simulatedRuntimeHash));
+  const historicalMaximum = await feeUpperBound(reader, intent, receipt.blockNumber);
+  const bounds = [BigInt(intent.fees.maximumEstimatedWei), historicalMaximum];
+  if (entry.feeUpperBoundWei !== undefined) {
+    demand(/^[1-9][0-9]*$/.test(String(entry.feeUpperBoundWei)));
+    bounds.push(BigInt(entry.feeUpperBoundWei));
+  }
+  // Keep the greatest conservative estimate; historical rollup fee quoting is not actual-fee accounting.
+  const maximum = bounds.reduce((a, b) => a > b ? a : b);
+  demand(eq((await reader.getBlock({ blockNumber: receipt.blockNumber })).hash, receipt.blockHash));
+  return { receipt, runtimeCodeHash: keccak256(code), maximum };
+}
+
+async function waitForCanonicalRecordedTransaction(reader, client, intent, entry) {
+  const deadline = Date.now() + 180000;
+  await reader.waitForTransactionReceipt({ hash: entry.transactionHash, confirmations: 2, timeout: 180000, pollingInterval: 2000 });
+  while (Date.now() < deadline) {
+    // A wait result with a zero blockHash is incomplete; retry only reads, never the submitted transaction.
+    const receipt = await reader.getTransactionReceipt({ hash: entry.transactionHash });
+    if (validBlockHash(receipt.blockHash)) return verifyRecordedTransaction(reader, client, intent, entry);
+    await new Promise(ok => setTimeout(ok, Math.min(2000, Math.max(0, deadline - Date.now()))));
+  }
+  demand(false);
+}
+
 async function loadAccount(expected) {
   const handle = await open(resolve(ROOT, 'contracts/.env.deploy.local'), constants.O_RDONLY | constants.O_NOFOLLOW);
   let bytes;
@@ -109,8 +189,9 @@ async function loadAccount(expected) {
     demand(stat.isFile() && (stat.mode & 0o777) === 0o600 && stat.size < 16384);
     bytes = await handle.readFile();
     const value = parseEnv(bytes.toString()).DEPLOYER_PRIVATE_KEY;
-    demand(typeof value === 'string' && /^0x[0-9a-f]{64}$/i.test(value));
-    const account = privateKeyToAccount(value);
+    demand(typeof value === 'string' && /^(?:0x)?[0-9a-f]{64}$/i.test(value));
+    // Wallet exports may omit the RPC-style prefix. Preserve the exact 32 key bytes.
+    const account = privateKeyToAccount(`0x${value.replace(/^0x/i, '')}`);
     demand(eq(account.address, expected));
     return account;
   } finally {
@@ -120,7 +201,8 @@ async function loadAccount(expected) {
 }
 
 async function main() {
-  demand(process.argv.length === 3 && process.argv[2] === '--broadcast');
+  demand(process.argv.length === 3 && ['--broadcast', '--resume'].includes(process.argv[2]));
+  const resume = process.argv[2] === '--resume';
   phase = 'public plan validation';
   const planText = await readFile(PLAN, 'utf8');
   const plan = JSON.parse(planText);
@@ -131,16 +213,19 @@ async function main() {
   demand(plan.simulation.chainStateOverridden === false && plan.simulation.balancesOverridden === false);
   demand(plan.simulation.generatedWalletAccounts === 0 && eq(plan.configHash, keccak256(toHex(configText))));
   demand(eq(plan.deployer, config.deployer) && plan.expiresAfterSeconds === 300);
-  demandFreshPlan(plan);
+  if (!resume) demandFreshPlan(plan);
   demand(Array.isArray(plan.intents) && plan.intents.length === 4);
   const expectedArgs = expectedConstructors(config, plan);
 
-  const clients = {};
+  const clients = {}; const receiptReaders = {};
   for (const [key, profile] of Object.entries(PROFILE)) {
     demand(plan.chains[key].chainId === profile.id && config.chains[key].chainId === profile.id);
     demand(eq(config.chains[key].rpcUrl, profile.rpc));
     const chain = defineChain({ id: profile.id, name: key, nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 }, rpcUrls: { default: { http: [profile.rpc] } } });
     clients[key] = createPublicClient({ chain, transport: http(profile.rpc, { timeout: 20000, retryCount: 2 }) });
+    receiptReaders[key] = key === 'base'
+      ? createPublicClient({ chain, transport: http(BASE_RECEIPT_RPC, { timeout: 20000, retryCount: 1 }) })
+      : clients[key];
     demand(BigInt(plan.budgets[key].approvedCeilingWei) === BigInt(config.maximumSpendWei[key]));
     demand(BigInt(plan.budgets[key].approvedCeilingWei) > 0n
       && BigInt(plan.budgets[key].approvedCeilingWei) <= profile.ceiling);
@@ -180,16 +265,22 @@ async function main() {
   await recheckPublicDependencies(config);
   const confirmed = { base: 0, horizen: 0 };
   const spent = { base: 0n, horizen: 0n };
-  phase = 'local signer validation';
-  const account = await loadAccount(plan.deployer);
-  const runStartedAt = Date.now();
-  const checkpoint = { schemaVersion: 1, status: 'prepared', startedAt: new Date(runStartedAt).toISOString(), planHash: keccak256(toHex(planText)), deployer: plan.deployer, transactions: [] };
+  let runStartedAt = Date.now();
+  let checkpoint;
+  if (resume) {
+    phase = 'frozen recovery checkpoint validation';
+    checkpoint = JSON.parse(await readFile(CHECKPOINT, 'utf8'));
+    runStartedAt = validateRecoveryCheckpoint(checkpoint, plan, keccak256(toHex(planText)));
+  } else {
+    checkpoint = { schemaVersion: 1, status: 'prepared', startedAt: new Date(runStartedAt).toISOString(), planHash: keccak256(toHex(planText)), deployer: plan.deployer, transactions: [] };
+  }
   await mkdir(dirname(CHECKPOINT), { recursive: true });
-  phase = 'exclusive recovery checkpoint creation';
-  // An existing checkpoint always requires manual inspection, including one from an uncertain send.
-  const handle = await open(CHECKPOINT, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
-  try { await handle.writeFile(`${json(checkpoint)}\n`); await handle.sync(); }
-  finally { await handle.close(); }
+  if (!resume) {
+    phase = 'exclusive recovery checkpoint creation';
+    const handle = await open(CHECKPOINT, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+    try { await handle.writeFile(`${json(checkpoint)}\n`); await handle.sync(); }
+    finally { await handle.close(); }
+  }
   const save = async () => {
     const temporary = `${CHECKPOINT}.${process.pid}.next`;
     const update = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
@@ -198,7 +289,26 @@ async function main() {
     await rename(temporary, CHECKPOINT);
   };
 
-  for (const intent of plan.intents) {
+  if (resume) {
+    for (let i = 0; i < checkpoint.transactions.length; i++) {
+      const intent = plan.intents[i]; const entry = checkpoint.transactions[i];
+      phase = `${intent.name}: recorded transaction recovery`;
+      demand(await receiptReaders[intent.chain].getChainId() === intent.chainId);
+      const result = await verifyRecordedTransaction(receiptReaders[intent.chain], clients[intent.chain], intent, entry);
+      entry.receipt = result.receipt; entry.runtimeCodeHash = result.runtimeCodeHash;
+      entry.feeUpperBoundWei = result.maximum; entry.status = 'confirmed';
+      confirmed[intent.chain]++; spent[intent.chain] += result.maximum;
+      demand(spent[intent.chain] <= BigInt(config.maximumSpendWei[intent.chain]));
+      checkpoint.costUpperBoundsWei = spent; await save();
+      console.log(json({ name: intent.name, transactionHash: entry.transactionHash, status: 'confirmed-from-chain-recovery' }));
+    }
+  }
+  // Recover and validate public facts before loading any signing material.
+  demandSigningAge(plan, runStartedAt, checkpoint.transactions.length);
+  phase = 'local signer validation';
+  const account = checkpoint.transactions.length < 4 ? await loadAccount(plan.deployer) : undefined;
+
+  for (const intent of plan.intents.slice(checkpoint.transactions.length)) {
     phase = `${intent.name}: live preflight`;
     await recheckPublicDependencies(config);
     // Never update the route or nonce silently if another wallet action intervenes.
@@ -222,11 +332,8 @@ async function main() {
     const maxPriorityFeePerGas = BigInt(intent.maxPriorityFeePerGas);
     const feesNow = await client.estimateFeesPerGas();
     demand(feesNow.maxFeePerGas <= maxFeePerGas && feesNow.maxPriorityFeePerGas <= maxPriorityFeePerGas);
-    const transaction = { type: 'eip1559', chainId: intent.chainId, nonce: intent.nonce, data: intent.initCode, value: 0n, gas, maxFeePerGas, maxPriorityFeePerGas };
-    const wire = serializeTransaction(transaction, { r: `0x${'ff'.repeat(32)}`, s: `0x${'ff'.repeat(32)}`, yParity: 1 });
-    const l1Fee = await client.readContract({ address: GAS_ORACLE, abi: parseAbi(['function getL1FeeUpperBound(uint256) view returns (uint256)']), functionName: 'getL1FeeUpperBound', args: [BigInt((wire.length - 2) / 2)] });
-    const operatorFee = await client.readContract({ address: GAS_ORACLE, abi: parseAbi(['function getOperatorFee(uint256) view returns (uint256)']), functionName: 'getOperatorFee', args: [gas] });
-    const maximum = gas * maxFeePerGas + 2n * (l1Fee + operatorFee);
+    const transaction = transactionFor(intent);
+    const maximum = await feeUpperBound(client, intent);
     const future = plan.intents.filter(x => x.chain === intent.chain && x.nonce > intent.nonce)
       .reduce((sum, x) => sum + BigInt(x.fees.maximumEstimatedWei), 0n);
     demand(spent[intent.chain] + maximum + future <= BigInt(config.maximumSpendWei[intent.chain]));
@@ -248,7 +355,7 @@ async function main() {
     phase = `${intent.name}: local signing`;
     const signed = await account.signTransaction(transaction);
     const expectedHash = keccak256(signed);
-    const entry = { name: intent.name, chainId: intent.chainId, nonce: intent.nonce, predictedAddress: intent.predictedAddress, initCodeHash: intent.initCodeHash, transactionHash: expectedHash, status: 'signed-awaiting-submission' };
+    const entry = { name: intent.name, chainId: intent.chainId, nonce: intent.nonce, predictedAddress: intent.predictedAddress, initCodeHash: intent.initCodeHash, transactionHash: expectedHash, feeUpperBoundWei: maximum, status: 'signed-awaiting-submission' };
     checkpoint.transactions.push(entry); await save();
     phase = `${intent.name}: transaction submission`;
     const wallet = createWalletClient({ chain: client.chain, transport: http(PROFILE[intent.chain].rpc, { timeout: 20000, retryCount: 0 }) });
@@ -258,16 +365,15 @@ async function main() {
     entry.status = 'submitted'; await save();
     console.log(json({ name: intent.name, chainId: intent.chainId, transactionHash: hash, status: 'submitted' }));
     phase = `${intent.name}: receipt confirmation`;
-    const receipt = await client.waitForTransactionReceipt({ hash, confirmations: 2, timeout: 180000, pollingInterval: 2000 });
-    entry.receipt = receipt; await save();
-    demand(eq(receipt.transactionHash, expectedHash) && receipt.status === 'success' && eq(receipt.contractAddress, intent.predictedAddress));
-    const code = await client.getCode({ address: intent.predictedAddress });
-    demand(code && code !== '0x' && eq(keccak256(code), intent.simulatedRuntimeHash));
-    entry.runtimeCodeHash = keccak256(code); entry.status = 'confirmed';
+    const verified = await waitForCanonicalRecordedTransaction(receiptReaders[intent.chain], client, intent, entry);
+    entry.receipt = verified.receipt; entry.runtimeCodeHash = verified.runtimeCodeHash;
+    entry.feeUpperBoundWei = verified.maximum; entry.status = 'confirmed';
     confirmed[intent.chain]++;
     // Budget using the conservative bound, rather than assuming all rollup fees appear in receipt fields.
-    spent[intent.chain] += maximum;
+    spent[intent.chain] += verified.maximum;
+    checkpoint.costUpperBoundsWei = spent;
     await save();
+    demand(spent[intent.chain] <= BigInt(config.maximumSpendWei[intent.chain]));
     console.log(json({ name: intent.name, chainId: intent.chainId, address: intent.predictedAddress, transactionHash: hash, status: 'confirmed' }));
   }
   checkpoint.status = 'four-contracts-confirmed-runtime-matched';

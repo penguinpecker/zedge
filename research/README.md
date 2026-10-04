@@ -15,6 +15,7 @@ The current public application remains a paper-trading prototype. Implementation
 | [Horizen ecosystem and Builder Fund](horizen-builder-program.md) | The requested fund page and `#why` section, application categories, infrastructure, USDC.e, oracle dependencies, budget inputs, and grant milestones. |
 | [Product requirements and interaction inventory](product-requirements.md) | Screens, feature priorities, dialogs, small interactions, failure states, and acceptance criteria for the prediction-market platform. |
 | [Deployment preflight](deployment-preflight.md) | Live oracle availability, Chainlink alternatives, collateral proxy identity and source-verification readiness. |
+| [Mainnet deployment record](../contracts/deployment/MAINNET.md) | Confirmed Horizen registry/cache and Base Chainlink verification/publication contracts, transaction evidence and remaining integration work. |
 | [Chainlink Streams on Base](chainlink-streams-base.md) | Exact feed IDs, precision, verifier governance, and genuine signed-report checks. |
 | [Horizen-first native oracle route](hybrid-chain-routing.md) | Base verification with native authenticated delivery to the Horizen registry. |
 | [Deployment gas snapshot](deployment-costs.md) | Scoped estimates for the two original contracts, distinct from a complete exchange launch budget. |
@@ -108,7 +109,7 @@ Use one confidential application containing many uniquely identified rounds. Cha
 
 A signature authenticates an observation; it does not by itself prove that a submitter chose the first eligible observation. Before selecting a provider, specify the exact opening/closing selection rule and prove how omitted or selectively chosen observations are handled. A trusted collector is an additional declared assumption, not equivalent to a unique historical observation proof.
 
-The architecture report evaluates Pyth's fixed-time verification as an alternative, conditional on actual target-network deployment and service access. Legacy Horizen EON support must not be substituted for support on the current Horizen L3. The ecosystem report records the primary-source comparison. **Neither oracle is finalized as the production settlement dependency.**
+The architecture report originally evaluated Pyth's fixed-time verification, conditional on actual target-network deployment and service access. Legacy Horizen EON support must not be substituted for support on the current Horizen L3. The subsequent approved route uses Chainlink Streams verification on Base and authenticated native messaging into a Horizen registry/cache; see the [mainnet deployment record](../contracts/deployment/MAINNET.md). Continuous fresh report access and production integration remain release dependencies.
 
 Market lifecycle: `scheduled → opening pending → trading → closed → resolution pending → resolved`, with a predeclared failure/void policy. Opening evidence must be fixed before funded orders become executable. Missing evidence cannot trigger an administrator-selected replacement after the outcome is known.
 

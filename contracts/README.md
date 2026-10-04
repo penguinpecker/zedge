@@ -1,6 +1,6 @@
 # ZEDGE public round contracts
 
-Original, noncustodial Solidity foundations for BTC/ETH binary rounds. **No contracts have been deployed to Horizen by this work. No real collateral, private order matching, TEE admission or recovery vault is implemented here.** `src/` contains reusable contracts; `test/mocks/` contains deliberately insecure test fixtures.
+Original, noncustodial Solidity foundations for BTC/ETH binary rounds. **Four public contracts are deployed on Horizen and Base; see the [mainnet deployment record](deployment/MAINNET.md). No collateral custody, private order matching, TEE admission or recovery vault is implemented by these contracts.** `src/` contains reusable contracts; `test/mocks/` contains deliberately insecure test fixtures.
 
 ## Implemented contracts
 
@@ -32,9 +32,9 @@ See [the Base verifier and genuine report evidence](../research/chainlink-stream
 
 `PythBoundaryOracle` is a concrete adapter to Pyth Core `parsePriceFeedUpdatesUnique`. It forwards the exact quoted proof fee and validates response count/feed/timestamp. Evidence is `abi.encode(bytes[] updateData)`. It does not substitute a reporter, another price method or another provider when verification fails. [Pyth unique historical-update semantics](https://api-reference.pyth.network/price-feeds/evm/parsePriceFeedUpdatesUnique)
 
-Pyth support on the **current Horizen L3** remains an external deployment gate; old Horizen EON support is not sufficient. No verifier address, live feed ID, deployed registry address, RPC credential or private key is shipped. A Pyth-compatible-looking provider without the unique historical method is incompatible. See the [oracle research](../research/private-orderbook-architecture.md#oracle-and-exact-round-boundaries).
+Pyth support on the **current Horizen L3** was not established; old Horizen EON support is not sufficient. The original Pyth foundation remains undeployed. The new mainnet route uses Chainlink Streams on Base. A Pyth-compatible-looking provider without the unique historical method is incompatible. See the [oracle research](../research/private-orderbook-architecture.md#oracle-and-exact-round-boundaries).
 
-## Exact rules
+## Original Pyth foundation rules
 
 Constructor `Config` fixes the oracle, collateral contract identity, separate BTC/ETH feed IDs and exponents, observation window, opening/settlement submission grace, cutoff buffer and confidence threshold. These parameters are hashed with chain identity and a policy version into `rulesHash`. They cannot be edited for existing or future rounds on that registry; changed policy requires a new deployment/application binding.
 
@@ -71,9 +71,9 @@ python3 scripts/export-abi.py
 forge script script/LocalDryRun.s.sol:LocalDryRun -vv
 ```
 
-The local dry run uses unsigned fixture observations and a dummy token on chain ID 31337. It has **no broadcast calls** and needs no RPC or private key. Its printed addresses are simulated, not network deployments. `DeployRoundRegistry.s.sol` validates expected chain and supplied verifier/collateral runtime-code hashes before constructing contracts in simulation. It permits only local/Horizen network IDs, but does not establish that a provider is genuinely supported or immutable. Production deployment remains deferred.
+The original Pyth local dry run uses unsigned fixture observations and a dummy token on chain ID 31337. It has **no broadcast calls** and needs no RPC or private key. Its printed addresses are simulated, not network deployments. `DeployRoundRegistry.s.sol` validates expected chain and supplied verifier/collateral runtime-code hashes before constructing contracts in simulation. It permits only local/Horizen network IDs, but does not establish that a provider is genuinely supported or immutable. This Pyth deployment remains deferred.
 
-Do not add `--broadcast`, signer material or funded network configuration until deployment authorization and all protocol gates are resolved. Nothing in the provided script starts broadcast even when invoked by Forge; actual deployment tooling is intentionally not enabled.
+The separate Chainlink route uses `scripts/preflight-hybrid.mjs --simulate` and `scripts/broadcast-hybrid.mjs --broadcast` under the explicitly authorized public profile in `deployment/hybrid-mainnet.json`. A frozen plan binds bytecode, constructors, chain IDs, nonces, dependencies and cost ceilings. `--resume` inspects every recorded transaction on chain and never resends a recorded hash; it preserves the original signing deadline. Local evidence is ignored by Git. `scripts/verify-hybrid.mjs --check-deployed` reproduces Standard JSON and checks live creation data/runtime before emitting public source-verification packets. These tools do not deploy a confidential exchange.
 
 ## ABI and integration
 

@@ -24,8 +24,9 @@ const OUTPUT = resolve(ROOT, 'evidence/verification');
 const COMPILER = '0.8.30+commit.73712a01';
 const NAMES = ['ChainlinkStreamsBoundaryOracle', 'BaseStreamsPublisher', 'HorizenStreamsOracle', 'StreamsRoundRegistry'];
 const CHAINS = {
-  base: { id: 8453, rpc: 'https://base-rpc.publicnode.com' },
-  horizen: { id: 26514, rpc: 'https://horizen.calderachain.xyz/http' },
+  // PublicNode serves current state; Base's public archive serves historical receipts/headers.
+  base: { id: 8453, rpc: 'https://base-rpc.publicnode.com', historyRpc: 'https://mainnet.base.org' },
+  horizen: { id: 26514, rpc: 'https://horizen.calderachain.xyz/http', historyRpc: 'https://horizen.calderachain.xyz/http' },
 };
 const json = value => `${JSON.stringify(value, (_, v) => typeof v === 'bigint' ? v.toString() : v, 2)}\n`;
 const eq = (a, b) => typeof a === 'string' && typeof b === 'string' && a.toLowerCase() === b.toLowerCase();
@@ -155,13 +156,17 @@ async function checkDeployed(prepared) {
   const clients = Object.fromEntries(Object.entries(CHAINS).map(([key, value]) => [key, createPublicClient({
     transport: http(value.rpc, { timeout: 20000, retryCount: 2 }),
   })]));
+  const historyClients = Object.fromEntries(Object.entries(CHAINS).map(([key, value]) => [key, createPublicClient({
+    transport: http(value.historyRpc, { timeout: 20000, retryCount: 2 }),
+  })]));
   const packets = [];
   for (let index = 0; index < prepared.length; index++) {
     const item = prepared[index]; const intent = plan.intents[index]; const entry = checkpoint.transactions[index];
-    const chain = index < 2 ? 'base' : 'horizen'; const client = clients[chain];
+    const chain = index < 2 ? 'base' : 'horizen'; const client = clients[chain]; const history = historyClients[chain];
     phase = `${item.name}: confirm public transaction and runtime`;
     demand(intent.name === item.name && entry.name === item.name && intent.chain === chain, 'Deployment order mismatch');
-    demand(intent.chainId === CHAINS[chain].id && entry.chainId === intent.chainId && await client.getChainId() === intent.chainId, 'Wrong deployment chain');
+    demand(intent.chainId === CHAINS[chain].id && entry.chainId === intent.chainId
+      && await client.getChainId() === intent.chainId && await history.getChainId() === intent.chainId, 'Wrong deployment chain');
     demand(entry.status === 'confirmed' && intent.artifactPath === item.artifactPath, 'Unconfirmed or different artifact');
     demand(eq(intent.from, plan.deployer) && entry.nonce === intent.nonce && Number.isSafeInteger(intent.nonce), 'Deployer or nonce mismatch');
     demand(eq(getContractAddress({ from: plan.deployer, nonce: BigInt(intent.nonce) }), intent.predictedAddress), 'CREATE address mismatch');
@@ -173,13 +178,13 @@ async function checkDeployed(prepared) {
     demand(eq(encoded, intent.constructorArgsEncoded) && eq(initCode, intent.initCode), 'Constructor encoding mismatch');
     demand(eq(keccak256(initCode), intent.initCodeHash) && eq(entry.initCodeHash, intent.initCodeHash), 'Initcode hash mismatch');
     demand(eq(item.manifest.creationBytecodeHash, intent.creationBytecodeHash), 'Different creation artifact');
-    const receipt = await client.getTransactionReceipt({ hash: entry.transactionHash });
-    const transaction = await client.getTransaction({ hash: entry.transactionHash });
+    const receipt = await history.getTransactionReceipt({ hash: entry.transactionHash });
+    const transaction = await history.getTransaction({ hash: entry.transactionHash });
     demand(receipt.status === 'success' && entry.receipt?.status === 'success', 'Deployment receipt failed');
     demand(eq(receipt.contractAddress, intent.predictedAddress) && eq(entry.receipt.contractAddress, intent.predictedAddress), 'Receipt address mismatch');
     demand(eq(receipt.transactionHash, entry.transactionHash) && eq(entry.receipt.transactionHash, entry.transactionHash), 'Receipt transaction mismatch');
     demand(eq(receipt.blockHash, entry.receipt.blockHash) && receipt.blockNumber === BigInt(entry.receipt.blockNumber), 'Receipt changed since checkpoint');
-    const block = await client.getBlock({ blockNumber: receipt.blockNumber });
+    const block = await history.getBlock({ blockNumber: receipt.blockNumber });
     demand(eq(block.hash, receipt.blockHash) && await client.getBlockNumber() >= receipt.blockNumber + 1n, 'Receipt is not canonical with two confirmations');
     demand(transaction.to === null && eq(transaction.from, plan.deployer) && transaction.nonce === intent.nonce
       && transaction.value === 0n && eq(transaction.input, initCode) && eq(transaction.blockHash, receipt.blockHash), 'Live deployment transaction differs from plan');

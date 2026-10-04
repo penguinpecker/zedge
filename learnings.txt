@@ -415,3 +415,40 @@ may arrive after expiry, subject to the independent Horizen round deadlines.
 The existing engine and frontend are not automatically compatible with the new
 18-decimal registry. Do not truncate prices to fit the old uint64/int64 models or
 claim deploying these noncustodial public contracts launches the private exchange.
+
+Confirmed public mainnet deployments — 2026-10-04
+-----------------------------------------------
+The four-contract Horizen-first route was broadcast and independently checked
+against canonical successful receipts, exact CREATE inputs and simulated runtime
+hashes. Horizen (26514) hosts HorizenStreamsOracle and StreamsRoundRegistry.
+Base (8453) hosts ChainlinkStreamsBoundaryOracle and BaseStreamsPublisher.
+Public addresses, transactions and verification evidence are recorded in
+contracts/deployment/MAINNET.md. The original Pyth contracts remain undeployed.
+
+RPC behavior matters operationally: Base PublicNode accepted current state and
+submission but rejected historical receipts and state calls without a token.
+Base's official RPC supplied those historical reads. One early publisher receipt
+had an all-zero block hash; subsequent canonical header/transaction/receipt checks
+confirmed its real block before source-verification preparation. A successful
+receipt alone is insufficient without canonical block and runtime checks.
+
+These contracts establish a public oracle/round foundation. They do not deploy
+collateral custody, an attested private orderbook, private fills or recovery.
+
+Real native-route smoke — 2026-10-04
+----------------------------------
+A previously public, genuinely signed BTC report was verified on Base and sent
+through the actual native messenger to the deployed Horizen price cache. Source
+transaction 0xadb72f7a07f02938520c1849099dc7279e6340f79e3f05ab79297c385d91707e
+and destination transaction
+0xe1ceefb58e8ab41e4a4a5d2f335a8ebfb6034701de8c067d78fb318c4fdc0e9e
+both succeeded. The cached exact price, signed timestamps and report hash matched.
+Observed inclusion delay was 24 seconds, with 29 destination confirmations at
+the check. This is one historical price-message test, not a bridge timing SLA,
+an aligned market round, private order execution or proof of live API entitlement.
+
+Both Base contracts passed Etherscan verification; published source, constructor
+arguments and compiler matched. Horizen Blockscout accepted both source bundles
+and publishes matching inputs, but currently classifies them partially verified.
+Independently checked creation data and full runtime hashes match our artifacts;
+do not describe the explorer's partial classification as a perfect/full match.
