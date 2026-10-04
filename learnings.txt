@@ -359,3 +359,34 @@ commit-time verification, real oracle deployment, native guest integration,
 encrypted persistence/archival, custody/exit recovery, capacity tests and an
 independent security audit. A funded deployment wallet alone cannot close these
 dependencies. No claim of "production-ready" follows from compiling this build.
+
+Funded deployment preflight and Chainlink evaluation — 2026-10-04
+---------------------------------------------------------------
+Deployment/source verification is now authorized. No transaction was broadcast.
+See research/deployment-preflight.md for sources and exact public addresses.
+
+The two MIT public round contracts do not depend on Vela custody/licensing to
+deploy. Their immediate Horizen blocker is a verified compatible native oracle.
+The legacy Pyth EON address has no code on current Horizen L3. No current native
+Pyth verifier was established. Current Hermes price/proof requests also require
+separate Pyth API access; an Etherscan credential cannot provide it.
+
+Chainlink was checked as requested. Neither the full Data Feeds catalog nor the
+56-network Streams verifier catalog inspected establishes support for Horizen
+26514. Base feed/verifier addresses cannot be reused on its separate L3. Standard
+Base BTC/ETH feeds have 20-minute heartbeats; they do not guarantee observations
+inside our maximum 60-second boundary window. Historical proxy phases and
+observation-versus-transmission timestamps also need explicit semantics.
+
+Chainlink Streams' documented nonoverlapping report windows offer a candidate
+canonical boundary rule on a supported network. They require a new tested adapter,
+explicit confidence/precision policy, and subscription/HMAC access. They are not
+a drop-in substitution for the Pyth adapter or a deployed Horizen integration.
+
+Horizen USDC.e is the actual ERC-20, distinct from its OFT bridge contract. It uses
+a legacy Zeppelin proxy; zero standard EIP-1967 slots do not establish immutability.
+Its implementation and administration must be covered by deployment policy.
+
+Horizen source verification uses its Blockscout instance API, not Etherscan V2.
+Compiler-input bundles are prepared locally; compiling them is not deployment or
+verification. Wallet and explorer credentials remain local and Git-ignored.

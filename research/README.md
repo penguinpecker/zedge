@@ -14,6 +14,8 @@ The current public application remains a paper-trading prototype. Implementation
 | [Private order book architecture](private-orderbook-architecture.md) | Matching and collateral model, privacy boundary, authenticated order timing, oracle rules, exits, financial invariants, and adversarial tests. |
 | [Horizen ecosystem and Builder Fund](horizen-builder-program.md) | The requested fund page and `#why` section, application categories, infrastructure, USDC.e, oracle dependencies, budget inputs, and grant milestones. |
 | [Product requirements and interaction inventory](product-requirements.md) | Screens, feature priorities, dialogs, small interactions, failure states, and acceptance criteria for the prediction-market platform. |
+| [Deployment preflight](deployment-preflight.md) | Live oracle availability, Chainlink alternatives, collateral proxy identity and source-verification readiness. |
+| [Deployment gas snapshot](deployment-costs.md) | Scoped estimates for the two original contracts, distinct from a complete exchange launch budget. |
 
 ## Findings that change the build
 
