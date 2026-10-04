@@ -1,0 +1,81 @@
+[
+  {
+    "type": "function",
+    "name": "verifyBoundary",
+    "inputs": [
+      {
+        "name": "feedId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "boundary",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "maxPublishTime",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "evidence",
+        "type": "bytes",
+        "internalType": "bytes"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "internalType": "struct IStreamsBoundaryOracle.Observation",
+        "components": [
+          {
+            "name": "price",
+            "type": "int192",
+            "internalType": "int192"
+          },
+          {
+            "name": "validFromTimestamp",
+            "type": "uint32",
+            "internalType": "uint32"
+          },
+          {
+            "name": "observationsTimestamp",
+            "type": "uint32",
+            "internalType": "uint32"
+          },
+          {
+            "name": "expiresAt",
+            "type": "uint32",
+            "internalType": "uint32"
+          },
+          {
+            "name": "reportHash",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "decimals",
+            "type": "uint8",
+            "internalType": "uint8"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "version",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "string",
+        "internalType": "string"
+      }
+    ],
+    "stateMutability": "pure"
+  }
+]

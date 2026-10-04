@@ -1,5 +1,7 @@
 # Mainnet deployment preflight
 
+Follow-up: the user approved **Horizen first, Base for missing dependencies**. A native Base-to-Horizen messenger path has since been identified; see [routing evidence](hybrid-chain-routing.md) and [genuine Chainlink report verification](chainlink-streams-base.md). The original snapshot below predates that implementation and does not describe its deployment status.
+
 Checked 2026-10-04 against ZEDGE commit `63c9f457978830d1749b4ac2db6509b4b10b90d3`. The user authorized deployment and source verification. No deployment, approval or token-transfer transaction was submitted during these checks.
 
 The two existing MIT contracts are a noncustodial public registry and its oracle adapter. Missing Vela admission, custody and recovery integrations block exchange launch, but are not themselves prerequisites for deploying those two public contracts. Their immediate blocker on Horizen is a verified compatible oracle and an explicit immutable configuration.

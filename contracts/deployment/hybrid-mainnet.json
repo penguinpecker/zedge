@@ -1,0 +1,132 @@
+{
+  "schemaVersion": 1,
+  "purpose": "Public read-only plan; no deployment has occurred",
+  "deployer": "0x279173ac297aD146bc92f877552C8C2B78334d07",
+  "chains": {
+    "base": {
+      "chainId": 8453,
+      "rpcUrl": "https://base-rpc.publicnode.com"
+    },
+    "horizen": {
+      "chainId": 26514,
+      "rpcUrl": "https://horizen.calderachain.xyz/http"
+    }
+  },
+  "feeds": {
+    "btcFeedId": "0x00039d9e45394f473ab1f050a1b963e6b05351e52d71e507509ada0c95ed75b8",
+    "ethFeedId": "0x000362205e10b3a147d02792eccee483dca6c7b44ecce7012cb8c6e0b68b3ae9",
+    "btcDecimals": 18,
+    "ethDecimals": 18
+  },
+  "rules": {
+    "observationWindow": 60,
+    "openingGrace": 150,
+    "settlementGrace": 3600,
+    "cutoffBuffer": 30,
+    "minimumGasLimit": 600000
+  },
+  "dependencies": {
+    "verifier": {
+      "chain": "base",
+      "address": "0xDE1A28D87Afd0f546505B28AB50410A5c3a7387a",
+      "codeHash": "0x6a40f4a110509bd2933855d7994b8e1bdf1b1ce7b38c2f2657b7bb335283461a"
+    },
+    "feeManager": {
+      "chain": "base",
+      "address": "0xb86d1B8a3Bb1c5d7809F5E9EB009311D51d933c6",
+      "codeHash": "0x136464f49592d624e2457e9ddf1cae291d36719708f65d5ea047d77ec3850e05"
+    },
+    "donVerifier": {
+      "chain": "base",
+      "address": "0x223752Eb475098e79d10937480DF93864D7EfB83",
+      "codeHash": "0x148a4acd329ff1e45aa61b6daab662112b6f37788033c7e502c024e25d98c827"
+    },
+    "sourceMessenger": {
+      "chain": "base",
+      "address": "0x9F5e33f901ad50B50d6A27f63aDaBEA4c81e953c",
+      "codeHash": "0x06643e7d44538ba353995b6b77634e1c5bd1282ae7902f2b1aceaec97cf572ed"
+    },
+    "sourceMessengerImplementation": {
+      "chain": "base",
+      "address": "0x5D5a095665886119693F0B41d8DFeE78da033e8B",
+      "codeHash": "0x13a19b3f05901a5bdae8022c7161f99fd1b8705cbd15b36889ff7b3cea782bdf"
+    },
+    "addressManager": {
+      "chain": "base",
+      "address": "0x23e9345926ef161027292d60f80be43ad01bdf8f",
+      "codeHash": "0x23ff3128727914b22a2753aafff02d897826166b869a027a11b851863d379ddf"
+    },
+    "sourceProxyAdmin": {
+      "chain": "base",
+      "address": "0xee07dA11d10452E0BA0670b2AaA317C5178b5cF0",
+      "codeHash": "0xaebd68b2a785d0af4b7e1f3e600efde438efa83b08f2ad8bcd9287322f396e5f"
+    },
+    "portal": {
+      "chain": "base",
+      "address": "0x78e794d10a355468A0e7A14AA1a9F9A253D78784",
+      "codeHash": "0xfa8c9db6c6cab7108dea276f4cd09d575674eb0852c0fa3187e59e98ef977998"
+    },
+    "portalImplementation": {
+      "chain": "base",
+      "address": "0xb443da3e07052204a02d630a8933dac05a0d6fb4",
+      "codeHash": "0x12efb70e224279a1f7dad360030ee3366b7b551978281908e0d99bcf834d9667"
+    },
+    "destinationMessenger": {
+      "chain": "horizen",
+      "address": "0x4200000000000000000000000000000000000007",
+      "codeHash": "0xfa8c9db6c6cab7108dea276f4cd09d575674eb0852c0fa3187e59e98ef977998"
+    },
+    "destinationMessengerImplementation": {
+      "chain": "horizen",
+      "address": "0xc0d3c0d3c0d3c0d3c0d3c0d3c0d3c0d3c0d30007",
+      "codeHash": "0x76cd7dfa97d24622c7c50b51d58fd3658cf1bb0378b3d217d014a82474d90f5a"
+    },
+    "destinationProxyAdmin": {
+      "chain": "horizen",
+      "address": "0x4200000000000000000000000000000000000018",
+      "codeHash": "0xfa8c9db6c6cab7108dea276f4cd09d575674eb0852c0fa3187e59e98ef977998"
+    },
+    "collateral": {
+      "chain": "horizen",
+      "address": "0xDF7108f8B10F9b9eC1aba01CCa057268cbf86B6c",
+      "codeHash": "0xc2059a483ceeca165dfcc9727922e7c8c7b99710e84eca06cf765c235b133893"
+    },
+    "collateralImplementation": {
+      "chain": "horizen",
+      "address": "0x824D8FcDC36E81618377D140BEC12c3B7E4e4cbA",
+      "codeHash": "0x611c6410cfee0b15ac223af24be8193757e4f1446490da881be539520ba0d599"
+    },
+    "collateralAdmin": {
+      "chain": "horizen",
+      "address": "0x643cfBC837ed1382F5AC4Cb1B821AAeb00b65c75",
+      "codeHash": "0x574e311ce5aae08c850faa08fd881e112c4b5142fe519ec7e154f701d802a273"
+    },
+    "destinationProxyAdminImplementation": {
+      "chain": "horizen",
+      "address": "0xc0d3c0d3c0d3c0d3c0d3c0d3c0d3c0d3c0d30018",
+      "codeHash": "0xaebd68b2a785d0af4b7e1f3e600efde438efa83b08f2ad8bcd9287322f396e5f"
+    }
+  },
+  "bindings": {
+    "chainlinkOwner": "0xd8DeDf4AaE4f319F2667dcB44CE51EB6e838B61b",
+    "verifiedReportDigest": "0x00094baebfda9b87680d8e59aa20a3e565126640ee7caeab3cd965e5568b17ee",
+    "sourceProxyAdminOwner": "0x87Ef0aB1189F76eBCaEe736A5EB8F639a8cF156d",
+    "destinationProxyAdminOwner": "0x99000aB1189F76EbcaEe736A5EB8F639a8cf267e",
+    "sourceMessengerName": "OVM_L1CrossDomainMessenger"
+  },
+  "operationalPrerequisites": [
+    "Paid Chainlink BTC/ETH Data Streams entitlement and server-side HMAC credentials have not been verified by this planner.",
+    "A live ZEDGE Base publication followed by native delivery and authenticated Horizen cache receipt must be demonstrated separately.",
+    "The 210-second opening deadline is a product rule, not a guaranteed cross-domain delivery time.",
+    "Private trading, custody, trusted admission, recovery and production Vela remain outside these four noncustodial oracle/round contracts."
+  ],
+  "evidence": [
+    "research/chainlink-streams-base.md",
+    "research/hybrid-chain-routing.md",
+    "https://docs.horizen.io/horizen-chain/tokens-and-gas/usdc/"
+  ],
+  "maximumSpendWei": {
+    "base": "250000000000000",
+    "horizen": "120000000000000"
+  }
+}

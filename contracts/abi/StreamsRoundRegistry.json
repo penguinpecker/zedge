@@ -1,0 +1,773 @@
+[
+  {
+    "type": "constructor",
+    "inputs": [
+      {
+        "name": "config",
+        "type": "tuple",
+        "internalType": "struct StreamsRoundRegistry.Config",
+        "components": [
+          {
+            "name": "oracle",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "collateral",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "btcFeedId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "ethFeedId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "btcDecimals",
+            "type": "uint8",
+            "internalType": "uint8"
+          },
+          {
+            "name": "ethDecimals",
+            "type": "uint8",
+            "internalType": "uint8"
+          },
+          {
+            "name": "observationWindow",
+            "type": "uint32",
+            "internalType": "uint32"
+          },
+          {
+            "name": "openingGrace",
+            "type": "uint32",
+            "internalType": "uint32"
+          },
+          {
+            "name": "settlementGrace",
+            "type": "uint32",
+            "internalType": "uint32"
+          },
+          {
+            "name": "cutoffBuffer",
+            "type": "uint32",
+            "internalType": "uint32"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "PAYOUT_DENOMINATOR",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint8",
+        "internalType": "uint8"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "btcDecimals",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint8",
+        "internalType": "uint8"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "btcFeedId",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "canTrade",
+    "inputs": [
+      {
+        "name": "roundId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "collateral",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "createRound",
+    "inputs": [
+      {
+        "name": "asset",
+        "type": "uint8",
+        "internalType": "enum StreamsRoundRegistry.Asset"
+      },
+      {
+        "name": "duration",
+        "type": "uint32",
+        "internalType": "uint32"
+      },
+      {
+        "name": "start",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "roundId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "cutoffBuffer",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint32",
+        "internalType": "uint32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "deploymentChainId",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "ethDecimals",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint8",
+        "internalType": "uint8"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "ethFeedId",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "getRound",
+    "inputs": [
+      {
+        "name": "roundId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "internalType": "struct StreamsRoundRegistry.Round",
+        "components": [
+          {
+            "name": "asset",
+            "type": "uint8",
+            "internalType": "enum StreamsRoundRegistry.Asset"
+          },
+          {
+            "name": "duration",
+            "type": "uint32",
+            "internalType": "uint32"
+          },
+          {
+            "name": "start",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "end",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "cutoff",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "openingDeadline",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "resolutionDeadline",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "openedAt",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "resolvedAt",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "outcome",
+            "type": "uint8",
+            "internalType": "enum StreamsRoundRegistry.Outcome"
+          },
+          {
+            "name": "opening",
+            "type": "tuple",
+            "internalType": "struct IStreamsBoundaryOracle.Observation",
+            "components": [
+              {
+                "name": "price",
+                "type": "int192",
+                "internalType": "int192"
+              },
+              {
+                "name": "validFromTimestamp",
+                "type": "uint32",
+                "internalType": "uint32"
+              },
+              {
+                "name": "observationsTimestamp",
+                "type": "uint32",
+                "internalType": "uint32"
+              },
+              {
+                "name": "expiresAt",
+                "type": "uint32",
+                "internalType": "uint32"
+              },
+              {
+                "name": "reportHash",
+                "type": "bytes32",
+                "internalType": "bytes32"
+              },
+              {
+                "name": "decimals",
+                "type": "uint8",
+                "internalType": "uint8"
+              }
+            ]
+          },
+          {
+            "name": "closing",
+            "type": "tuple",
+            "internalType": "struct IStreamsBoundaryOracle.Observation",
+            "components": [
+              {
+                "name": "price",
+                "type": "int192",
+                "internalType": "int192"
+              },
+              {
+                "name": "validFromTimestamp",
+                "type": "uint32",
+                "internalType": "uint32"
+              },
+              {
+                "name": "observationsTimestamp",
+                "type": "uint32",
+                "internalType": "uint32"
+              },
+              {
+                "name": "expiresAt",
+                "type": "uint32",
+                "internalType": "uint32"
+              },
+              {
+                "name": "reportHash",
+                "type": "bytes32",
+                "internalType": "bytes32"
+              },
+              {
+                "name": "decimals",
+                "type": "uint8",
+                "internalType": "uint8"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "observationWindow",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint32",
+        "internalType": "uint32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "openingGrace",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint32",
+        "internalType": "uint32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "oracle",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "contract IStreamsBoundaryOracle"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "payoutNumerators",
+    "inputs": [
+      {
+        "name": "roundId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "up",
+        "type": "uint8",
+        "internalType": "uint8"
+      },
+      {
+        "name": "down",
+        "type": "uint8",
+        "internalType": "uint8"
+      },
+      {
+        "name": "denominator",
+        "type": "uint8",
+        "internalType": "uint8"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "phase",
+    "inputs": [
+      {
+        "name": "roundId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint8",
+        "internalType": "enum StreamsRoundRegistry.Phase"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "recordOpening",
+    "inputs": [
+      {
+        "name": "roundId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "evidence",
+        "type": "bytes",
+        "internalType": "bytes"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "resolveRound",
+    "inputs": [
+      {
+        "name": "roundId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "evidence",
+        "type": "bytes",
+        "internalType": "bytes"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "roundIdFor",
+    "inputs": [
+      {
+        "name": "asset",
+        "type": "uint8",
+        "internalType": "enum StreamsRoundRegistry.Asset"
+      },
+      {
+        "name": "duration",
+        "type": "uint32",
+        "internalType": "uint32"
+      },
+      {
+        "name": "start",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "rulesHash",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "settlementGrace",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint32",
+        "internalType": "uint32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "version",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "string",
+        "internalType": "string"
+      }
+    ],
+    "stateMutability": "pure"
+  },
+  {
+    "type": "function",
+    "name": "voidRound",
+    "inputs": [
+      {
+        "name": "roundId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "event",
+    "name": "OpeningRecorded",
+    "inputs": [
+      {
+        "name": "roundId",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "price",
+        "type": "int192",
+        "indexed": false,
+        "internalType": "int192"
+      },
+      {
+        "name": "decimals",
+        "type": "uint8",
+        "indexed": false,
+        "internalType": "uint8"
+      },
+      {
+        "name": "observedAt",
+        "type": "uint32",
+        "indexed": false,
+        "internalType": "uint32"
+      },
+      {
+        "name": "reportHash",
+        "type": "bytes32",
+        "indexed": false,
+        "internalType": "bytes32"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "RoundCreated",
+    "inputs": [
+      {
+        "name": "roundId",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "asset",
+        "type": "uint8",
+        "indexed": true,
+        "internalType": "enum StreamsRoundRegistry.Asset"
+      },
+      {
+        "name": "duration",
+        "type": "uint32",
+        "indexed": false,
+        "internalType": "uint32"
+      },
+      {
+        "name": "start",
+        "type": "uint64",
+        "indexed": false,
+        "internalType": "uint64"
+      },
+      {
+        "name": "end",
+        "type": "uint64",
+        "indexed": false,
+        "internalType": "uint64"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "RoundResolved",
+    "inputs": [
+      {
+        "name": "roundId",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "outcome",
+        "type": "uint8",
+        "indexed": false,
+        "internalType": "enum StreamsRoundRegistry.Outcome"
+      },
+      {
+        "name": "closingPrice",
+        "type": "int192",
+        "indexed": false,
+        "internalType": "int192"
+      },
+      {
+        "name": "observedAt",
+        "type": "uint32",
+        "indexed": false,
+        "internalType": "uint32"
+      },
+      {
+        "name": "reportHash",
+        "type": "bytes32",
+        "indexed": false,
+        "internalType": "bytes32"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "RoundVoided",
+    "inputs": [
+      {
+        "name": "roundId",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "openingMissing",
+        "type": "bool",
+        "indexed": false,
+        "internalType": "bool"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "error",
+    "name": "AlreadyFinalized",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidConfig",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidObservation",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidSchedule",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "OpeningAlreadyRecorded",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "OpeningMissing",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "OutsideOpeningWindow",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "OutsideResolutionWindow",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "ReentrancyGuardReentrantCall",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "RoundExists",
+    "inputs": [
+      {
+        "name": "roundId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "TimeoutNotReached",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "TimestampOverflow",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "UnknownRound",
+    "inputs": [
+      {
+        "name": "roundId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ]
+  }
+]

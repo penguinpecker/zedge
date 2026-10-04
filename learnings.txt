@@ -390,3 +390,28 @@ Its implementation and administration must be covered by deployment policy.
 Horizen source verification uses its Blockscout instance API, not Etherscan V2.
 Compiler-input bundles are prepared locally; compiling them is not deployment or
 verification. Wallet and explorer credentials remain local and Git-ignored.
+
+Horizen-first Chainlink route — 2026-10-04
+----------------------------------------
+User decision: use Horizen for supported components, Base only when needed.
+The native OP Stack messenger pair supports authenticated Base-to-Horizen data:
+Base verifies Chainlink reports; a publisher sends observations to an immutable
+Horizen cache; the public round registry can therefore remain on Horizen.
+Authenticate BOTH local messenger and original cross-domain sender, and bind the
+complete route/feed/precision policy. No operator-signed price relay is needed.
+
+Actual Base BTC/ETH v3 reports were recovered from already-public transaction
+calldata and successfully verified through the official Base proxy. Both streams
+use 18 decimals. New contracts preserve int192 values and remove Pyth confidence
+semantics; even a one-atom price decline must remain Down rather than rounded Up.
+Fresh report operation still needs a Chainlink subscription/API entitlement.
+
+A native bridge message sample took 23 seconds; this is not a delivery SLA.
+Initial public profile: observation window 60s, opening grace 150s, resolution
+grace 3600s, cutoff buffer 30s. Late arrival cannot extend a round. Source report
+expiration is checked at Base verification; already authenticated historical data
+may arrive after expiry, subject to the independent Horizen round deadlines.
+
+The existing engine and frontend are not automatically compatible with the new
+18-decimal registry. Do not truncate prices to fit the old uint64/int64 models or
+claim deploying these noncustodial public contracts launches the private exchange.

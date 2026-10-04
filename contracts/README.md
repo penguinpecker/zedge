@@ -4,6 +4,28 @@ Original, noncustodial Solidity foundations for BTC/ETH binary rounds. **No cont
 
 ## Implemented contracts
 
+### Chainlink and the Horizen-first route
+
+The user's approved deployment policy is to keep supported components on Horizen and use Base for missing dependencies. The new Streams contracts implement this split without treating a Base address as a Horizen contract:
+
+```text
+Chainlink signed BTC/ETH report
+  -> Base: ChainlinkStreamsBoundaryOracle authenticates the exact boundary window
+  -> Base: BaseStreamsPublisher sends the verified observation through the native messenger
+  -> Horizen: HorizenStreamsOracle authenticates messenger + Base sender + route, then caches it
+  -> Horizen: StreamsRoundRegistry records opening/closing and resolves the round
+```
+
+These are separate contracts and rules from the original Pyth implementation below. Schema-v3 prices remain signed 192-bit integers at their configured precision (the selected BTC/ETH streams use 18 decimals). There is no fabricated confidence interval or rounding before comparison. The registry accepts only the signed window containing the fixed round boundary. Up includes ties; an unresolvable round becomes eligible for the existing half-payout timeout policy. No contract here transfers collateral or enables private trading.
+
+The adapter validates DON signatures through the official Base verifier, feed identity, exact report shape, positive price, interval containment, observation delay and expiration at verification. The native route binds both chains, both messenger endpoints, the source adapter, publisher, receiver, feeds, precision and timing in one immutable hash. The receiver checks both the local messenger and `xDomainMessageSender()`. A matching duplicate is harmless; conflicting data cannot overwrite a cached observation. Anybody can resend a previously authenticated observation if delivery fails. Arrival after report expiry is allowed because authentication already occurred on Base; the registry's independent opening/resolution deadlines still apply.
+
+The initial public deployment profile is a 60-second observation limit, 150-second opening submission grace, 3,600-second settlement grace and 30-second cutoff buffer. Thus opening must be recorded by start + 210 seconds, strictly before a five-minute round's cutoff at start + 270. These are explicit liveness choices, not a bridge/provider SLA. One observed native message took 23 seconds; reliable operation needs continuing measurement and independent keepers. A late opening cannot start trading, extend the round or change the timeout.
+
+See [the Base verifier and genuine report evidence](../research/chainlink-streams-base.md) and [native routing evidence](../research/hybrid-chain-routing.md). A Data Streams subscription remains necessary for reliable fresh report retrieval. Public historical report fixtures prove specific signatures, not continuing service access. The existing Go engine's integer price limits and the original frontend manifest target the Pyth foundation; they must not be wired to these 18-decimal contracts through a lossy conversion. No frontend capability is enabled merely by exporting these ABIs.
+
+### Original Pyth foundation
+
 `RoundRegistry` fixes rules at construction, allows anyone to pre-schedule aligned BTC/ETH 300/900-second rounds, commits canonical opening evidence, resolves from canonical closing evidence and permits deterministic timeout voiding. There is no owner, upgrade hook, outcome override, pause or asset-transfer function. Scheduling a round gives its creator no power over it.
 
 `IBoundaryOracle` requires proof of the first update for the specified feed at or after the boundary, within the configured window. A caller-selected signed latest price is not sufficient.

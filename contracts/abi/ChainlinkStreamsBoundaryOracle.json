@@ -1,0 +1,233 @@
+[
+  {
+    "type": "constructor",
+    "inputs": [
+      {
+        "name": "verifier",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "btcFeedId_",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "btcDecimals_",
+        "type": "uint8",
+        "internalType": "uint8"
+      },
+      {
+        "name": "ethFeedId_",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "ethDecimals_",
+        "type": "uint8",
+        "internalType": "uint8"
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "MAX_EVIDENCE_BYTES",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "REPORT_BYTES",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "btcDecimals",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint8",
+        "internalType": "uint8"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "btcFeedId",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "ethDecimals",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint8",
+        "internalType": "uint8"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "ethFeedId",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "verifierProxy",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "contract IChainlinkStreamsVerifierProxy"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "verifyBoundary",
+    "inputs": [
+      {
+        "name": "feedId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "boundary",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "maxPublishTime",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "evidence",
+        "type": "bytes",
+        "internalType": "bytes"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "observation",
+        "type": "tuple",
+        "internalType": "struct IStreamsBoundaryOracle.Observation",
+        "components": [
+          {
+            "name": "price",
+            "type": "int192",
+            "internalType": "int192"
+          },
+          {
+            "name": "validFromTimestamp",
+            "type": "uint32",
+            "internalType": "uint32"
+          },
+          {
+            "name": "observationsTimestamp",
+            "type": "uint32",
+            "internalType": "uint32"
+          },
+          {
+            "name": "expiresAt",
+            "type": "uint32",
+            "internalType": "uint32"
+          },
+          {
+            "name": "reportHash",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "decimals",
+            "type": "uint8",
+            "internalType": "uint8"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "version",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "string",
+        "internalType": "string"
+      }
+    ],
+    "stateMutability": "pure"
+  },
+  {
+    "type": "error",
+    "name": "InvalidConfig",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidEvidence",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidOracleResponse",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidWindow",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "ReentrancyGuardReentrantCall",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "UnknownFeed",
+    "inputs": []
+  }
+]

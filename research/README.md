@@ -15,6 +15,8 @@ The current public application remains a paper-trading prototype. Implementation
 | [Horizen ecosystem and Builder Fund](horizen-builder-program.md) | The requested fund page and `#why` section, application categories, infrastructure, USDC.e, oracle dependencies, budget inputs, and grant milestones. |
 | [Product requirements and interaction inventory](product-requirements.md) | Screens, feature priorities, dialogs, small interactions, failure states, and acceptance criteria for the prediction-market platform. |
 | [Deployment preflight](deployment-preflight.md) | Live oracle availability, Chainlink alternatives, collateral proxy identity and source-verification readiness. |
+| [Chainlink Streams on Base](chainlink-streams-base.md) | Exact feed IDs, precision, verifier governance, and genuine signed-report checks. |
+| [Horizen-first native oracle route](hybrid-chain-routing.md) | Base verification with native authenticated delivery to the Horizen registry. |
 | [Deployment gas snapshot](deployment-costs.md) | Scoped estimates for the two original contracts, distinct from a complete exchange launch budget. |
 
 ## Findings that change the build

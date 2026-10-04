@@ -7,7 +7,12 @@ import subprocess
 root = Path(__file__).resolve().parents[1]
 subprocess.run(["forge", "build", "--skip", "test", "--skip", "script"], cwd=root, check=True)
 (root / "abi").mkdir(exist_ok=True)
-for name in ("RoundRegistry", "PythBoundaryOracle", "IBoundaryOracle"):
+names = (
+    "RoundRegistry", "PythBoundaryOracle", "IBoundaryOracle",
+    "ChainlinkStreamsBoundaryOracle", "IStreamsBoundaryOracle",
+    "BaseStreamsPublisher", "HorizenStreamsOracle", "StreamsRoundRegistry",
+)
+for name in names:
     artifact = json.loads((root / "out" / f"{name}.sol" / f"{name}.json").read_text())
     (root / "abi" / f"{name}.json").write_text(json.dumps(artifact["abi"], indent=2) + "\n")
-print("Exported RoundRegistry, PythBoundaryOracle, IBoundaryOracle ABIs; no addresses.")
+print("Exported public contract ABIs; no addresses.")

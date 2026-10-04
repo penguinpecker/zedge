@@ -1,0 +1,519 @@
+[
+  {
+    "type": "constructor",
+    "inputs": [
+      {
+        "name": "config",
+        "type": "tuple",
+        "internalType": "struct StreamsOracleRoute.Config",
+        "components": [
+          {
+            "name": "sourceChainId",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "destinationChainId",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "sourceMessenger",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "destinationMessenger",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "sourceOracle",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "publisher",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "destinationOracle",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "btcFeedId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "ethFeedId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "btcDecimals",
+            "type": "uint8",
+            "internalType": "uint8"
+          },
+          {
+            "name": "ethDecimals",
+            "type": "uint8",
+            "internalType": "uint8"
+          },
+          {
+            "name": "observationWindow",
+            "type": "uint32",
+            "internalType": "uint32"
+          },
+          {
+            "name": "minimumGasLimit",
+            "type": "uint32",
+            "internalType": "uint32"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "btcDecimals",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint8",
+        "internalType": "uint8"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "btcFeedId",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "destinationChainId",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "ethDecimals",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint8",
+        "internalType": "uint8"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "ethFeedId",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "getObservation",
+    "inputs": [
+      {
+        "name": "feedId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "boundary",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "internalType": "struct IStreamsBoundaryOracle.Observation",
+        "components": [
+          {
+            "name": "price",
+            "type": "int192",
+            "internalType": "int192"
+          },
+          {
+            "name": "validFromTimestamp",
+            "type": "uint32",
+            "internalType": "uint32"
+          },
+          {
+            "name": "observationsTimestamp",
+            "type": "uint32",
+            "internalType": "uint32"
+          },
+          {
+            "name": "expiresAt",
+            "type": "uint32",
+            "internalType": "uint32"
+          },
+          {
+            "name": "reportHash",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "decimals",
+            "type": "uint8",
+            "internalType": "uint8"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "minimumGasLimit",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint32",
+        "internalType": "uint32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "nativeMessenger",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "contract INativeOracleMessenger"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "observationWindow",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint32",
+        "internalType": "uint32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "publisher",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "receiveObservation",
+    "inputs": [
+      {
+        "name": "claimedRouteHash",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "feedId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "boundary",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "observation",
+        "type": "tuple",
+        "internalType": "struct IStreamsBoundaryOracle.Observation",
+        "components": [
+          {
+            "name": "price",
+            "type": "int192",
+            "internalType": "int192"
+          },
+          {
+            "name": "validFromTimestamp",
+            "type": "uint32",
+            "internalType": "uint32"
+          },
+          {
+            "name": "observationsTimestamp",
+            "type": "uint32",
+            "internalType": "uint32"
+          },
+          {
+            "name": "expiresAt",
+            "type": "uint32",
+            "internalType": "uint32"
+          },
+          {
+            "name": "reportHash",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "decimals",
+            "type": "uint8",
+            "internalType": "uint8"
+          }
+        ]
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "routeHash",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "sourceChainId",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "sourceMessenger",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "sourceOracle",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "verifyBoundary",
+    "inputs": [
+      {
+        "name": "feedId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "boundary",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "maxPublishTime",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "evidence",
+        "type": "bytes",
+        "internalType": "bytes"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "observation",
+        "type": "tuple",
+        "internalType": "struct IStreamsBoundaryOracle.Observation",
+        "components": [
+          {
+            "name": "price",
+            "type": "int192",
+            "internalType": "int192"
+          },
+          {
+            "name": "validFromTimestamp",
+            "type": "uint32",
+            "internalType": "uint32"
+          },
+          {
+            "name": "observationsTimestamp",
+            "type": "uint32",
+            "internalType": "uint32"
+          },
+          {
+            "name": "expiresAt",
+            "type": "uint32",
+            "internalType": "uint32"
+          },
+          {
+            "name": "reportHash",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "decimals",
+            "type": "uint8",
+            "internalType": "uint8"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "version",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "string",
+        "internalType": "string"
+      }
+    ],
+    "stateMutability": "pure"
+  },
+  {
+    "type": "event",
+    "name": "ObservationReceived",
+    "inputs": [
+      {
+        "name": "feedId",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "boundary",
+        "type": "uint64",
+        "indexed": true,
+        "internalType": "uint64"
+      },
+      {
+        "name": "reportHash",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "error",
+    "name": "ConflictingObservation",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidConfig",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidEvidence",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidObservation",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidRoute",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "MissingObservation",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "UnauthorizedMessenger",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "UnknownFeed",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "WrongChain",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "WrongRoute",
+    "inputs": []
+  }
+]
