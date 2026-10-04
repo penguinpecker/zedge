@@ -7,7 +7,7 @@
  * Options: --config <public-json> --artifacts <Foundry-out-directory> --deployer <public-address>
  * Output: ignored repository evidence/hybrid-plan.json; stdout is a concise public summary.
  */
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, access } from 'node:fs/promises';
 import { dirname, resolve, relative, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServer } from 'node:net';
@@ -21,6 +21,7 @@ import {
 const CONTRACTS = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const ROOT = resolve(CONTRACTS, '..');
 const OUTPUT = resolve(ROOT, 'evidence/hybrid-plan.json');
+const BROADCAST_CHECKPOINT = resolve(ROOT, 'evidence/hybrid-broadcast.json');
 const ZERO = '0x0000000000000000000000000000000000000000';
 const IMPLEMENTATION_SLOT = '0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc';
 const ADMIN_SLOT = '0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103';
@@ -35,6 +36,10 @@ const json = (x) => JSON.stringify(x, (_, v) => typeof v === 'bigint' ? v.toStri
 const address = (x) => getAddress(String(x).toLowerCase());
 const norm = (x) => typeof x === 'string' ? x.toLowerCase() : String(x);
 function requireTrue(value, message) { if (!value) throw new Error(message); }
+async function broadcastCheckpointExists() {
+  try { await access(BROADCAST_CHECKPOINT); return true; }
+  catch (error) { if (error.code === 'ENOENT') return false; throw error; }
+}
 function equal(actual, expected, label) {
   requireTrue(norm(actual) === norm(expected), `${label}: unexpected public value (${String(actual)})`);
 }
@@ -274,13 +279,14 @@ async function fork(chain) {
   }
   throw new Error('Owned Anvil startup timed out');
 }
-async function verifyCreated(client, intent, plan, config) {
+/** Read-only immutable/version validation, reusable after a live deployment at a pinned block. */
+export async function verifyCreated(client, intent, plan, config, blockNumber) {
   const at = intent.predictedAddress;
   const versions = {
     ChainlinkStreamsBoundaryOracle: 'zedge-chainlink-streams-boundary-v1', BaseStreamsPublisher: 'zedge-base-streams-publisher-v1',
     HorizenStreamsOracle: 'zedge-horizen-streams-oracle-v1', StreamsRoundRegistry: 'zedge-streams-round-registry-v1',
   };
-  async function check(sig, expected) { equal(await read(client, undefined, at, sig), expected, `${intent.name}.${sig}`); }
+  async function check(sig, expected) { equal(await read(client, blockNumber, at, sig), expected, `${intent.name}.${sig}`); }
   await check('version() view returns (string)', versions[intent.name]);
   for (const key of ['btcFeedId', 'ethFeedId']) await check(`${key}() view returns (bytes32)`, config.feeds[key]);
   for (const key of ['btcDecimals', 'ethDecimals']) await check(`${key}() view returns (uint8)`, config.feeds[key]);
@@ -377,6 +383,7 @@ async function cleanup() {
   }
 }
 async function main() {
+  requireTrue(!await broadcastCheckpointExists(), 'A broadcast checkpoint exists; preserve its original exact plan and use check-hybrid-live.mjs');
   const options = parseOptions();
   requireTrue(String(options.config).endsWith('.json'), 'A public JSON configuration file is required');
   const configText = await readFile(resolve(options.config), 'utf8');
@@ -415,6 +422,7 @@ async function main() {
       'L1 data/operator fee bounds are current-snapshot estimates with a 2x buffer; EIP-1559 maxFeePerGas does not cap those separate fees.',
     ],
   };
+  requireTrue(!await broadcastCheckpointExists(), 'A broadcast checkpoint appeared during preflight; refusing to replace its plan');
   await mkdir(dirname(OUTPUT), { recursive: true }); await writeFile(OUTPUT, `${json(evidence)}\n`, { mode: 0o600 });
   console.log(json({ status: evidence.status, output: relative(ROOT, OUTPUT), predicted: plan.predicted, budgets,
     operationalPrerequisites: evidence.operationalPrerequisites, liveTransactionsSent: 0 }));
@@ -425,9 +433,11 @@ catch (error) {
   // All inputs and endpoints are deliberately public. Avoid dumping provider internals/call payloads.
   const message = error instanceof Error ? error.shortMessage ?? error.message : 'Unknown public preflight failure';
   console.error(`Hybrid preflight failed: ${String(message).slice(0,500)}`);
-  // Invalidate a previously successful plan, so a caller cannot accidentally reuse it after failure.
-  await mkdir(dirname(OUTPUT), { recursive: true });
-  await writeFile(OUTPUT, `${json({ schemaVersion: 1, status: 'failed', createdAt: new Date().toISOString(), noLiveTransactions: true, error: String(message).slice(0,500) })}\n`, { mode: 0o600 });
+  // Invalidate failed preflight evidence, but never destroy the exact plan bound by a broadcast checkpoint.
+  if (!await broadcastCheckpointExists()) {
+    await mkdir(dirname(OUTPUT), { recursive: true });
+    await writeFile(OUTPUT, `${json({ schemaVersion: 1, status: 'failed', createdAt: new Date().toISOString(), noLiveTransactions: true, error: String(message).slice(0,500) })}\n`, { mode: 0o600 });
+  }
   process.exitCode = 1;
 } finally { await cleanup(); }
 }

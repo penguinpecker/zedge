@@ -6,7 +6,7 @@
  * --solc <path>: use an installed native solc 0.8.30 (no automatic download).
  * Generated files live in ignored evidence/verification/. API submission remains a separate step.
  */
-import { readFile, writeFile, mkdir, access } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, access, rm } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { dirname, resolve, relative, isAbsolute, join } from 'node:path';
 import { homedir, platform } from 'node:os';
@@ -15,6 +15,8 @@ import { spawn } from 'node:child_process';
 import {
   createPublicClient, http, keccak256, toHex, encodeAbiParameters, encodeDeployData, getContractAddress,
 } from 'viem';
+// These exports are pure; the broadcaster's entrypoint is guarded and is never invoked here.
+import { expectedConstructors, validateConstructorIntent } from './broadcast-hybrid.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const CONTRACTS = resolve(ROOT, 'contracts');
@@ -22,13 +24,18 @@ const OUTPUT = resolve(ROOT, 'evidence/verification');
 const COMPILER = '0.8.30+commit.73712a01';
 const NAMES = ['ChainlinkStreamsBoundaryOracle', 'BaseStreamsPublisher', 'HorizenStreamsOracle', 'StreamsRoundRegistry'];
 const CHAINS = {
-  base: { id: 8453, rpc: 'https://mainnet.base.org' },
+  base: { id: 8453, rpc: 'https://base-rpc.publicnode.com' },
   horizen: { id: 26514, rpc: 'https://horizen.calderachain.xyz/http' },
 };
 const json = value => `${JSON.stringify(value, (_, v) => typeof v === 'bigint' ? v.toString() : v, 2)}\n`;
 const eq = (a, b) => typeof a === 'string' && typeof b === 'string' && a.toLowerCase() === b.toLowerCase();
 const demand = (value, message) => { if (!value) throw new Error(message); };
 let phase = 'options';
+
+async function invalidateCheckedPackets() {
+  for (const name of NAMES) await rm(resolve(OUTPUT, `${name}.verification.json`), { force: true });
+  await rm(resolve(OUTPUT, 'hybrid-deployment-checked.json'), { force: true });
+}
 
 function options() {
   const result = { checkDeployed: false };
@@ -96,7 +103,7 @@ async function prepare(binary) {
     const sources = {};
     for (const [path, entry] of Object.entries(metadata.sources)) {
       const disk = resolve(CONTRACTS, path); const local = relative(CONTRACTS, disk);
-      demand(!isAbsolute(path) && local !== '..' && !local.startsWith(`..${platform() === 'win32' ? '\\' : '/'}`), 'Source path outside contracts');
+      demand(path.endsWith('.sol') && !isAbsolute(path) && local !== '..' && !local.startsWith(`..${platform() === 'win32' ? '\\' : '/'}`), 'Source path outside contracts or not Solidity');
       const bytes = await readFile(disk);
       demand(eq(keccak256(bytes), entry.keccak256), `Stale artifact source: ${path}`);
       sources[path] = { content: bytes.toString('utf8') };
@@ -133,11 +140,18 @@ async function checkDeployed(prepared) {
   phase = 'confirmed public checkpoint and plan';
   const planText = await readFile(resolve(ROOT, 'evidence/hybrid-plan.json'), 'utf8');
   const plan = JSON.parse(planText);
+  const configText = await readFile(resolve(CONTRACTS, 'deployment/hybrid-mainnet.json'), 'utf8');
+  const config = JSON.parse(configText);
   const checkpoint = JSON.parse(await readFile(resolve(ROOT, 'evidence/hybrid-broadcast.json'), 'utf8'));
   demand(plan.schemaVersion === 1 && plan.status === 'constructors-simulated-operational-gates-pending', 'Invalid deployment plan');
   demand(checkpoint.schemaVersion === 1 && checkpoint.status === 'four-contracts-confirmed-runtime-matched', 'No fully confirmed deployment checkpoint');
   demand(eq(checkpoint.planHash, keccak256(toHex(planText))) && eq(checkpoint.deployer, plan.deployer), 'Checkpoint is bound to a different plan');
+  demand(config.schemaVersion === 1 && eq(plan.configHash, keccak256(toHex(configText)))
+    && eq(plan.deployer, config.deployer), 'Plan differs from current reviewed configuration');
+  for (const [name, profile] of Object.entries(CHAINS)) demand(config.chains[name].chainId === profile.id
+    && config.chains[name].rpcUrl === profile.rpc, 'Unexpected configured RPC or chain');
   demand(plan.intents?.length === 4 && checkpoint.transactions?.length === 4, 'Expected exactly four deployments');
+  const expectedArgs = expectedConstructors(config, plan);
   const clients = Object.fromEntries(Object.entries(CHAINS).map(([key, value]) => [key, createPublicClient({
     transport: http(value.rpc, { timeout: 20000, retryCount: 2 }),
   })]));
@@ -152,6 +166,7 @@ async function checkDeployed(prepared) {
     demand(eq(intent.from, plan.deployer) && entry.nonce === intent.nonce && Number.isSafeInteger(intent.nonce), 'Deployer or nonce mismatch');
     demand(eq(getContractAddress({ from: plan.deployer, nonce: BigInt(intent.nonce) }), intent.predictedAddress), 'CREATE address mismatch');
     demand(eq(entry.predictedAddress, intent.predictedAddress) && BigInt(intent.value) === 0n, 'Address or value mismatch');
+    validateConstructorIntent(intent, item.artifact, expectedArgs[index]);
     const constructor = item.artifact.abi.find(x => x.type === 'constructor');
     const encoded = encodeAbiParameters(constructor.inputs, intent.constructorArgs);
     const initCode = encodeDeployData({ abi: item.artifact.abi, bytecode: item.artifact.bytecode.object, args: intent.constructorArgs });
@@ -173,6 +188,7 @@ async function checkDeployed(prepared) {
       && eq(keccak256(code), entry.runtimeCodeHash), 'Live runtime differs from simulated and confirmed runtime');
     packets.push({
       ...item.manifest, chain, chainId: intent.chainId, address: intent.predictedAddress,
+      planHash: checkpoint.planHash, configHash: plan.configHash, checkedAt: new Date().toISOString(),
       transactionHash: entry.transactionHash, blockNumber: receipt.blockNumber.toString(), blockHash: receipt.blockHash,
       runtimeCodeHash: keccak256(code), constructorArguments: encoded.slice(2),
       codeFormat: 'solidity-standard-json-input', license: 'MIT',
@@ -191,6 +207,8 @@ async function checkDeployed(prepared) {
 
 try {
   const opts = options();
+  // Input preparation can replace bundles; previous submit-ready evidence must not survive that.
+  await invalidateCheckedPackets();
   const prepared = await prepare(await solcPath(opts.solc));
   const deployed = opts.checkDeployed ? await checkDeployed(prepared) : undefined;
   console.log(json({ status: deployed ? 'four-public-deployments-checked' : 'four-public-inputs-reproduced',

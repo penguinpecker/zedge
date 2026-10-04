@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "purpose": "Public read-only plan; no deployment has occurred",
+  "purpose": "Reviewed public constructor profile; consult deployment records for on-chain status",
   "deployer": "0x279173ac297aD146bc92f877552C8C2B78334d07",
   "chains": {
     "base": {

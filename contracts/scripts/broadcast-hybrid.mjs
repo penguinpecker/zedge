@@ -96,6 +96,11 @@ export function demandFreshPlan(plan) {
   demand(Number.isFinite(age) && age >= 0 && age <= 300000);
 }
 
+export function demandSigningAge(plan, runStartedAt, signedCount) {
+  if (signedCount === 0) demandFreshPlan(plan);
+  demand(Date.now() >= runStartedAt && Date.now() - runStartedAt <= 900000);
+}
+
 async function loadAccount(expected) {
   const handle = await open(resolve(ROOT, 'contracts/.env.deploy.local'), constants.O_RDONLY | constants.O_NOFOLLOW);
   let bytes;
@@ -239,8 +244,7 @@ async function main() {
     }
     // First signing requires a <=5-minute plan. Subsequent steps require all live checks above and a
     // <=15-minute run. Do not silently regenerate routes/nonces or retry after a partial deployment.
-    if (checkpoint.transactions.length === 0) demandFreshPlan(plan);
-    demand(Date.now() >= runStartedAt && Date.now() - runStartedAt <= 900000);
+    demandSigningAge(plan, runStartedAt, checkpoint.transactions.length);
     phase = `${intent.name}: local signing`;
     const signed = await account.signTransaction(transaction);
     const expectedHash = keccak256(signed);

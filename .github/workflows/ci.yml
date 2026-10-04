@@ -25,6 +25,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check
+      - run: node --test contracts/scripts/broadcast-hybrid.test.mjs
       - run: npm audit --audit-level=low
 
   engine:
