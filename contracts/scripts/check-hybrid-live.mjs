@@ -1,41 +1,36 @@
 #!/usr/bin/env node
 /**
- * PUBLIC-ONLY, read-only postdeployment verifier and native-message smoke planner.
- * Requires the original evidence/hybrid-plan.json and confirmed hybrid-broadcast.json.
+ * PUBLIC-ONLY, read-only verifier of the schema-2 release in contracts/deployment/mainnet-addresses.json.
  *   node contracts/scripts/check-hybrid-live.mjs
- *   node contracts/scripts/check-hybrid-live.mjs --prepare-smoke
  *   node contracts/scripts/check-hybrid-live.mjs --observe 0xPUBLIC_SOURCE_TX_HASH
+ *   node contracts/scripts/check-hybrid-live.mjs --rehearsal <url> --evidence <directory>
+ * The three kept route contracts are always checked against the live chains: creation data against the
+ * current build and reviewed constructors, runtime hashes, immutable getters, route hash and upstream
+ * bindings. The registry is checked as the release describes it: "planned" means nothing may exist at the
+ * planned addresses yet; "deployed" means proxy, implementation slot, implementation, owner and every rule.
  * No environment access, wallet, key, signing, account impersonation, or send RPC exists here.
- * The smoke uses a historical, already-public signed BTC report at its exact (unaligned)
- * second. It proves an oracle/message path only, never a funded prediction-market lifecycle.
+ * --observe follows the historical public BTC smoke report at its exact (unaligned) second through the
+ * native route. It proves an oracle/message path only, never a funded prediction-market lifecycle.
  */
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   createPublicClient, http, getAddress, keccak256, toHex, parseAbi,
-  encodeFunctionData, decodeFunctionData, decodeFunctionResult, decodeAbiParameters,
-  decodeEventLog, serializeTransaction, formatEther,
+  encodeFunctionData, decodeFunctionData, decodeAbiParameters, encodeAbiParameters, decodeEventLog,
 } from 'viem';
-import { recheckPublicDependencies, verifyCreated } from './preflight-hybrid.mjs';
+import { CONTRACTS, RPCS, shown, parseArguments, anvilFork, loadArtifacts, recheckPublicDependencies, verifyRoute } from './preflight-hybrid.mjs';
+import { expectedConstructors, validateConstructorIntent } from './broadcast-hybrid.mjs';
+import { NAMES, CONFIG, rehearsalFiles, registryCreation, expectedRegistry, verifyRegistry } from './plan-registry.mjs';
+// The writer's entrypoint is guarded and is never invoked here.
+import { LABEL, RETIRED } from './write-release.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
-const FILES = {
-  plan: resolve(ROOT, 'evidence/hybrid-plan.json'),
-  checkpoint: resolve(ROOT, 'evidence/hybrid-broadcast.json'),
-  config: resolve(ROOT, 'contracts/deployment/hybrid-mainnet.json'),
-  fixtures: resolve(ROOT, 'research/chainlink-streams-base.md'),
-  live: resolve(ROOT, 'evidence/hybrid-live-check.json'),
-  smoke: resolve(ROOT, 'evidence/hybrid-smoke-plan.json'),
-  observed: resolve(ROOT, 'evidence/hybrid-smoke-result.json'),
-};
-const NAMES = ['ChainlinkStreamsBoundaryOracle', 'BaseStreamsPublisher', 'HorizenStreamsOracle', 'StreamsRoundRegistry'];
-const RPCS = { base: 'https://base-rpc.publicnode.com', horizen: 'https://horizen.calderachain.xyz/http' };
-// PublicNode restricts older indexed transactions. Keep these few historical reads on Base's official RPC.
-const BASE_HISTORY_RPC = 'https://mainnet.base.org';
+const FIXTURES = resolve(ROOT, 'research/chainlink-streams-base.md');
+const ROUTE = ['ChainlinkStreamsBoundaryOracle', 'BaseStreamsPublisher', 'HorizenStreamsOracle'];
+// PublicNode refuses receipts and older indexed transactions. The profile names Base's own endpoint for them.
+const BASE_RECEIPT_RPC = 'https://mainnet.base.org';
 const IDS = { base: 8453, horizen: 26514 };
-const BASE_CEILING = 250000000000000n;
-const GAS_ORACLE = '0x420000000000000000000000000000000000000F';
 const MSG_ABI = parseAbi([
   'event SentMessage(address indexed target,address sender,bytes message,uint256 messageNonce,uint256 gasLimit)',
   'event SentMessageExtension1(address indexed sender,uint256 value)',
@@ -54,11 +49,9 @@ function client(url) { return createPublicClient({ transport: http(url, { timeou
 async function write(path, value) { await mkdir(dirname(path), { recursive: true }); await writeFile(path, `${json(value)}\n`, { mode: 0o600 }); }
 async function publicJSON(path) { let result; try { result = JSON.parse(await readFile(path, 'utf8')); } catch { throw new Error(`Missing or invalid public JSON: ${path.slice(ROOT.length + 1)}`); } return result; }
 function options() {
-  const args = process.argv.slice(2);
-  if (args.length === 0) return { mode: 'live' };
-  if (args.length === 1 && args[0] === '--prepare-smoke') return { mode: 'prepare' };
-  if (args.length === 2 && args[0] === '--observe' && /^0x[0-9a-f]{64}$/i.test(args[1])) return { mode: 'observe', transactionHash: args[1] };
-  throw new Error('Allowed: no arguments, --prepare-smoke, or --observe <public transaction hash>');
+  const parsed = parseArguments(process.argv.slice(2), [], ['--observe', '--rehearsal', '--evidence']);
+  demand(parsed.observe === undefined || /^0x[0-9a-f]{64}$/i.test(parsed.observe), '--observe takes a public transaction hash');
+  return parsed;
 }
 async function view(c, blockNumber, address, signature, args = []) {
   const abi = parseAbi([`function ${signature}`]);
@@ -77,60 +70,117 @@ function observationValues(observation) {
 function observationMatches(actual, expected) {
   demand(JSON.stringify(observationValues(actual)) === JSON.stringify(observationValues(expected)), 'Authenticated observation differs from expected report');
 }
-export async function loadAndCheck() {
-  const planText = await readFile(FILES.plan, 'utf8');
-  const configText = await readFile(FILES.config, 'utf8');
-  const plan = JSON.parse(planText); const config = JSON.parse(configText);
-  const checkpoint = await publicJSON(FILES.checkpoint);
-  demand(checkpoint.status === 'four-contracts-confirmed-runtime-matched', 'All four deployments must be confirmed first');
-  same(checkpoint.planHash, keccak256(toHex(planText)), 'Checkpoint must bind the original exact plan');
-  same(plan.configHash, keccak256(toHex(configText)), 'Public configuration changed since deployment plan');
-  demand(plan.status === 'constructors-simulated-operational-gates-pending' && plan.intents?.length === 4 && checkpoint.transactions?.length === 4, 'Unexpected plan/checkpoint shape');
-  same(checkpoint.deployer, plan.deployer, 'Checkpoint deployer mismatch'); same(plan.deployer, config.deployer, 'Configuration deployer mismatch');
-  const clients = {}; const history = {}; const blocks = {}; const artifacts = {}; const checked = [];
-  const dependencies = await recheckPublicDependencies(config);
+/** Binds one creation transaction to its address, sender, CREATE shape and the exact reviewed creation data. */
+async function creation(reader, hash, at, block, deployer) {
+  const { receipt, block: header } = await anchoredReceipt(reader, hash);
+  same(receipt.contractAddress, at, 'Live creation address mismatch'); same(receipt.blockNumber, block, 'Creation block differs from the release');
+  const tx = await reader.getTransaction({ hash });
+  demand(tx.to === null && tx.value === 0n, 'Expected a zero-value CREATE transaction'); same(tx.from, deployer, 'Live creation sender mismatch');
+  return { tx, receipt, header };
+}
+function demandCreationData(name, tx, artifact, args) {
+  // Reuses the broadcaster's check: current artifact + independently rebuilt arguments must be the exact input.
+  try { validateConstructorIntent({ constructorArgs: args, initCode: tx.input, initCodeHash: keccak256(tx.input) }, artifact, args); }
+  catch { throw new Error(`${name}: live creation data differs from the current build and the reviewed arguments`); }
+}
+/** Everything about the release file that needs no chain: its format, its binding to the profile, the retired
+ *  registry record, and that a planned release records no creation. */
+export function demandReleaseFormat(release, configText) {
+  demand(release.schemaVersion === 2 && ['planned', 'deployed'].includes(release.status) && release.contracts?.length === 4, 'A schema-2 release with four contracts is required');
+  same(release.configHash, keccak256(toHex(configText)), 'Public configuration changed since the release was written');
+  same(release.release, LABEL, 'Unexpected release label');
+  demand(JSON.stringify(release.retired) === JSON.stringify([RETIRED]), 'The retired registry record is missing or altered');
+  const entry = release.contracts[3];
+  demand(entry.name === 'StreamsRoundRegistry' && entry.chain === 'horizen' && entry.chainId === IDS.horizen && entry.proxy, 'Release registry entry mismatch');
+  demand(release.status !== 'planned' || [entry.creationTransaction, entry.creationBlock, entry.proxy.implementationCreationTransaction,
+    entry.proxy.implementationCreationBlock].every((fact) => fact === null), 'A planned release must not record a creation transaction or block');
+}
+export async function loadAndCheck(options = {}) {
+  const files = rehearsalFiles(options);
+  const configText = await readFile(CONFIG, 'utf8'); const config = JSON.parse(configText);
+  const release = await publicJSON(files.release);
+  demandReleaseFormat(release, configText);
+  same(config.chains.base.receiptRpcUrl, BASE_RECEIPT_RPC, 'Unreviewed Base receipt RPC');
+  const deployer = config.deployer;
+  const clients = {}; const history = {}; const blocks = {}; const checked = [];
+  const dependencies = await recheckPublicDependencies(config, { horizen: options.rehearsal });
   for (const chain of ['base', 'horizen']) {
     same(config.chains[chain].rpcUrl, RPCS[chain], 'Unreviewed public RPC');
-    same(plan.chains[chain].chainId, IDS[chain], 'Unexpected planned chain');
-    clients[chain] = client(RPCS[chain]); same(await clients[chain].getChainId(), IDS[chain], 'RPC chain mismatch');
-    history[chain] = chain === 'base' ? client(BASE_HISTORY_RPC) : clients[chain];
+    clients[chain] = chain === 'horizen' && options.rehearsal ? await anvilFork(options.rehearsal) : client(RPCS[chain]);
+    same(await clients[chain].getChainId(), IDS[chain], 'RPC chain mismatch');
+    history[chain] = chain === 'base' ? client(BASE_RECEIPT_RPC) : clients[chain];
     same(await history[chain].getChainId(), IDS[chain], 'Historical RPC chain mismatch');
     blocks[chain] = await clients[chain].getBlock();
   }
-  for (let i = 0; i < NAMES.length; i++) {
-    const intent = plan.intents[i]; const record = checkpoint.transactions[i]; const chain = i < 2 ? 'base' : 'horizen'; const c = clients[chain];
-    demand(intent.name === NAMES[i] && record.name === intent.name && record.status === 'confirmed', 'Deployment ordering or confirmation mismatch');
-    same(record.chainId, IDS[chain], 'Checkpoint chain mismatch'); same(intent.chainId, IDS[chain], 'Intent chain mismatch');
-    same(record.predictedAddress, intent.predictedAddress, 'Checkpoint address mismatch');
-    same(record.initCodeHash, intent.initCodeHash, 'Checkpoint initcode mismatch');
-    const { receipt, block } = await anchoredReceipt(history[chain], record.transactionHash);
-    same(receipt.contractAddress, intent.predictedAddress, 'Live creation address mismatch');
-    const tx = await history[chain].getTransaction({ hash: record.transactionHash });
-    demand(tx.to === null && tx.value === 0n, 'Expected a zero-value CREATE transaction');
-    same(tx.from, plan.deployer, 'Live creation sender mismatch'); same(tx.nonce, intent.nonce, 'Live creation nonce mismatch');
-    same(keccak256(tx.input), intent.initCodeHash, 'Live creation data differs from simulated plan');
-    const runtime = await c.getCode({ address: addr(intent.predictedAddress), blockNumber: blocks[chain].number });
+  const artifacts = await loadArtifacts(resolve(CONTRACTS, 'out'), [...ROUTE, ...NAMES]);
+
+  // Three kept route contracts: fixed code, already deployed, never replanned.
+  const created = [];
+  for (const [i, contract] of release.contracts.slice(0, 3).entries()) {
+    demand(contract.name === ROUTE[i] && contract.chain === (i < 2 ? 'base' : 'horizen') && contract.chainId === IDS[contract.chain], 'Release ordering mismatch');
+    created.push(await creation(history[contract.chain], contract.creationTransaction, contract.address, contract.creationBlock, deployer));
+  }
+  const expectedArgs = expectedConstructors(config, { deployer, chains: { base: { nonce: created[0].tx.nonce }, horizen: { nonce: created[2].tx.nonce } } });
+  const tuple = artifacts.BaseStreamsPublisher.abi.find((x) => x.type === 'constructor').inputs[0];
+  const encodeRoute = (route) => encodeAbiParameters([{ type: 'string' }, tuple], ['zedge-native-streams-route-v1', route]);
+  same(encodeRoute(release.route), encodeRoute(expectedArgs[1][0]), 'Release route differs from the reviewed constructor profile');
+  same(keccak256(encodeRoute(release.route)), release.routeHash, 'Release route hash mismatch');
+  for (const [i, contract] of release.contracts.slice(0, 3).entries()) {
+    const c = clients[contract.chain]; const at = blocks[contract.chain].number;
+    same(contract.address, release.route[['sourceOracle', 'publisher', 'destinationOracle'][i]], 'Release address differs from its route');
+    demandCreationData(contract.name, created[i].tx, artifacts[contract.name], expectedArgs[i]);
+    const runtime = await c.getCode({ address: addr(contract.address), blockNumber: at });
     demand(runtime && runtime !== '0x', 'Missing live runtime');
-    same(keccak256(runtime), intent.simulatedRuntimeHash, 'Live runtime differs from simulation');
-    same(record.runtimeCodeHash, intent.simulatedRuntimeHash, 'Checkpoint runtime hash mismatch');
-    await verifyCreated(c, intent, plan, config, blocks[chain].number);
-    const path = `contracts/out/${intent.name}.sol/${intent.name}.json`;
-    same(intent.artifactPath, path, 'Unexpected artifact path');
-    artifacts[intent.name] = await publicJSON(resolve(ROOT, path));
-    same(keccak256(artifacts[intent.name].bytecode.object), intent.creationBytecodeHash, 'Current artifact differs from deployed creation template');
-    checked.push({ name: intent.name, chainId: IDS[chain], address: intent.predictedAddress, transactionHash: record.transactionHash,
-      creationBlock: receipt.blockNumber, creationTimestamp: block.timestamp, runtimeCodeHash: keccak256(runtime), immutableChecksPassed: true });
+    same(keccak256(runtime), contract.runtimeCodeHash, `${contract.name}: live runtime differs from the release`);
+    await verifyRoute(c, contract, release, config, at);
+    checked.push({ name: contract.name, chainId: contract.chainId, address: contract.address, transactionHash: contract.creationTransaction,
+      creationBlock: created[i].receipt.blockNumber, creationTimestamp: created[i].header.timestamp, runtimeCodeHash: keccak256(runtime), immutableChecksPassed: true });
+  }
+
+  // The registry proxy, as the release describes it.
+  const entry = release.contracts[3]; const horizen = clients.horizen; const at = blocks.horizen.number;
+  const describes = (expected) => {
+    same(entry.address, expected.proxy, 'Registry proxy address does not follow from the deployer nonce');
+    same(entry.proxy.implementation, expected.implementation, 'Registry implementation address does not follow from the deployer nonce');
+    same(entry.runtimeCodeHash, expected.proxyCodeHash, 'Release proxy runtime hash differs from the current build');
+    same(entry.proxy.implementationCodeHash, expected.implementationCodeHash, 'Release implementation runtime hash differs from the current build');
+    same(entry.proxy.owner, expected.owner, 'Release registry owner mismatch'); same(release.rulesHash, expected.rulesHash, 'Release rules hash differs from the reviewed profile');
+  };
+  const abi = artifacts.StreamsRoundRegistry.abi; let registry;
+  if (release.status === 'planned') {
+    // Nothing is deployed yet. The plan is still valid only while the deployer's next two nonces create these addresses.
+    const nonce = await horizen.getTransactionCount({ address: addr(deployer), blockNumber: at });
+    describes(expectedRegistry(registryCreation(config, deployer, nonce, abi), artifacts));
+    for (const planned of [entry.proxy.implementation, entry.address]) {
+      const code = await horizen.getCode({ address: addr(planned), blockNumber: at });
+      demand(!code || code === '0x', 'The release says planned but a planned registry address has code: write the deployed release');
+    }
+    registry = { status: 'planned-not-deployed', address: entry.address, implementation: entry.proxy.implementation, deployerNonce: nonce };
+  } else {
+    const made = [
+      await creation(horizen, entry.proxy.implementationCreationTransaction, entry.proxy.implementation, entry.proxy.implementationCreationBlock, deployer),
+      await creation(horizen, entry.creationTransaction, entry.address, entry.creationBlock, deployer),
+    ];
+    const nonce = made[0].tx.nonce; same(made[1].tx.nonce, nonce + 1, 'Registry proxy creation nonce');
+    const plan = registryCreation(config, deployer, nonce, abi); const expected = expectedRegistry(plan, artifacts);
+    describes(expected);
+    for (const [i, name] of NAMES.entries()) demandCreationData(name, made[i].tx, artifacts[name], plan.constructorArgs[i]);
+    registry = { status: 'deployed-verified', address: entry.address, implementation: entry.proxy.implementation, owner: entry.proxy.owner,
+      deployerNonce: nonce, constructorArgs: plan.constructorArgs, checked: await verifyRegistry(horizen, expected, at),
+      creations: NAMES.map((name, i) => ({ name, address: i === 0 ? plan.implementation : plan.proxy, transactionHash: made[i].receipt.transactionHash,
+        blockNumber: made[i].receipt.blockNumber, blockHash: made[i].receipt.blockHash, runtimeCodeHash: i === 0 ? expected.implementationCodeHash : expected.proxyCodeHash })) };
   }
   for (const chain of ['base', 'horizen']) same((await clients[chain].getBlock({ blockNumber: blocks[chain].number })).hash, blocks[chain].hash, 'Live-check snapshot reorg');
-  const result = { schemaVersion: 1, status: 'four-live-runtimes-and-immutables-verified', checkedAt: new Date().toISOString(),
-    checkpointPlanHash: checkpoint.planHash, contracts: checked, dependencies, routeHash: plan.routeHash, rulesHash: plan.rulesHash,
+  const result = { schemaVersion: 2, status: release.status === 'deployed' ? 'route-and-registry-verified' : 'route-verified-registry-planned-not-deployed',
+    checkedAt: new Date().toISOString(), release: release.release, releaseStatus: release.status, rehearsal: files.rehearsal,
+    contracts: checked, registry, dependencies, routeHash: release.routeHash, rulesHash: release.rulesHash,
     snapshotBlocks: Object.fromEntries(Object.entries(blocks).map(([key, block]) => [key, { number: block.number, hash: block.hash, timestamp: block.timestamp }])),
     noTransactionsSent: true, privateTradingOrCustodyVerified: false, nativeDeliveryVerified: false };
-  await write(FILES.live, result);
-  return { plan, config, checkpoint, clients, history, blocks, artifacts, live: result };
+  await write(resolve(files.directory, 'streams-live-check.json'), result);
+  return { config, release, clients, history, blocks, artifacts, files, live: result };
 }
 export async function fixture(context) {
-  const text = await readFile(FILES.fixtures, 'utf8'); const block = text.match(/```json\n([\s\S]*?)\n```/);
+  const text = await readFile(FIXTURES, 'utf8'); const block = text.match(/```json\n([\s\S]*?)\n```/);
   demand(block, 'Public report fixture JSON is missing');
   const matches = JSON.parse(block[1]).filter((x) => eq(x.feedId, context.config.feeds.btcFeedId));
   demand(matches.length === 1, 'Expected one canonical BTC public fixture'); const fixture = matches[0];
@@ -149,60 +199,6 @@ export async function fixture(context) {
   same(keccak256(publishedPayload), fixture.payloadHash, 'Fixture no longer matches its public source transaction');
   return { fixture, boundary, expectedObservation };
 }
-async function prepare(context) {
-  const { plan, config, checkpoint, clients, artifacts } = context; const base = clients.base;
-  const { fixture: source, boundary, expectedObservation } = await fixture(context);
-  const block = await base.getBlock();
-  const deployerCode = await base.getCode({ address: addr(plan.deployer), blockNumber: block.number });
-  demand(!deployerCode || deployerCode === '0x', 'Smoke sender must remain an ordinary EOA without delegated code');
-  demand(block.timestamp >= boundary && block.timestamp <= BigInt(expectedObservation.expiresAt), 'Historical smoke report is not currently usable; no fresh report was fetched');
-  const adapterAbi = artifacts.ChainlinkStreamsBoundaryOracle.abi;
-  const adapterData = encodeFunctionData({ abi: adapterAbi, functionName: 'verifyBoundary', args: [source.feedId, boundary, boundary + BigInt(config.rules.observationWindow), source.payload] });
-  const verified = await base.call({ account: addr(plan.deployer), to: addr(plan.predicted.baseAdapter), data: adapterData, blockNumber: block.number });
-  const actual = decodeFunctionResult({ abi: adapterAbi, functionName: 'verifyBoundary', data: verified.data }); observationMatches(actual, expectedObservation);
-  const publisherAbi = artifacts.BaseStreamsPublisher.abi;
-  const args = [source.feedId, boundary, source.payload];
-  const data = encodeFunctionData({ abi: publisherAbi, functionName: 'publishBoundary', args });
-  const publisherCheck = await base.call({ account: addr(plan.deployer), to: addr(plan.predicted.basePublisher), data, value: 0n, blockNumber: block.number });
-  observationMatches(decodeFunctionResult({ abi: publisherAbi, functionName: 'publishBoundary', data: publisherCheck.data }), expectedObservation);
-  const nonce = await base.getTransactionCount({ address: addr(plan.deployer), blockTag: 'latest' });
-  demand(nonce === plan.chains.base.nonce + 2, 'One-time smoke requires the first Base nonce after the two deployments; do not silently prepare a repeat or skip another transaction');
-  same(await base.getTransactionCount({ address: addr(plan.deployer), blockTag: 'pending' }), nonce, 'Pending deployer transaction blocks smoke preparation');
-  const gas = await base.estimateGas({ account: addr(plan.deployer), to: addr(plan.predicted.basePublisher), data, value: 0n });
-  const gasLimit = (gas * 125n + 99n) / 100n;
-  demand(gasLimit <= 2000000n, 'Unexpectedly large smoke transaction gas');
-  const gasPrice = await base.getGasPrice(); const priority = await base.estimateMaxPriorityFeePerGas();
-  demand(block.baseFeePerGas !== null, 'Expected EIP-1559 block');
-  const maxFee = [2n * gasPrice, 2n * block.baseFeePerGas + priority].reduce((a, b) => a > b ? a : b);
-  const encoded = serializeTransaction({ type: 'eip1559', chainId: 8453, nonce, to: addr(plan.predicted.basePublisher), data, value: 0n, gas: gasLimit, maxFeePerGas: maxFee, maxPriorityFeePerGas: priority },
-    { r: `0x${'ff'.repeat(32)}`, s: `0x${'ff'.repeat(32)}`, yParity: 1 });
-  const transactionBytesUpper = (encoded.length - 2) / 2;
-  const l1 = await view(base, block.number, GAS_ORACLE, 'getL1FeeUpperBound(uint256) view returns(uint256)', [BigInt(transactionBytesUpper)]);
-  const operator = await view(base, block.number, GAS_ORACLE, 'getOperatorFee(uint256) view returns(uint256)', [gasLimit]);
-  const maximumEstimatedWei = gasLimit * maxFee + 2n * l1 + 2n * operator;
-  const prior = BigInt(checkpoint.costUpperBoundsWei?.base ?? '-1'); const ceiling = BigInt(config.maximumSpendWei.base);
-  demand(prior >= 0n && ceiling > 0n && ceiling <= BASE_CEILING, 'Missing or invalid confirmed deployment cost accounting');
-  demand(prior + maximumEstimatedWei <= ceiling, 'Smoke estimate exceeds remaining approved Base budget');
-  const balance = await base.getBalance({ address: addr(plan.deployer) }); demand(balance >= maximumEstimatedWei, 'Insufficient observed Base ETH for smoke estimate');
-  same(await base.getTransactionCount({ address: addr(plan.deployer), blockTag: 'latest' }), nonce, 'Nonce changed while preparing smoke');
-  same(await base.getTransactionCount({ address: addr(plan.deployer), blockTag: 'pending' }), nonce, 'Pending nonce changed while preparing smoke');
-  same((await base.getBlock({ blockNumber: block.number })).hash, block.hash, 'Smoke preparation snapshot reorg');
-  const result = { schemaVersion: 1, status: 'unsigned-genuine-public-report-smoke-ready', createdAt: new Date().toISOString(), expiresAfterSeconds: 300,
-    noTransactionsSent: true, checkpointPlanHash: checkpoint.planHash, chainId: 8453, publicRpcUrl: RPCS.base, from: plan.deployer,
-    to: plan.predicted.basePublisher, nonce, value: '0', functionName: 'publishBoundary', args, data, dataHash: keccak256(data),
-    gasLimit, estimatedGas: gas, maxFeePerGas: maxFee, maxPriorityFeePerGas: priority,
-    routeHash: plan.routeHash, destinationChainId: 26514, destinationCache: plan.predicted.horizenCache,
-    sourceMessenger: config.dependencies.sourceMessenger.address, destinationMessenger: config.dependencies.destinationMessenger.address,
-    boundary, expectedObservation, fixtureSourceTransaction: source.sourceTransaction, fixturePayloadHash: source.payloadHash, fixtureProvenanceRpcUrl: BASE_HISTORY_RPC,
-    block: { number: block.number, hash: block.hash, timestamp: block.timestamp }, realAdapterEthCallPassed: true, realPublisherEthCallPassed: true,
-    fees: { maximumEstimatedWei, maximumEstimatedETH: formatEther(maximumEstimatedWei), gasLimitExecutionWei: gasLimit * maxFee,
-      l1DataFeeUpperWei: l1, operatorFeeAtGasLimitWei: operator, nonExecutionFeeBufferMultiplier: 2, transactionBytesUpper,
-      priorDeploymentCostUpperWei: prior, combinedBaseCostUpperWei: prior + maximumEstimatedWei, approvedBaseCeilingWei: ceiling, observedBalanceWei: balance },
-    scope: 'One historical public BTC report at its exact signed second; deliberately not a 5m/15m round boundary. No market creation, orders, custody, or settlement.',
-    signingPrerequisites: ['Recheck this 300-second plan, live dependency/code/route pins, unexpired report, deployer nonce, fees and remaining total budget immediately before any independently authorized send.', 'This helper never signs or sends. A Base receipt must be followed by authenticated Horizen receipt and matching cached observation.'],
-  };
-  await write(FILES.smoke, result); return result;
-}
 function events(receipt, address, abi, name) {
   const results = [];
   for (const log of receipt.logs) {
@@ -212,24 +208,24 @@ function events(receipt, address, abi, name) {
   return results;
 }
 async function observe(context, hash) {
-  const { plan, config, clients, artifacts } = context; const destination = clients.horizen;
+  const { release, config, clients, artifacts } = context; const destination = clients.horizen; const route = release.route;
   const { fixture: source, boundary, expectedObservation } = await fixture(context);
   const { receipt, block: sourceBlock } = await anchoredReceipt(context.history.base, hash);
   const tx = await context.history.base.getTransaction({ hash });
-  same(tx.to, plan.predicted.basePublisher, 'Source smoke transaction target mismatch'); same(tx.from, plan.deployer, 'Unexpected smoke sender'); demand(tx.value === 0n, 'Smoke must carry zero ETH value');
+  same(tx.to, route.publisher, 'Source smoke transaction target mismatch'); same(tx.from, config.deployer, 'Unexpected smoke sender'); demand(tx.value === 0n, 'Smoke must carry zero ETH value');
   const decoded = decodeFunctionData({ abi: artifacts.BaseStreamsPublisher.abi, data: tx.input });
   demand(decoded.functionName === 'publishBoundary', 'Expected publishBoundary smoke call');
   same(decoded.args[0], source.feedId, 'Smoke feed mismatch'); same(decoded.args[1], boundary, 'Smoke boundary mismatch'); same(keccak256(decoded.args[2]), source.payloadHash, 'Smoke report payload mismatch');
   const messenger = config.dependencies.sourceMessenger.address;
-  const sent = events(receipt, messenger, MSG_ABI, 'SentMessage').filter((x) => eq(x.args.sender, plan.predicted.basePublisher) && eq(x.args.target, plan.predicted.horizenCache));
-  const extensions = events(receipt, messenger, MSG_ABI, 'SentMessageExtension1').filter((x) => eq(x.args.sender, plan.predicted.basePublisher));
+  const sent = events(receipt, messenger, MSG_ABI, 'SentMessage').filter((x) => eq(x.args.sender, route.publisher) && eq(x.args.target, route.destinationOracle));
+  const extensions = events(receipt, messenger, MSG_ABI, 'SentMessageExtension1').filter((x) => eq(x.args.sender, route.publisher));
   demand(sent.length === 1 && extensions.length === 1, 'Expected exactly one native smoke message');
   const message = sent[0].args; const value = extensions[0].args.value;
   demand(value === 0n && message.messageNonce >> 240n === 1n, 'Expected zero-value version-1 OP message');
   same(message.gasLimit, config.rules.minimumGasLimit, 'Destination gas policy mismatch');
   const receiverCall = decodeFunctionData({ abi: artifacts.HorizenStreamsOracle.abi, data: message.message });
   demand(receiverCall.functionName === 'receiveObservation', 'Unexpected native destination call');
-  same(receiverCall.args[0], plan.routeHash, 'Message route mismatch'); same(receiverCall.args[1], source.feedId, 'Message feed mismatch'); same(receiverCall.args[2], boundary, 'Message boundary mismatch');
+  same(receiverCall.args[0], release.routeHash, 'Message route mismatch'); same(receiverCall.args[1], source.feedId, 'Message feed mismatch'); same(receiverCall.args[2], boundary, 'Message boundary mismatch');
   observationMatches(receiverCall.args[3], expectedObservation);
   const relayData = encodeFunctionData({ abi: MSG_ABI, functionName: 'relayMessage', args: [message.messageNonce, message.sender, message.target, value, message.gasLimit, message.message] });
   const messageHash = keccak256(relayData);
@@ -253,15 +249,15 @@ async function observe(context, hash) {
     if (succeeded) {
       demand(successes.length === 1, 'Messenger reports success but its unique receipt is outside the bounded scan; inspect the explorer');
       const { receipt: destinationReceipt, block: destinationBlock } = await anchoredReceipt(destination, successes[0].transactionHash);
-      const received = events(destinationReceipt, plan.predicted.horizenCache, observationAbi, 'ObservationReceived')
+      const received = events(destinationReceipt, route.destinationOracle, observationAbi, 'ObservationReceived')
         .filter((x) => eq(x.args.feedId, source.feedId) && eq(x.args.boundary, boundary) && eq(x.args.reportHash, expectedObservation.reportHash));
       demand(received.length <= 1, 'Ambiguous cache-receipt event');
-      const observation = await destination.readContract({ address: addr(plan.predicted.horizenCache), abi: observationAbi, functionName: 'getObservation', args: [source.feedId, boundary], blockNumber: latest.number });
+      const observation = await destination.readContract({ address: addr(route.destinationOracle), abi: observationAbi, functionName: 'getObservation', args: [source.feedId, boundary], blockNumber: latest.number });
       observationMatches(observation, expectedObservation);
       same((await context.history.base.getBlock({ blockNumber: receipt.blockNumber })).hash, receipt.blockHash, 'Source receipt reorg');
       same((await destination.getBlock({ blockNumber: destinationReceipt.blockNumber })).hash, destinationReceipt.blockHash, 'Destination receipt reorg');
       return { schemaVersion: 1, status: 'native-delivery-and-authenticated-cache-observed', checkedAt: new Date().toISOString(), noTransactionsSent: true,
-        checkpointPlanHash: context.checkpoint.planHash, messageHash, messageNonce: message.messageNonce, routeHash: plan.routeHash,
+        release: release.release, messageHash, messageNonce: message.messageNonce, routeHash: release.routeHash,
         feedId: source.feedId, boundary, expectedObservation, sourceTransactionHash: hash, sourceBlock: receipt.blockNumber, sourceBlockHash: receipt.blockHash, sourceTimestamp: sourceBlock.timestamp,
         destinationTransactionHash: destinationReceipt.transactionHash, destinationBlock: destinationReceipt.blockNumber, destinationBlockHash: destinationReceipt.blockHash, destinationTimestamp: destinationBlock.timestamp,
         inclusionDelaySeconds: destinationBlock.timestamp - sourceBlock.timestamp, destinationConfirmationsObserved: latest.number - destinationReceipt.blockNumber + 1n,
@@ -276,20 +272,23 @@ async function observe(context, hash) {
     nextStep: 'Inspect or rerun observation later. This timeout is not proof that delivery can never occur; no retry transaction was sent.' };
 }
 async function main() {
-  const option = options(); const context = await loadAndCheck();
-  let result = context.live;
-  if (option.mode === 'prepare') result = await prepare(context);
-  if (option.mode === 'observe') { result = await observe(context, option.transactionHash); await write(FILES.observed, result); }
-  console.log(json({ status: result.status, output: option.mode === 'prepare' ? 'evidence/hybrid-smoke-plan.json' : option.mode === 'observe' ? 'evidence/hybrid-smoke-result.json' : 'evidence/hybrid-live-check.json',
-    noTransactionsSent: true, maximumEstimatedETH: result.fees?.maximumEstimatedETH, messageHash: result.messageHash,
-    destinationTransactionHash: result.destinationTransactionHash }));
+  const option = options(); const context = await loadAndCheck(option);
+  let result = context.live; let output = 'streams-live-check.json';
+  if (option.observe) { result = await observe(context, option.observe); output = 'streams-smoke-observation.json'; await write(resolve(context.files.directory, output), result); }
+  console.log(json({ status: result.status, registry: context.live.registry.status, rehearsal: context.files.rehearsal,
+    output: shown(resolve(context.files.directory, output)), noTransactionsSent: true,
+    messageHash: result.messageHash, destinationTransactionHash: result.destinationTransactionHash }));
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try { await main(); }
   catch (error) {
     const message = String(error.shortMessage ?? error.message ?? 'Public verification failed').slice(0, 400);
-    const output = process.argv.includes('--prepare-smoke') ? FILES.smoke : process.argv.includes('--observe') ? FILES.observed : FILES.live;
-    await write(output, { schemaVersion: 1, status: 'failed', checkedAt: new Date().toISOString(), noTransactionsSent: true, error: message });
+    // A failed run must not leave an earlier pass in place. Refused arguments have nothing to invalidate.
+    try {
+      const option = options();
+      await write(resolve(rehearsalFiles(option).directory, option.observe ? 'streams-smoke-observation.json' : 'streams-live-check.json'),
+        { schemaVersion: 2, status: 'failed', checkedAt: new Date().toISOString(), noTransactionsSent: true, error: message });
+    } catch { /* nothing written */ }
     console.error(`Public hybrid check failed: ${message}`); process.exitCode = 1;
   }
 }

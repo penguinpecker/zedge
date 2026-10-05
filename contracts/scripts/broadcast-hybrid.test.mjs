@@ -13,7 +13,8 @@ import {
 function recoveryFixture() {
   const intent = { name: 'adapter', chainId: 8453, nonce: 11, predictedAddress: `0x${'2'.repeat(40)}`,
     initCodeHash: `0x${'a'.repeat(64)}` };
-  const plan = { createdAt: new Date(NOW - 601000).toISOString(), deployer: `0x${'1'.repeat(40)}`, intents: [intent] };
+  // One creation is recorded, a second one is still to be signed.
+  const plan = { createdAt: new Date(NOW - 601000).toISOString(), deployer: `0x${'1'.repeat(40)}`, intents: [intent, { ...intent, name: 'publisher', nonce: 12 }] };
   const planHash = `0x${'b'.repeat(64)}`;
   const checkpoint = { schemaVersion: 1, status: 'prepared', planHash, deployer: plan.deployer,
     startedAt: new Date(NOW - 600000).toISOString(), transactions: [{ ...intent, transactionHash: `0x${'c'.repeat(64)}`, status: 'submitted' }] };
@@ -39,6 +40,19 @@ test('recovery rejects changed plan hash, deployer, intent identity, nonce or tr
   }
 });
 
+test('only a rehearsal entry still awaiting submission may lack a transaction hash', t => {
+  t.mock.method(Date, 'now', () => NOW);
+  const hashless = (rehearsal, status) => {
+    const { plan, planHash, checkpoint } = recoveryFixture();
+    Object.assign(checkpoint, { rehearsal }); Object.assign(checkpoint.transactions[0], { transactionHash: undefined, status });
+    return () => validateRecoveryCheckpoint(checkpoint, plan, planHash);
+  };
+  assert.doesNotThrow(hashless(true, 'signed-awaiting-submission'));
+  for (const [rehearsal, status] of [[false, 'signed-awaiting-submission'], [undefined, 'signed-awaiting-submission'], [true, 'submitted'], [true, 'confirmed']]) {
+    assert.throws(hashless(rehearsal, status));
+  }
+});
+
 test('recovery rejects empty/non-prefix checkpoints and changing the original start to now', t => {
   t.mock.method(Date, 'now', () => NOW);
   for (const mutate of [
@@ -56,6 +70,13 @@ test('recovery cannot reset an expired fifteen-minute run', t => {
   assert.doesNotThrow(() => validateRecoveryCheckpoint(checkpoint, plan, planHash));
   t.mock.method(Date, 'now', () => NOW + 300001);
   assert.throws(() => validateRecoveryCheckpoint(checkpoint, plan, planHash));
+});
+
+test('a run with every transaction recorded can still be verified after the signing window', t => {
+  const { plan, planHash, checkpoint } = recoveryFixture();
+  plan.intents.pop();
+  t.mock.method(Date, 'now', () => NOW + 86400000);
+  assert.equal(validateRecoveryCheckpoint(checkpoint, plan, planHash), NOW - 600000);
 });
 
 function recordedFixture() {
@@ -117,7 +138,7 @@ const address = digit => `0x${digit.repeat(40)}`;
 const BTC = `0x0003${'0'.repeat(59)}1`;
 const ETH = `0x0003${'0'.repeat(59)}2`;
 const NOW = 1_800_000_000_000;
-const NAMES = ['adapter', 'publisher', 'receiver', 'registry'];
+const NAMES = ['adapter', 'publisher', 'receiver'];
 const inputs = definitions => definitions.map(([name, type]) => ({ name, type }));
 const ROUTE_COMPONENTS = inputs([
   ['sourceChainId', 'uint256'], ['destinationChainId', 'uint256'],
@@ -126,16 +147,10 @@ const ROUTE_COMPONENTS = inputs([
   ['btcFeedId', 'bytes32'], ['ethFeedId', 'bytes32'], ['btcDecimals', 'uint8'], ['ethDecimals', 'uint8'],
   ['observationWindow', 'uint32'], ['minimumGasLimit', 'uint32'],
 ]);
-const REGISTRY_COMPONENTS = inputs([
-  ['oracle', 'address'], ['collateral', 'address'], ['btcFeedId', 'bytes32'], ['ethFeedId', 'bytes32'],
-  ['btcDecimals', 'uint8'], ['ethDecimals', 'uint8'], ['observationWindow', 'uint32'],
-  ['openingGrace', 'uint32'], ['settlementGrace', 'uint32'], ['cutoffBuffer', 'uint32'],
-]);
 const constructorInputs = [
   inputs([['verifier', 'address'], ['btcFeedId', 'bytes32'], ['btcDecimals', 'uint8'], ['ethFeedId', 'bytes32'], ['ethDecimals', 'uint8']]),
   [{ name: 'config', type: 'tuple', components: ROUTE_COMPONENTS }],
   [{ name: 'config', type: 'tuple', components: ROUTE_COMPONENTS }],
-  [{ name: 'config', type: 'tuple', components: REGISTRY_COMPONENTS }],
 ];
 const ARTIFACTS = constructorInputs.map(constructor => ({
   abi: [{ type: 'constructor', inputs: constructor, stateMutability: 'nonpayable' }],
@@ -151,7 +166,7 @@ function fixture() {
       collateral: { address: address('5') },
     },
     feeds: { btcFeedId: BTC, ethFeedId: ETH, btcDecimals: 18, ethDecimals: 18 },
-    rules: { observationWindow: 60, openingGrace: 150, settlementGrace: 3600, cutoffBuffer: 30, minimumGasLimit: 600000 },
+    rules: { observationWindow: 60, openingGrace: 150, voidGrace: 604800, cutoffBuffer: 30, minimumGasLimit: 600000 },
   };
   const plan = { deployer: address('1'), chains: { base: { nonce: 11 }, horizen: { nonce: 22 } } };
   return { config, plan, expected: expectedConstructors(config, plan) };
@@ -173,7 +188,7 @@ for (const [index, name] of NAMES.entries()) {
     const { expected } = fixture();
     const altered = structuredClone(expected[index]);
     if (index === 0) altered[0] = address('6');
-    else altered[0][index === 3 ? 'collateral' : 'sourceMessenger'] = address('6');
+    else altered[0].sourceMessenger = address('6');
     // Merely recomputing the stored initcode/hash must not authorize another endpoint.
     assert.throws(() => validateConstructorIntent(intent(index, altered), ARTIFACTS[index], expected[index]));
   });
@@ -207,11 +222,11 @@ test('changed Base nonce cannot retain the original route addresses', () => {
   }
 });
 
-test('changed Horizen nonce cannot retain the original cache/registry bindings', () => {
+test('changed Horizen nonce cannot retain the original cache binding', () => {
   const { config, plan, expected } = fixture();
   plan.chains.horizen.nonce += 1;
   const moved = expectedConstructors(config, plan);
-  for (const index of [1, 2, 3]) {
+  for (const index of [1, 2]) {
     assert.throws(() => validateConstructorIntent(intent(index, expected[index]), ARTIFACTS[index], moved[index]));
   }
 });
@@ -220,7 +235,7 @@ test('changed deployer cannot retain the original CREATE addresses', () => {
   const { config, plan, expected } = fixture();
   plan.deployer = address('7');
   const moved = expectedConstructors(config, plan);
-  for (const index of [1, 2, 3]) {
+  for (const index of [1, 2]) {
     assert.throws(() => validateConstructorIntent(intent(index, expected[index]), ARTIFACTS[index], moved[index]));
   }
 });

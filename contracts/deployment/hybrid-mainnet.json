@@ -5,7 +5,8 @@
   "chains": {
     "base": {
       "chainId": 8453,
-      "rpcUrl": "https://base-rpc.publicnode.com"
+      "rpcUrl": "https://base-rpc.publicnode.com",
+      "receiptRpcUrl": "https://mainnet.base.org"
     },
     "horizen": {
       "chainId": 26514,
@@ -21,7 +22,7 @@
   "rules": {
     "observationWindow": 60,
     "openingGrace": 150,
-    "settlementGrace": 3600,
+    "voidGrace": 604800,
     "cutoffBuffer": 30,
     "minimumGasLimit": 600000
   },

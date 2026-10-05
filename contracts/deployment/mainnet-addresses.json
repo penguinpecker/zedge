@@ -1,9 +1,10 @@
 {
-  "schemaVersion": 1,
-  "release": "streams-mainnet-2026-10-04",
-  "configHash": "0x7fde38df881993823b83cca3f92575b54881bb932c81742ea5b018b7ae3c4f7a",
+  "schemaVersion": 2,
+  "release": "streams-mainnet-2026-10-05",
+  "status": "planned",
+  "configHash": "0x11b11575a0a72f35be000e973894266fefbbe8aff2fef024d9878f642308d2bd",
   "routeHash": "0xdd0243acfe5c168f4189af435f907cd3dd4a26085faf228e721ddee4e87ac36b",
-  "rulesHash": "0x591860792894f856c548d908b50aac9bbecd793794da13ac995bf9d248aa7d7c",
+  "rulesHash": "0x17258005a90dc55ca45ae167eb0310278363a2ca89d8204437e1d21cc79ac45d",
   "route": {
     "sourceChainId": "8453",
     "destinationChainId": "26514",
@@ -18,12 +19,6 @@
     "ethDecimals": 18,
     "observationWindow": 60,
     "minimumGasLimit": 600000
-  },
-  "predicted": {
-    "baseAdapter": "0xdD3bEAA92E5819333A5D5ccD185704427fAB0e91",
-    "basePublisher": "0xA8abACbD25c9795C3Ef0701184B18Aad6F98C006",
-    "horizenCache": "0xc800C3F18D35D492aE6b07655D7f31bFE98A4B6B",
-    "horizenRegistry": "0xdD3bEAA92E5819333A5D5ccD185704427fAB0e91"
   },
   "contracts": [
     {
@@ -57,10 +52,26 @@
       "name": "StreamsRoundRegistry",
       "chain": "horizen",
       "chainId": 26514,
+      "address": "0x4DD4aacDb7E8D2e6D06c5af38238F3dEAB836744",
+      "runtimeCodeHash": "0x11e207b629c698e2df1db36c1a5400f670db529ea0461174531deb02e9ad5d56",
+      "creationTransaction": null,
+      "creationBlock": null,
+      "proxy": {
+        "implementation": "0xA8abACbD25c9795C3Ef0701184B18Aad6F98C006",
+        "implementationCodeHash": "0x731b4e783a2e0f3dbfe2403e899a0e814b55b383083b4489045455a331eb3869",
+        "implementationCreationTransaction": null,
+        "implementationCreationBlock": null,
+        "owner": "0x279173ac297aD146bc92f877552C8C2B78334d07"
+      }
+    }
+  ],
+  "retired": [
+    {
+      "name": "StreamsRoundRegistry",
+      "chain": "horizen",
+      "chainId": 26514,
       "address": "0xdD3bEAA92E5819333A5D5ccD185704427fAB0e91",
-      "runtimeCodeHash": "0x901625cddce4c3945fed51c4ee2dd77289ebb69f8e401068f6c2bc9362660a66",
-      "creationTransaction": "0x189badafcdaf0e08053f819da006509616ad2621f78f69ffff4acaf6ce13cf8f",
-      "creationBlock": "27707121"
+      "reason": "Replaced 2026-10-05: one-hour timeout void let anyone force a 50/50 refund by blocking price delivery. Never used (zero rounds)."
     }
   ]
 }

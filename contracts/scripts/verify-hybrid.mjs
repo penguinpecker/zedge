@@ -1,10 +1,13 @@
 #!/usr/bin/env node
-/** Public-only source-verification preparation. Never reads credentials or submits to explorers.
- * --prepare (default): reproduce the four current Paris artifacts from inline Standard JSON.
- * --check-deployed: additionally bind public plan/checkpoint, live receipts, initcode and runtimes;
- *                  emit public per-contract verification parameters only after all checks pass.
+/** Public-only source-verification preparation for the registry on Horizen Blockscout: the UUPS implementation
+ * and its ERC1967Proxy. Never reads credentials or submits to explorers.
+ * --prepare (default): reproduce both current Paris artifacts from inline Standard JSON.
+ * --check-deployed: additionally run the live checker (release, creation data, runtimes, implementation slot,
+ *                  owner, getters) and emit public per-contract verification parameters only after it passes.
+ * --rehearsal <url> --evidence <directory>: the same against a local Anvil fork and its own release.
  * --solc <path>: use an installed native solc 0.8.30 (no automatic download).
- * Generated files live in ignored evidence/verification/. API submission remains a separate step.
+ * Generated files live in ignored evidence/registry-verification/. API submission remains a separate step.
+ * The three route contracts were verified on 2026-10-04; their packets in evidence/verification/ are not touched.
  */
 import { readFile, writeFile, mkdir, access, rm } from 'node:fs/promises';
 import { constants } from 'node:fs';
@@ -12,44 +15,34 @@ import { dirname, resolve, relative, isAbsolute, join } from 'node:path';
 import { homedir, platform } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
-import {
-  createPublicClient, http, keccak256, toHex, encodeAbiParameters, encodeDeployData, getContractAddress,
-} from 'viem';
-// These exports are pure; the broadcaster's entrypoint is guarded and is never invoked here.
-import { expectedConstructors, validateConstructorIntent } from './broadcast-hybrid.mjs';
+import { keccak256, toHex, encodeAbiParameters } from 'viem';
+import { parseArguments, shown } from './preflight-hybrid.mjs';
+import { rehearsalFiles } from './plan-registry.mjs';
+// The checker's entrypoint is guarded and is never invoked here; it never signs or sends.
+import { loadAndCheck } from './check-hybrid-live.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const CONTRACTS = resolve(ROOT, 'contracts');
-const OUTPUT = resolve(ROOT, 'evidence/verification');
 const COMPILER = '0.8.30+commit.73712a01';
-const NAMES = ['ChainlinkStreamsBoundaryOracle', 'BaseStreamsPublisher', 'HorizenStreamsOracle', 'StreamsRoundRegistry'];
-const CHAINS = {
-  // PublicNode serves current state; Base's public archive serves historical receipts/headers.
-  base: { id: 8453, rpc: 'https://base-rpc.publicnode.com', historyRpc: 'https://mainnet.base.org' },
-  horizen: { id: 26514, rpc: 'https://horizen.calderachain.xyz/http', historyRpc: 'https://horizen.calderachain.xyz/http' },
+// Contract name -> its compilation target. The proxy is OpenZeppelin's, compiled from the pinned package.
+const TARGETS = {
+  StreamsRoundRegistry: 'src/StreamsRoundRegistry.sol',
+  ERC1967Proxy: 'node_modules/@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol',
 };
+const NAMES = Object.keys(TARGETS);
 const json = value => `${JSON.stringify(value, (_, v) => typeof v === 'bigint' ? v.toString() : v, 2)}\n`;
 const eq = (a, b) => typeof a === 'string' && typeof b === 'string' && a.toLowerCase() === b.toLowerCase();
 const demand = (value, message) => { if (!value) throw new Error(message); };
 let phase = 'options';
 
-async function invalidateCheckedPackets() {
-  for (const name of NAMES) await rm(resolve(OUTPUT, `${name}.verification.json`), { force: true });
-  await rm(resolve(OUTPUT, 'hybrid-deployment-checked.json'), { force: true });
+async function invalidateCheckedPackets(output) {
+  for (const name of NAMES) await rm(resolve(output, `${name}.verification.json`), { force: true });
+  await rm(resolve(output, 'registry-deployment-checked.json'), { force: true });
 }
 
 function options() {
-  const result = { checkDeployed: false };
-  const args = process.argv.slice(2);
-  for (let i = 0; i < args.length; i++) {
-    if (args[i] === '--prepare') continue;
-    if (args[i] === '--check-deployed') result.checkDeployed = true;
-    else if (args[i] === '--solc') {
-      demand(args[i + 1] && !args[i + 1].startsWith('--'), '--solc requires a path');
-      result.solc = resolve(args[++i]);
-    } else throw new Error('Allowed options: --prepare, --check-deployed, --solc <path>');
-  }
-  return result;
+  const parsed = parseArguments(process.argv.slice(2), ['--prepare', '--check-deployed'], ['--solc', '--rehearsal', '--evidence']);
+  return { ...parsed, checkDeployed: Boolean(parsed['check-deployed']), solc: parsed.solc && resolve(parsed.solc) };
 }
 
 async function solcPath(explicit) {
@@ -86,7 +79,7 @@ function runCompiler(binary, args, input = '') {
   });
 }
 
-async function prepare(binary) {
+async function prepare(binary, output) {
   demand((await runCompiler(binary, ['--version'])).includes(`Version: ${COMPILER}`), 'Wrong solc version');
   const prepared = [];
   for (const name of NAMES) {
@@ -98,7 +91,7 @@ async function prepare(binary) {
     demand(metadata.settings.evmVersion === 'paris', 'Artifacts must target Paris');
     demand(metadata.settings.optimizer?.enabled === true && metadata.settings.optimizer.runs === 200, 'Unexpected optimizer');
     demand(metadata.settings.metadata?.bytecodeHash === 'none', 'Unexpected bytecode metadata hash');
-    const source = `src/${name}.sol`;
+    const source = TARGETS[name];
     demand(Object.keys(metadata.settings.compilationTarget).length === 1 && metadata.settings.compilationTarget[source] === name, 'Wrong compilation target');
     demand(Object.keys(artifact.bytecode.linkReferences ?? {}).length === 0, 'Unreviewed library links');
     const sources = {};
@@ -128,96 +121,53 @@ async function prepare(binary) {
     } });
   }
   // Publish inputs only after every source closure has reproduced the reviewed artifact.
-  await mkdir(OUTPUT, { recursive: true });
-  for (const item of prepared) await writeFile(resolve(OUTPUT, item.manifest.standardInput), item.inputText, { mode: 0o600 });
-  await writeFile(resolve(OUTPUT, 'hybrid-inputs.json'), json({
-    schemaVersion: 1, status: 'four-public-inputs-reproduced', contracts: prepared.map(x => x.manifest),
+  await mkdir(output, { recursive: true });
+  for (const item of prepared) await writeFile(resolve(output, item.manifest.standardInput), item.inputText, { mode: 0o600 });
+  await writeFile(resolve(output, 'registry-inputs.json'), json({
+    schemaVersion: 1, status: 'registry-public-inputs-reproduced', contracts: prepared.map(x => x.manifest),
     notice: 'Source preparation does not prove deployment or explorer verification. No credentials read; no network submission.',
   }), { mode: 0o600 });
   return prepared;
 }
 
-async function checkDeployed(prepared) {
-  phase = 'confirmed public checkpoint and plan';
-  const planText = await readFile(resolve(ROOT, 'evidence/hybrid-plan.json'), 'utf8');
-  const plan = JSON.parse(planText);
-  const configText = await readFile(resolve(CONTRACTS, 'deployment/hybrid-mainnet.json'), 'utf8');
-  const config = JSON.parse(configText);
-  const checkpoint = JSON.parse(await readFile(resolve(ROOT, 'evidence/hybrid-broadcast.json'), 'utf8'));
-  demand(plan.schemaVersion === 1 && plan.status === 'constructors-simulated-operational-gates-pending', 'Invalid deployment plan');
-  demand(checkpoint.schemaVersion === 1 && checkpoint.status === 'four-contracts-confirmed-runtime-matched', 'No fully confirmed deployment checkpoint');
-  demand(eq(checkpoint.planHash, keccak256(toHex(planText))) && eq(checkpoint.deployer, plan.deployer), 'Checkpoint is bound to a different plan');
-  demand(config.schemaVersion === 1 && eq(plan.configHash, keccak256(toHex(configText)))
-    && eq(plan.deployer, config.deployer), 'Plan differs from current reviewed configuration');
-  for (const [name, profile] of Object.entries(CHAINS)) demand(config.chains[name].chainId === profile.id
-    && config.chains[name].rpcUrl === profile.rpc, 'Unexpected configured RPC or chain');
-  demand(plan.intents?.length === 4 && checkpoint.transactions?.length === 4, 'Expected exactly four deployments');
-  const expectedArgs = expectedConstructors(config, plan);
-  const clients = Object.fromEntries(Object.entries(CHAINS).map(([key, value]) => [key, createPublicClient({
-    transport: http(value.rpc, { timeout: 20000, retryCount: 2 }),
-  })]));
-  const historyClients = Object.fromEntries(Object.entries(CHAINS).map(([key, value]) => [key, createPublicClient({
-    transport: http(value.historyRpc, { timeout: 20000, retryCount: 2 }),
-  })]));
-  const packets = [];
-  for (let index = 0; index < prepared.length; index++) {
-    const item = prepared[index]; const intent = plan.intents[index]; const entry = checkpoint.transactions[index];
-    const chain = index < 2 ? 'base' : 'horizen'; const client = clients[chain]; const history = historyClients[chain];
-    phase = `${item.name}: confirm public transaction and runtime`;
-    demand(intent.name === item.name && entry.name === item.name && intent.chain === chain, 'Deployment order mismatch');
-    demand(intent.chainId === CHAINS[chain].id && entry.chainId === intent.chainId
-      && await client.getChainId() === intent.chainId && await history.getChainId() === intent.chainId, 'Wrong deployment chain');
-    demand(entry.status === 'confirmed' && intent.artifactPath === item.artifactPath, 'Unconfirmed or different artifact');
-    demand(eq(intent.from, plan.deployer) && entry.nonce === intent.nonce && Number.isSafeInteger(intent.nonce), 'Deployer or nonce mismatch');
-    demand(eq(getContractAddress({ from: plan.deployer, nonce: BigInt(intent.nonce) }), intent.predictedAddress), 'CREATE address mismatch');
-    demand(eq(entry.predictedAddress, intent.predictedAddress) && BigInt(intent.value) === 0n, 'Address or value mismatch');
-    validateConstructorIntent(intent, item.artifact, expectedArgs[index]);
+async function checkDeployed(prepared, opts, output) {
+  phase = 'live release check';
+  const { release, live } = await loadAndCheck(opts);
+  demand(live.registry.status === 'deployed-verified', 'The registry is not deployed yet: there is nothing to verify on the explorer');
+  const packets = prepared.map((item, index) => {
+    const made = live.registry.creations[index];
+    phase = `${item.name}: bind the reproduced input to the checked deployment`;
+    demand(made.name === item.name && eq(item.manifest.creationBytecodeHash, keccak256(item.artifact.bytecode.object)), 'Different creation artifact');
     const constructor = item.artifact.abi.find(x => x.type === 'constructor');
-    const encoded = encodeAbiParameters(constructor.inputs, intent.constructorArgs);
-    const initCode = encodeDeployData({ abi: item.artifact.abi, bytecode: item.artifact.bytecode.object, args: intent.constructorArgs });
-    demand(eq(encoded, intent.constructorArgsEncoded) && eq(initCode, intent.initCode), 'Constructor encoding mismatch');
-    demand(eq(keccak256(initCode), intent.initCodeHash) && eq(entry.initCodeHash, intent.initCodeHash), 'Initcode hash mismatch');
-    demand(eq(item.manifest.creationBytecodeHash, intent.creationBytecodeHash), 'Different creation artifact');
-    const receipt = await history.getTransactionReceipt({ hash: entry.transactionHash });
-    const transaction = await history.getTransaction({ hash: entry.transactionHash });
-    demand(receipt.status === 'success' && entry.receipt?.status === 'success', 'Deployment receipt failed');
-    demand(eq(receipt.contractAddress, intent.predictedAddress) && eq(entry.receipt.contractAddress, intent.predictedAddress), 'Receipt address mismatch');
-    demand(eq(receipt.transactionHash, entry.transactionHash) && eq(entry.receipt.transactionHash, entry.transactionHash), 'Receipt transaction mismatch');
-    demand(eq(receipt.blockHash, entry.receipt.blockHash) && receipt.blockNumber === BigInt(entry.receipt.blockNumber), 'Receipt changed since checkpoint');
-    const block = await history.getBlock({ blockNumber: receipt.blockNumber });
-    demand(eq(block.hash, receipt.blockHash) && await client.getBlockNumber() >= receipt.blockNumber + 1n, 'Receipt is not canonical with two confirmations');
-    demand(transaction.to === null && eq(transaction.from, plan.deployer) && transaction.nonce === intent.nonce
-      && transaction.value === 0n && eq(transaction.input, initCode) && eq(transaction.blockHash, receipt.blockHash), 'Live deployment transaction differs from plan');
-    const code = await client.getCode({ address: intent.predictedAddress });
-    demand(code && code !== '0x' && eq(keccak256(code), intent.simulatedRuntimeHash)
-      && eq(keccak256(code), entry.runtimeCodeHash), 'Live runtime differs from simulated and confirmed runtime');
-    packets.push({
-      ...item.manifest, chain, chainId: intent.chainId, address: intent.predictedAddress,
-      planHash: checkpoint.planHash, configHash: plan.configHash, checkedAt: new Date().toISOString(),
-      transactionHash: entry.transactionHash, blockNumber: receipt.blockNumber.toString(), blockHash: receipt.blockHash,
-      runtimeCodeHash: keccak256(code), constructorArguments: encoded.slice(2),
+    return {
+      ...item.manifest, chain: 'horizen', chainId: 26514, address: made.address, release: release.release, rehearsal: live.rehearsal,
+      configHash: release.configHash, checkedAt: live.checkedAt, transactionHash: made.transactionHash,
+      blockNumber: made.blockNumber.toString(), blockHash: made.blockHash, runtimeCodeHash: made.runtimeCodeHash,
+      constructorArguments: encodeAbiParameters(constructor.inputs, live.registry.constructorArgs[index]).slice(2),
       codeFormat: 'solidity-standard-json-input', license: 'MIT',
       status: 'public-deployment-checked-explorer-submission-pending',
-    });
-  }
+    };
+  });
   // Never emit submit-ready address/constructor packets for a partial or mismatched deployment.
-  for (const packet of packets) await writeFile(resolve(OUTPUT, `${packet.name}.verification.json`), json(packet), { mode: 0o600 });
-  await writeFile(resolve(OUTPUT, 'hybrid-deployment-checked.json'), json({
-    schemaVersion: 1, status: 'four-public-deployments-checked', planHash: checkpoint.planHash,
-    checkedAt: new Date().toISOString(), contracts: packets,
-    notice: 'Read-only public checks only. This is not explorer verification, a security audit, or trading enablement.',
+  for (const packet of packets) await writeFile(resolve(output, `${packet.name}.verification.json`), json(packet), { mode: 0o600 });
+  await writeFile(resolve(output, 'registry-deployment-checked.json'), json({
+    schemaVersion: 1, status: 'registry-public-deployment-checked', release: release.release, rehearsal: live.rehearsal,
+    checkedAt: live.checkedAt, contracts: packets,
+    notice: 'Read-only public checks only. This is not explorer verification, a security audit, or trading enablement. '
+      + 'Submit the implementation first; Blockscout then links the verified proxy to it through the ERC-1967 slot.',
   }), { mode: 0o600 });
   return packets;
 }
 
 try {
   const opts = options();
-  // Input preparation can replace bundles; previous submit-ready evidence must not survive that.
-  await invalidateCheckedPackets();
-  const prepared = await prepare(await solcPath(opts.solc));
-  const deployed = opts.checkDeployed ? await checkDeployed(prepared) : undefined;
-  console.log(json({ status: deployed ? 'four-public-deployments-checked' : 'four-public-inputs-reproduced',
-    directory: relative(ROOT, OUTPUT), contracts: NAMES, explorerSubmissions: 0, credentialsRead: false,
+  const output = resolve(rehearsalFiles(opts).directory, 'registry-verification');
+  // Input preparation can replace bundles; previous submit-ready packets of this tool must not survive that.
+  await invalidateCheckedPackets(output);
+  const prepared = await prepare(await solcPath(opts.solc), output);
+  const deployed = opts.checkDeployed ? await checkDeployed(prepared, opts, output) : undefined;
+  console.log(json({ status: deployed ? 'registry-public-deployment-checked' : 'registry-public-inputs-reproduced',
+    directory: shown(output), contracts: NAMES, explorerSubmissions: 0, credentialsRead: false,
   }));
 } catch (error) {
   // Provider errors can embed verbose transaction data. Report the failing check, not provider objects.
