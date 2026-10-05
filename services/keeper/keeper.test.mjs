@@ -6,15 +6,19 @@ import { join } from 'node:path';
 import { encodeFunctionData, keccak256, parseAbi } from 'viem';
 import { authentication, StreamsClient, decodeReport, validateBoundary } from './streams.mjs';
 import { chooseAction, schedules, orderedActions } from './lifecycle.mjs';
-import { Journal, privateFile, validateJournal } from './journal.mjs';
-import { validateReceipt, sendOnce } from './chain.mjs';
-import { options, preflightStreams, reconcileTransactions, discover, reportUnavailable, step } from './main.mjs';
+import { Journal, privateFile, validateJournal, spent } from './journal.mjs';
+import { validateReceipt, sendOnce, reconcile, held } from './chain.mjs';
+import { options, discover, step } from './main.mjs';
+import { classify } from './errors.mjs';
+import { simulate, ETH } from './sim.mjs';
 const feed = `0x0003${'1'.repeat(60)}`;
 const secret = 'test-only-not-a-real-secret';
 const docs = await readFile(new URL('../../research/chainlink-streams-base.md', import.meta.url), 'utf8');
 const fixtures = JSON.parse(docs.match(/```json\n([\s\S]*?)\n```/)[1]);
 const btc = fixtures.find(x => x.feedId.startsWith('0x00039d9e'));
 const observation = decodeReport(btc.payload, btc.feedId);
+// A journal as the keeper holds it in memory (schema 2), for tests that never touch the disk.
+const book = (transactions = []) => ({ data: { transactions, activeRounds: {}, nonces: {}, spent: {}, attempts: {} }, save: async () => {} });
 
 test('HMAC binds the exact historical path, username and millisecond clock', () => {
   const path = `/api/v1/reports?feedID=${feed}&timestamp=1791100805`;
@@ -67,7 +71,7 @@ test('report errors never echo response bodies or nested transport secrets', asy
 });
 
 test('round lifecycle respects exact deadlines and never substitutes a late price', () => {
-  const r = { start: 900, end: 1200, openingDeadline: 1110, resolutionDeadline: 4860, openedAt: 0, phase: 2 };
+  const r = { start: 900, end: 1200, openingDeadline: 1110, voidableAfter: 606060, openedAt: 0, phase: 2 };
   assert.equal(chooseAction(r, 899, false, false), null);
   assert.equal(chooseAction(r, 900, false, false).kind, 'publish');
   assert.equal(chooseAction(r, 1110, true, true).kind, 'open');
@@ -75,7 +79,19 @@ test('round lifecycle respects exact deadlines and never substitutes a late pric
   assert.equal(chooseAction({ ...r, openedAt: 920, phase: 3 }, 1199, false, false), null);
   assert.equal(chooseAction({ ...r, openedAt: 920, phase: 5 }, 1200, false, true).kind, 'await-delivery');
   assert.equal(chooseAction({ ...r, openedAt: 920, phase: 5 }, 4860, true, true).kind, 'resolve');
-  assert.equal(chooseAction({ ...r, openedAt: 920, phase: 5 }, 4861, true, true).kind, 'void');
+  // New registry: resolution has no deadline. A cached closing price resolves however late; a missing one is
+  // still published.
+  assert.equal(chooseAction({ ...r, openedAt: 920, phase: 5 }, 4861, true, true).kind, 'resolve');
+  assert.equal(chooseAction({ ...r, openedAt: 920, phase: 5 }, 606061, false, false).kind, 'publish');
+  // Voidable (phase 8) on an opened round only says nothing is cached a week after its end. It is still worked
+  // for its true result, exactly like a round awaiting resolution, and voided only once its closing report is
+  // established to be unobtainable. A round nobody opened in time is voided at once, as before.
+  const overdue = { ...r, openedAt: 920, phase: 8 };
+  assert.deepEqual([[false, false], [false, true], [true, true]].map(([cache, base]) => chooseAction(overdue, 606061, cache, base).kind), ['publish', 'await-delivery', 'resolve']);
+  assert.equal(chooseAction(overdue, 606061, false, false).overdue, true); assert.equal(chooseAction({ ...overdue, phase: 5 }, 606061, false, false).overdue, undefined);
+  assert.deepEqual(chooseAction(overdue, 606061, false, false, true), { kind: 'void', deadline: Number.MAX_SAFE_INTEGER, boundary: r.end });
+  assert.equal(chooseAction(overdue, 606061, true, false, true).kind, 'resolve', 'a cached price is resolved, whatever was established before');
+  assert.equal(chooseAction({ ...r, phase: 8 }, 606061, false, false).kind, 'void');
   assert.equal(chooseAction({ ...r, phase: 6 }, 5000, true, true), null);
   assert.equal(chooseAction({ ...r, phase: 0 }, 880, false, false), null);
 });
@@ -97,7 +113,10 @@ test('journal exclusive writer, restart, durable uncertainty and identity bindin
     const first = await Journal.acquire(directory, 'fixture-release');
     await assert.rejects(Journal.acquire(directory, 'fixture-release'));
     const f = receiptFixture(); first.data.transactions.push({ ...f.record, chain: 'base', key: 'publish:fixture', maximumFeeWei: '2700000', status: 'signed' }); await first.save(); await first.close();
-    const second = await Journal.acquire(directory, 'fixture-release'); assert.equal(second.data.transactions[0].status, 'signed'); await second.close();
+    const second = await Journal.acquire(directory, 'fixture-release'); assert.equal(second.data.transactions[0].status, 'signed');
+    // Attempt counters expire after a day, except while a hash they numbered is still open (its key must stay unique).
+    Object.assign(second.data.attempts, { 'publish': { count: 1, reverts: 0, last: 1 }, 'open:old': { count: 3, reverts: 1, last: 1 } }); await second.save();
+    assert.deepEqual(Object.keys(second.data.attempts), ['publish']); await second.close();
     await assert.rejects(Journal.acquire(directory, 'different-release'), /KEEPER_JOURNAL_IDENTITY/);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
@@ -109,6 +128,8 @@ test('credential file loader rejects permissive files and symlinks', async () =>
     assert.equal((await privateFile(path)).toString(), 'ONLY_TEST_DATA=yes');
     await chmod(path, 0o644); await assert.rejects(privateFile(path), /KEEPER_SECRET_PERMISSIONS/);
     await chmod(path, 0o600); await symlink(path, join(directory, 'link')); await assert.rejects(privateFile(join(directory, 'link')));
+    // A link, a missing file and a file this user cannot open get the same fixed code as a wrong mode: the operator's first-run mistakes.
+    for (const name of ['link', 'missing']) await assert.rejects(privateFile(join(directory, name)), error => error.message === 'KEEPER_SECRET_PERMISSIONS');
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -129,26 +150,37 @@ test('keeper receipts require canonical three-confirmation exact transactions', 
 });
 
 test('persisted accounting rejects corrupt negative, zero, missing or understated reservations', () => {
-  const make = () => ({ schemaVersion: 1, identity: 'fixture', activeRounds: {}, transactions: [{ ...receiptFixture().record, chain: 'base', key: 'publish:fixture', maximumFeeWei: '2700000', status: 'signed' }] });
+  const make = () => ({ schemaVersion: 2, identity: 'fixture', activeRounds: {}, nonces: { base: 2 }, spent: { base: { 497500: '2700000' } }, attempts: { 'publish:fixture': { count: 1, reverts: 0, last: 1791100805 } },
+    transactions: [{ ...receiptFixture().record, chain: 'base', key: 'publish:fixture:1', maximumFeeWei: '2700000', status: 'signed' }] });
   validateJournal(make(), 'fixture');
+  // Caps are wei now: the only gas bound left is the chain's own 2^24 per-transaction limit.
   for (const mutate of [r => r.maximumFeeWei = '-1000000000000000', r => r.maximumFeeWei = '0', r => delete r.maximumFeeWei,
     r => r.maximumFeeWei = '2699999', r => r.transaction.chainId = 1, r => r.transaction.value = '1', r => r.transaction.nonce = -1,
-    r => r.transaction.gas = '9999999', r => r.transaction.maxPriorityFeePerGas = '10', r => r.hash = 'bad']) {
+    r => r.transaction.gas = '16777217', r => r.transaction.maxPriorityFeePerGas = '10', r => r.hash = 'bad',
+    r => r.maximumFeeWei = '12500000000000001', r => r.status = 'unknown']) {
     const data = make(); mutate(data.transactions[0]); assert.throws(() => validateJournal(data, 'fixture'));
+  }
+  for (const mutate of [d => d.schemaVersion = 1, d => d.spent.base[497500] = '-5', d => d.spent.base[497500] = 2700000, d => d.spent.solana = {},
+    d => d.nonces.base = -1, d => d.attempts['publish:fixture'].reverts = -1, d => delete d.attempts]) {
+    const data = make(); mutate(data); assert.throws(() => validateJournal(data, 'fixture'));
   }
 });
 
 test('canonical revert consumes its original budget/nonce and permits restart without resubmission', async () => {
   const f = receiptFixture(); f.receipt.status = 'reverted';
-  const record = { ...f.record, chain: 'base', key: 'open:fixture', status: 'submitted', maximumFeeWei: '2700000' };
+  const record = { ...f.record, chain: 'base', key: 'open:fixture:1', status: 'submitted', maximumFeeWei: '2700000' };
   let saves = 0;
-  const reader = { waitForTransactionReceipt: async () => f.receipt, getTransactionReceipt: async () => f.receipt,
+  const reader = { getTransactionReceipt: async () => f.receipt,
     getTransaction: async () => f.tx, getBlock: async () => ({ ...f.block, timestamp: 1791100805n }), getBlockNumber: async () => 92n };
-  const journal = { data: { transactions: [record] }, save: async () => { saves++; } };
-  await reconcileTransactions({ readers: { base: reader } }, journal);
+  const journal = { ...book([record]), save: async () => { saves++; } };
+  journal.data.attempts['open:fixture'] = { count: 1, reverts: 0, last: 0 };
+  await reconcile({ clients: { base: reader } }, journal, 'base');
   assert.equal(record.status, 'reverted'); assert.equal(record.maximumFeeWei, '2700000'); assert.equal(record.transaction.nonce, 2); assert.equal(saves, 1);
-  reader.waitForTransactionReceipt = async () => { throw Error('must not wait/re-submit an already final receipt'); };
-  await reconcileTransactions({ readers: { base: reader } }, journal); assert.equal(saves, 1);
+  // The revert stays charged to the rolling budget (under the hour of its block, whatever the host clock says), the
+  // nonce is accounted for, and the attempt is counted for a bounded retry.
+  assert.equal(spent(journal.data, 'base', 1791100805000), 2700000n); assert.deepEqual(journal.data.spent.base, { [Math.floor(1791100805 / 3600)]: '2700000' }); assert.equal(journal.data.nonces.base, 3); assert.equal(journal.data.attempts['open:fixture'].reverts, 1);
+  for (const method of Object.keys(reader)) reader[method] = async () => { throw Error('must not look up or re-submit an already final receipt'); };
+  await reconcile({ clients: { base: reader } }, journal, 'base'); assert.equal(saves, 1);
 });
 
 test('persisted create intent remains discoverable after a crash and a long restart gap', async t => {
@@ -159,7 +191,7 @@ test('persisted create intent remains discoverable after a crash and a long rest
     read: async (_, fn, args) => {
       if (fn === 'roundIdFor') { seen.push(Number(args[2])); return `0x${BigInt(args[2]).toString(16).padStart(64, '0')}`; }
       if (fn === 'phase') return Number(BigInt(args[0])) === old ? 8 : 0;
-      return { asset: 0, duration: 300, start: BigInt(old), end: BigInt(old + 300), openedAt: 0n, openingDeadline: BigInt(old + 210), resolutionDeadline: BigInt(old + 3960) };
+      return { asset: 0, duration: 300, start: BigInt(old), end: BigInt(old + 300), openedAt: 0n, openingDeadline: BigInt(old + 210), voidableAfter: BigInt(old + 300 + 60 + 604800) };
     } };
   const result = await discover(access, { old: { asset: 0, duration: 300, start: old } });
   assert(seen.includes(old)); assert.equal(chooseAction(result.rounds.find(r => r.start === old), now, false, false).kind, 'void');
@@ -167,50 +199,61 @@ test('persisted create intent remains discoverable after a crash and a long rest
 
 test('uncertain and duplicate submissions stop before signer or RPC access', async () => {
   const access = {}, account = {}, call = { chain: 'base', value: 0n };
-  await assert.rejects(sendOnce(access, { data: { transactions: [{ key: 'same', status: 'confirmed' }] } }, account, call, 'same', {}, 10), /KEEPER_DUPLICATE_INTENT/);
-  await assert.rejects(sendOnce(access, { data: { transactions: [{ key: 'older', status: 'submitted' }] } }, account, call, 'new', {}, 10), /KEEPER_UNCERTAIN_TX/);
+  // The attempt number comes from the journal; a record already holding that key means the journal contradicts itself.
+  await assert.rejects(sendOnce(access, book([{ key: 'same:1', status: 'confirmed' }]), account, call, 'same', {}), /KEEPER_DUPLICATE_INTENT/);
+  // A hash that may still be on its way holds its own chain's lane (try again later), and only that chain's.
+  const pending = { key: 'older:1', chain: 'base', status: 'submitted', preparedAt: new Date().toISOString(), transaction: { nonce: 1 } };
+  await assert.rejects(sendOnce(access, book([pending]), account, call, 'new', {}), /KEEPER_TX_PENDING/);
+  assert.equal(classify(Error('KEEPER_TX_PENDING')).class, 'retry'); assert.equal(classify(Error('KEEPER_DUPLICATE_INTENT')).class, 'stop');
+  assert.equal(held(book([pending]).data, 'base'), true); assert.equal(held(book([pending]).data, 'horizen'), false);
+  // Seen in a block, or older than the hold: the lane is free again (the old "uncertain forever" stop is gone).
+  assert.equal(held(book([{ ...pending, status: 'mined' }]).data, 'base'), false);
+  assert.equal(held(book([{ ...pending, preparedAt: new Date(Date.now() - 21000).toISOString() }]).data, 'base'), false);
 });
 
-test('post-fsync expiry, stale chain clocks and changed signer stop with the durable hash and no send', async t => {
-  const now = 1800000000; t.mock.method(Date, 'now', () => now * 1000);
+test('after the durable hash only a local stall check stands before the send; a changed signer stops before signing', async t => {
+  let now = 1800000000000; t.mock.method(Date, 'now', () => now);
   const abi = parseAbi(['function voidRound(bytes32 roundId)']);
   const from = `0x${'1'.repeat(40)}`, to = `0x${'2'.repeat(40)}`;
-  const signedFixture = '0x01020304'; // Public invalid transaction bytes; never submitted.
-  for (const [mutate, code] of [
-    [s => { s.baseTime = now + 11; }, 'KEEPER_PRESEND_EXPIRED'],
-    [s => { s.horizenTime = now + 11; }, 'KEEPER_PRESEND_EXPIRED'],
-    [s => { s.baseTime = now - 60; }, 'KEEPER_PRESEND_CLOCK'],
-    [s => { s.horizenTime = now - 60; }, 'KEEPER_PRESEND_CLOCK'],
-    [s => { s.latest = 3; }, 'KEEPER_PRESEND_SIGNER_CHANGED'],
-    [s => { s.pending = 3; }, 'KEEPER_PRESEND_SIGNER_CHANGED'],
-    [s => { s.accountCode = '0xef0100'; }, 'KEEPER_PRESEND_SIGNER_CHANGED'],
-    [s => { s.accountCode = null; }, 'KEEPER_PRESEND_SIGNER_CHANGED'],
-    [s => { s.accountCode = false; }, 'KEEPER_PRESEND_SIGNER_CHANGED'],
-    [s => { s.accountCode = 0; }, 'KEEPER_PRESEND_SIGNER_CHANGED'],
-  ]) {
-    const state = { baseTime: now, horizenTime: now, latest: 2, pending: 2, accountCode: '0x' };
-    let signed = 0, saved = 0;
-    const signer = { address: from, signTransaction: async () => { signed++; return signedFixture; } };
-    const horizen = {
-      getBlock: async () => ({ timestamp: BigInt(state.horizenTime) }),
-      getTransactionCount: async ({ blockTag }) => state[blockTag === 'latest' ? 'latest' : 'pending'],
-      getCode: async () => state.accountCode, call: async () => ({}), estimateGas: async () => 100000n,
-      estimateFeesPerGas: async () => ({ maxFeePerGas: 3n, maxPriorityFeePerGas: 1n }),
-      readContract: async () => 0n, getBalance: async () => 10000000n,
-    };
+  // Public invalid transaction bytes; never submitted. Like a real signature they differ whenever the transaction does
+  // (here: its bid), because the same bytes signed again are the same transaction to the keeper, not a new attempt.
+  const signedFixture = transaction => `0x01020304${transaction.maxFeePerGas.toString(16).padStart(16, '0')}`;
+  const world = (accountCode = '0x', readTime = 0) => {
+    const state = { signed: 0, sent: 0, bytes: [] };
+    const signer = { address: from, signTransaction: async transaction => { state.signed++; state.bytes.push(signedFixture(transaction)); return state.bytes.at(-1); } };
+    const horizen = { getBlock: async () => ({ timestamp: BigInt(now / 1000), baseFeePerGas: 1n }), getTransactionCount: async () => 2,
+      getCode: async () => accountCode, estimateGas: async () => { now += readTime; return 100000n; }, estimateMaxPriorityFeePerGas: async () => 1n,
+      readContract: async () => { now += readTime; return 0n; }, getBalance: async () => 10000000n, sendRawTransaction: async ({ serializedTransaction }) => { state.sent++; return keccak256(serializedTransaction); } };
+    // Any use of the Base client while sending to Horizen is a failure of the test.
+    const base = new Proxy({}, { get: () => { throw Error('a Horizen send must not touch Base'); } });
     const access = { release: { contracts: [{ name: 'StreamsRoundRegistry', address: to, chain: 'horizen', chainId: 26514 }] },
-      abis: { StreamsRoundRegistry: abi }, clients: { base: { getBlock: async () => ({ timestamp: BigInt(state.baseTime) }) }, horizen },
-      readers: {}, verify: async () => {}, config: { chains: { horizen: { rpcUrl: 'http://127.0.0.1:1' } } } };
-    const journal = { data: { transactions: [] }, save: async () => { saved++; mutate(state); } };
-    const call = { chain: 'horizen', chainId: 26514, to, value: 0n,
-      data: encodeFunctionData({ abi, functionName: 'voidRound', args: [`0x${'a'.repeat(64)}`] }) };
-    await assert.rejects(sendOnce(access, journal, signer, call, 'void:fixture', { horizen: 1000000n }, now + 10), error => error.message === code);
-    assert.equal(signed, 1); assert.equal(saved, 1);
-    assert.equal(journal.data.transactions[0].status, 'signed');
-    assert.equal(journal.data.transactions[0].hash, keccak256(signedFixture));
-    assert.equal(journal.data.transactions[0].transaction.nonce, 2);
-    await assert.rejects(sendOnce(access, journal, signer, call, 'void:another', { horizen: 1000000n }, now + 10), /KEEPER_UNCERTAIN_TX/);
-    assert.equal(signed, 1, 'uncertain signed intent must not be signed or submitted again');
+      abis: { StreamsRoundRegistry: abi }, clients: { base, horizen }, identify: async () => {} };
+    const call = { chain: 'horizen', chainId: 26514, to, value: 0n, data: encodeFunctionData({ abi, functionName: 'voidRound', args: [`0x${'a'.repeat(64)}`] }) };
+    return { state, send: journal => sendOnce(access, journal, signer, call, 'void:fixture', { horizen: 1000000000n }) };
+  };
+  // fsync stalls 9 s: the hash is durable, nothing is sent, and no RPC (on either chain) is consulted about it.
+  const stalled = world(), journal = book(); let saves = 0;
+  journal.save = async () => { if (++saves === 1) now += 9000; };
+  await assert.rejects(stalled.send(journal), error => error.message === 'KEEPER_PRESEND_STALE' && classify(error).class === 'retry');
+  assert.equal(stalled.state.signed, 1); assert.equal(stalled.state.sent, 0);
+  assert.equal(journal.data.transactions[0].status, 'signed'); assert.equal(journal.data.transactions[0].hash, keccak256(stalled.state.bytes[0]));
+  assert.equal(journal.data.transactions[0].transaction.nonce, 2);
+  // It holds the lane for a while, without another signature ...
+  await assert.rejects(stalled.send(journal), /KEEPER_TX_PENDING/); assert.equal(stalled.state.signed, 1);
+  // ... and then the same nonce is signed and sent again, outbidding the withheld hash. Nothing is wedged.
+  now += 21000;
+  const second = await stalled.send(journal);
+  assert.equal(second.status, 'submitted'); assert.equal(second.key, 'void:fixture:2'); assert.equal(second.transaction.nonce, 2);
+  assert(second.transaction.maxFeePerGas * 8n >= BigInt(journal.data.transactions[0].transaction.maxFeePerGas) * 9n); assert.equal(stalled.state.sent, 1);
+  // A slow endpoint is not a stall. Two round trips of 5 s each (well inside the 12 s request timeout) used to
+  // count against the same 8 s, so every transaction was signed, journalled and then withheld.
+  const slow = world('0x', 5000), sent = await slow.send(book());
+  assert.equal(sent.status, 'submitted'); assert.equal(slow.state.sent, 1);
+  // An account that is no longer a plain key (delegated code, or an endpoint answering nonsense) stops before any signature.
+  for (const accountCode of ['0xef0100', null, false, 0]) {
+    const changed = world(accountCode);
+    await assert.rejects(changed.send(book()), error => error.message === 'KEEPER_SIGNER_CODE' && classify(error).class === 'stop');
+    assert.equal(changed.state.signed, 0); assert.equal(changed.state.sent, 0);
   }
 });
 
@@ -221,26 +264,37 @@ test('CLI defaults read-only and cannot implicitly load a signer', () => {
   assert.throws(() => options(['--plan', '--private-key', secret]), /KEEPER_ARGUMENT/);
 });
 
-test('feed readiness samples a fresh source block after each independently advancing report', async () => {
-  let clock = 1791100805; const events = [];
-  const access = { config: { feeds: { btcFeedId: 'btc', ethFeedId: 'eth' } }, clients: { base: { getBlock: async () => { events.push('block'); return { timestamp: BigInt(clock) }; } } },
-    authenticateReport: async () => ({ reportHash: observation.reportHash }) };
-  const streams = { report: async f => { events.push(f); clock += 2; return { payload: 'test', observation: { ...observation, validFromTimestamp: clock, observationsTimestamp: clock } }; } };
-  await preflightStreams(access, streams); assert.deepEqual(events, ['btc', 'block', 'eth', 'block']);
-  access.clients.base.getBlock = async () => ({ timestamp: BigInt(clock - 1) });
-  await assert.rejects(preflightStreams(access, streams), /KEEPER_STREAMS_AHEAD/);
+test('feed readiness is per feed, and a latest report newer than the Base head is normal', async t => {
+  const T = 1800000000; let now = (T + 100) * 1000; t.mock.method(Date, 'now', () => now);
+  const s = await simulate(); s.streams.latency = 0; // the latest report carries the current second: always ahead of Base's 2 s blocks
+  const journal = s.journal(), world = {}, sent = [], waits = new Set();
+  s.streams.reject = feed => feed === ETH ? 503 : null; // one feed's service is down
+  s.rpc = chain => chain === 'base' ? new Response('down', { status: 503 }) : undefined; // and Base cannot be read at all
+  for (; now < (T + 112) * 1000; now += 1000) { const r = await step(s.access, journal, s.auth, world); sent.push(...r.sent.map(x => x.action)); for (const w of r.waiting) waits.add(`${w.action}=${w.wait}`); }
+  assert(sent.length >= 4 && sent.every(a => a.startsWith('create:0:')), 'BTC rounds are scheduled although every BTC report is newer than the Base head');
+  assert([...waits].some(w => /^create:1:300:\d+=STREAMS_HTTP_503$/.test(w)), 'ETH rounds wait, with the reason');
+  // Readiness never reads Base: the rounds above were scheduled without one answer from it. (This used to count
+  // Base requests; the status line now reads the Base head on every tick, so the dependency is tested directly.)
+  assert.equal(world.heads.base, null);
+  // A feed that only repeats an old report is not ready either.
+  s.streams.reject = null; s.streams.latency = 300;
+  const stale = await step(s.access, journal, s.auth, {});
+  assert(stale.waiting.length >= 4 && stale.waiting.every(w => w.wait === 'KEEPER_STREAMS_STALE')); assert.equal(stale.sent.length, 0);
 });
 
-test('report outage classification covers revoked entitlement and all server failures', () => {
-  for (const code of [401, 403, 404, 429, 500, 501, 502, 503, 504, 599]) assert(reportUnavailable(Error(`STREAMS_HTTP_${code}`)));
-  for (const code of ['STREAMS_TRANSPORT', 'KEEPER_STREAMS_STALE', 'KEEPER_STREAMS_AHEAD']) assert(reportUnavailable(Error(code)));
-  for (const code of ['STREAMS_HTTP_200', 'STREAMS_HTTP_400', 'STREAMS_RESPONSE', 'KEEPER_STREAMS_AUTHENTICATION']) assert.equal(reportUnavailable(Error(code)), false);
+test('report failures are classified: outages, misses and bad responses wait; nothing about a report stops the keeper', () => {
+  for (const code of [400, 401, 403, 404, 429, 500, 501, 502, 503, 504, 599]) assert.equal(classify(Error(`STREAMS_HTTP_${code}`)).class, 'retry');
+  for (const code of ['STREAMS_TRANSPORT', 'KEEPER_STREAMS_STALE', 'STREAMS_REPORT_AHEAD_OF_BASE', 'STREAMS_NO_COVERING_REPORT', 'STREAMS_RESPONSE',
+    'STREAMS_RESPONSE_SIZE', 'STREAMS_RESPONSE_FEED', 'STREAMS_RESPONSE_TIMESTAMPS', 'STREAMS_REPORT_INVALID', 'STREAMS_HOST_CLOCK_SKEW']) assert.equal(classify(Error(code)).class, 'retry');
+  // A report that can never be valid for its boundary, or that the on-chain verifier answers differently, is skipped: not fatal.
+  for (const code of ['STREAMS_BOUNDARY_WINDOW', 'KEEPER_STREAMS_AUTHENTICATION']) assert.equal(classify(Error(code)).class, 'skip');
+  for (const code of [400, 401, 403]) assert.equal(classify(Error(`STREAMS_HTTP_${code}`)).code, `STREAMS_HTTP_${code}_CHECK_CREDENTIALS_AND_CLOCK`);
 });
 
 function stepAccess(now, active) {
   const ids = new Map();
-  const access = { clients: { horizen: { getBlock: async () => ({ timestamp: BigInt(now), number: 10n, hash: 'test-block' }) } },
-    config: { feeds: { btcFeedId: feed, ethFeedId: feed } },
+  const access = { clients: { horizen: { getBlock: async () => ({ timestamp: BigInt(now), number: 10n, hash: 'test-block' }) }, base: { getBlock: async () => ({ timestamp: BigInt(now) }) } },
+    config: { feeds: { btcFeedId: feed, ethFeedId: feed }, rules: { observationWindow: 60 } }, identify: async () => {},
     read: async (name, fn, args) => {
       if (fn === 'roundIdFor') {
         const key = `${args[0]}:${args[1]}:${args[2]}`;
@@ -248,8 +302,8 @@ function stepAccess(now, active) {
         ids.set(id, key); return id;
       }
       if (fn === 'phase') return active[ids.get(args[0])]?.phase ?? 0;
-      if (fn === 'getRound') return active[ids.get(args[0])];
       if (fn === 'getObservation') return { reportHash: `0x${'0'.repeat(64)}` };
+      if (fn === 'getRound') return { openedAt: 0n }; // what a Voidable round is asked: these were never opened
       throw Error('unexpected read');
     } };
   return access;
@@ -258,24 +312,26 @@ function stepAccess(now, active) {
 test('revoked entitlement during boundary fetch preserves timeout recovery and blocks new creation', async t => {
   const start = 1791100800, now = start + 20; t.mock.method(Date, 'now', () => now * 1000);
   const old = start - 600;
-  const access = stepAccess(now, {
-    [`0:300:${start}`]: { asset: 0, duration: 300, start: BigInt(start), end: BigInt(start + 300), phase: 2, openedAt: 0n, openingDeadline: BigInt(start + 210), resolutionDeadline: BigInt(start + 3960) },
-    [`1:300:${old}`]: { asset: 1, duration: 300, start: BigInt(old), end: BigInt(old + 300), phase: 8, openedAt: 0n, openingDeadline: BigInt(old + 210), resolutionDeadline: BigInt(old + 3960) },
-  });
+  const access = stepAccess(now, { [`0:300:${start}`]: { phase: 2 }, [`1:300:${old}`]: { phase: 8 } });
+  // Reaching access.call means the keeper decided to make this call. Stop there: nothing is ever signed.
   const calls = []; access.call = (_, fn) => { calls.push(fn); throw Error('RECOVERY_REACHED'); };
-  const journal = { data: { transactions: [], activeRounds: {} }, save: async () => {} };
-  const auth = { freshReports: true, streams: { report: async () => { throw Error('STREAMS_HTTP_403'); } } };
-  await assert.rejects(step(access, journal, auth), /RECOVERY_REACHED/);
-  assert.equal(auth.freshReports, false); assert.deepEqual(calls, ['voidRound']);
+  const auth = { streams: { report: async () => { throw Error('STREAMS_HTTP_403'); } } };
+  const result = await step(access, book(), auth);
+  assert.deepEqual(calls, ['voidRound']);
+  // The refusal is no longer silent or global state: every waiting publication and creation says why.
+  const reason = 'STREAMS_HTTP_403_CHECK_CREDENTIALS_AND_CLOCK';
+  assert(result.waiting.some(w => w.action === `publish:${feed}:${start}` && w.wait === reason));
+  assert(result.waiting.filter(w => w.action.startsWith('create:')).length >= 4 && result.waiting.filter(w => w.action.startsWith('create:')).every(w => w.wait === reason));
 });
 
 test('creation tracking is durably saved before entering the signing path', async t => {
   const now = 1791100805; t.mock.method(Date, 'now', () => now * 1000);
   const access = stepAccess(now, {}); const saved = [];
-  const journal = { data: { transactions: [], activeRounds: {} }, save: async () => { saved.push(structuredClone(journal.data)); } };
+  const journal = book(); journal.save = async () => { saved.push(structuredClone(journal.data)); };
   // A stop at the first signing-path guard models a crash after intent tracking but before signature creation.
   access.call = () => ({ chain: 'base', value: 1n });
-  await assert.rejects(step(access, journal, { freshReports: true }), /KEEPER_INTENT/);
+  const auth = { streams: { report: async () => ({ observation: { observationsTimestamp: now } }) } };
+  await assert.rejects(step(access, journal, auth), /KEEPER_INTENT/);
   assert.equal(Object.keys(saved.at(-1).activeRounds).length, 1);
   assert.equal(saved.at(-1).transactions.length, 0);
 });

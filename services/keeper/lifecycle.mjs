@@ -1,32 +1,40 @@
 import { requireCondition } from './streams.mjs';
 
-export function schedules(timestamp, lookAhead = 2) {
+export function schedules(timestamp, lookBack = 4800) {
   requireCondition(Number.isSafeInteger(timestamp) && timestamp > 0 && timestamp < 0xffffffff - 10000, 'KEEPER_CLOCK');
-  requireCondition(Number.isSafeInteger(lookAhead) && lookAhead >= 1 && lookAhead <= 4, 'KEEPER_LOOKAHEAD');
   const rounds = [];
   // A restarted keeper also reconciles its persisted active-round set, irrespective of this window.
   for (const duration of [300, 900]) for (const asset of [0, 1]) {
     const aligned = Math.floor(timestamp / duration) * duration;
-    for (let start = aligned - Math.ceil(4800 / duration) * duration; start <= aligned + lookAhead * duration; start += duration) {
+    for (let start = aligned - Math.ceil(lookBack / duration) * duration; start <= aligned + 2 * duration; start += duration) {
       if (start > 0) rounds.push({ asset, duration, start });
     }
   }
   return rounds;
 }
 
-export function chooseAction(round, now, cachePresent, sourcePresent) {
+// Phases are the registry's own (0 Missing, 1 Scheduled, 2 OpeningPending, 3 Trading, 4 Closed, 5 ResolutionPending,
+// 6 Resolved, 7 Voided, 8 Voidable), read at `now`. For a Voidable round, openedAt is the registry's too: 0 when
+// nobody recorded its opening in time.
+// unobtainable: its closing report is established to be beyond reach (main.mjs, witness) and Base says, now, that
+// nobody has published it.
+export function chooseAction(round, now, cachePresent, sourcePresent, unobtainable = false) {
   requireCondition(Number.isSafeInteger(now) && now > 0, 'KEEPER_CLOCK');
-  if (!round) return null;
-  const { phase, start, end, openingDeadline, resolutionDeadline, openedAt } = round;
+  const { phase, start, end, openingDeadline } = round;
   if (phase === 0) return start > now + 20 ? { kind: 'create', deadline: start - 1, boundary: start } : null;
-  if (phase === 6 || phase === 7 || now < start) return null;
-  const opening = openedAt === 0;
-  const deadline = opening ? openingDeadline : resolutionDeadline;
-  const boundary = opening ? start : end;
-  if (now > deadline) return { kind: 'void', deadline: Number.MAX_SAFE_INTEGER, boundary };
+  // A round nobody opened in time holds nothing to settle: void it as soon as the registry calls it Voidable.
+  if (phase === 8 && round.openedAt === 0 || phase === 2 && now > openingDeadline) return { kind: 'void', deadline: Number.MAX_SAFE_INTEGER, boundary: start };
+  if (phase !== 2 && phase !== 5 && phase !== 8) return null;
+  const opening = phase === 2, boundary = opening ? start : end;
   if (now < boundary) return null;
+  const deadline = opening ? openingDeadline ?? start : Number.MAX_SAFE_INTEGER;
+  // Resolution has no deadline: an opened round is resolved whenever its closing price is cached, however late.
   if (cachePresent) return { kind: opening ? 'open' : 'resolve', deadline, boundary };
-  return { kind: sourcePresent ? 'await-delivery' : 'publish', deadline, boundary };
+  // An opened round the registry calls Voidable only has nothing cached a week after its end. Its report stays
+  // verifiable on Base for 30 days, so it is worked exactly like a round awaiting resolution (publish, relay,
+  // resolve) and voided only when that report cannot be had. Unknown is not unobtainable: then it waits.
+  if (phase === 8 && unobtainable) return { kind: 'void', deadline, boundary };
+  return { kind: sourcePresent ? 'await-delivery' : 'publish', deadline, boundary, ...(phase === 8 ? { overdue: true } : {}) };
 }
 
 export function orderedActions(actions) {

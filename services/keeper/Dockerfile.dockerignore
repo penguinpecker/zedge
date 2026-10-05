@@ -1,0 +1,10 @@
+# Allow-list for `docker build -f services/keeper/Dockerfile .` from the repository root. Nothing reaches the
+# Docker daemon unless it is named here: the working tree also holds local environment files, keys and evidence.
+*
+!package.json
+!package-lock.json
+!contracts/abi/*.json
+!contracts/deployment/hybrid-mainnet.json
+!contracts/deployment/mainnet-addresses.json
+!research/chainlink-streams-base.md
+!services/keeper/*.mjs
