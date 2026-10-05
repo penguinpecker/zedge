@@ -45,7 +45,7 @@ function integerString(value: unknown, max: bigint, zero = false): string {
 
 export function parseManifest(value: unknown, expectedChain: NetworkId): DeploymentManifest {
   const record = object(value, "deployment manifest");
-  if (record.schemaVersion === 2) return parseStreamsManifest(value, expectedChain);
+  if (record.schemaVersion === 3) return parseStreamsManifest(value, expectedChain);
   if (record.schemaVersion !== 1 || !isNetworkId(record.chainId) || record.chainId !== expectedChain) throw new Error("Deployment version or network does not match.");
   if (record.status === "unavailable") {
     keys(record, ["schemaVersion", "chainId", "status", "reason"]);

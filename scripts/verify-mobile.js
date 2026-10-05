@@ -84,6 +84,23 @@ check(
   "Mobile history fits and contains its table scrolling",
 );
 await page.click(".main-nav button:first-child");
+await page.open("http://127.0.0.1:4188/?mode=chain");
+await page.wait(".chain-status-banner");
+// Let the first network read settle so the final banner text is the one measured.
+for (let i = 0; i < 60; i++) {
+  const banner = await page.eval(
+    () => document.querySelector(".chain-status-banner strong").innerText,
+  );
+  if (banner !== "Connecting public markets") break;
+  await page.wait(500);
+}
+check(
+  await page.eval(() => {
+    for (const details of document.querySelectorAll("details")) details.open = true;
+    return document.documentElement.scrollWidth <= innerWidth;
+  }),
+  "Mobile chain mode fits without page overflow",
+);
 console.log(
   JSON.stringify(
     {

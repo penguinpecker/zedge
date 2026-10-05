@@ -84,7 +84,7 @@ test("transaction explorer links accept only full hashes on allowlisted HTTPS or
 test("deployment manifests fail closed on unknown versions, chain, addresses and policies", () => {
   assert.equal(parseManifest(fixture(), 2651420).status, "configured");
   for (const value of [
-    { ...fixture(), chainId: 26514 }, { ...fixture(), schemaVersion: 2 },
+    { ...fixture(), chainId: 26514 }, { ...fixture(), schemaVersion: 2 }, { ...fixture(), schemaVersion: 3 },
     { ...fixture(), rolePolicy: "upgradeable" }, { ...fixture(), enableTrading: true },
     { ...fixture(), contracts: { ...fixture().contracts, oracle: pin(1) } },
     { ...fixture(), contracts: { ...fixture().contracts, provider: pin(0) } },
@@ -114,10 +114,12 @@ test("altered contract identity, collateral, provider or rules fail verification
   }
 });
 
-test("mainnet exposes only the public Streams registry while testnet and trading remain unavailable", async () => {
+test("mainnet exposes the public Streams registry only once its release is deployed, while testnet and trading remain unavailable", async () => {
+  const release = JSON.parse(await readFile(new URL("../../contracts/deployment/mainnet-addresses.json", import.meta.url), "utf8")) as { status: string };
+  const mainnet = release.status === "deployed" ? "configured" : "planned";
   for (const id of [2651420, 26514] as const) {
     const data = JSON.parse(await readFile(new URL(`../../public/deployments/${id}.json`, import.meta.url), "utf8")) as unknown;
-    assert.equal(parseManifest(data, id).status, id === 26514 ? "configured" : "unavailable");
+    assert.equal(parseManifest(data, id).status, id === 26514 ? mainnet : "unavailable");
   }
   assert.throws(requireTradingReady, /No transaction was submitted/);
 });

@@ -342,6 +342,45 @@ check(
   await page.eval(() => document.documentElement.scrollWidth <= innerWidth),
   "Current viewport has no horizontal page overflow",
 );
+
+// Chain mode reads the public network. While the mainnet release is planned it must show no market
+// data, whatever the network answers, and it must never touch the paper account.
+await page.open("http://127.0.0.1:4188/?mode=chain");
+await page.wait(".chain-status-banner");
+const chainState = () =>
+  page.eval(() => {
+    const request = new XMLHttpRequest();
+    request.open("GET", "/deployments/26514.json", false);
+    request.send();
+    return {
+      release: JSON.parse(request.responseText).status,
+      banner: document.querySelector(".chain-status-banner strong").innerText,
+      cards: [...document.querySelectorAll(".chain-card-foot")].map((node) => node.innerText.trim()),
+      pins: document.querySelectorAll(".chain-address-list > div").length,
+      paperAccount: localStorage.getItem("edge-paper-exchange-v1"),
+    };
+  });
+const chainStart = await chainState();
+let chain = chainStart;
+for (let i = 0; i < 60 && chain.banner === "Connecting public markets"; i++) {
+  await page.wait(500);
+  chain = await chainState();
+}
+check(
+  chain.release !== "planned" ||
+    (["Public markets not available yet", "Market checks unavailable"].includes(chain.banner) &&
+      chain.cards.length === 4 &&
+      chain.cards.every((text) => text === "Unavailable") &&
+      chain.pins === 0),
+  "Chain mode shows no market data while the mainnet release is planned",
+);
+const paperAccount = JSON.parse(chain.paperAccount);
+check(
+  chain.paperAccount === chainStart.paperAccount &&
+    paperAccount.cashCents === state.cashCents &&
+    paperAccount.orders.length === state.orders.length,
+  "Chain mode leaves the paper account untouched",
+);
 console.log(
   JSON.stringify(
     {

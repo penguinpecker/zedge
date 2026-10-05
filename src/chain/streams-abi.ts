@@ -16,6 +16,19 @@ export const streamsRegistryReadAbi = [
   },
   {
     "type": "function",
+    "name": "UPGRADE_INTERFACE_VERSION",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "string",
+        "internalType": "string"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "btcDecimals",
     "inputs": [],
     "outputs": [
@@ -171,7 +184,7 @@ export const streamsRegistryReadAbi = [
             "internalType": "uint64"
           },
           {
-            "name": "resolutionDeadline",
+            "name": "voidableAfter",
             "type": "uint64",
             "internalType": "uint64"
           },
@@ -303,7 +316,20 @@ export const streamsRegistryReadAbi = [
       {
         "name": "",
         "type": "address",
-        "internalType": "contract IStreamsBoundaryOracle"
+        "internalType": "contract IStreamsObservationCache"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "owner",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
       }
     ],
     "stateMutability": "view"
@@ -339,6 +365,19 @@ export const streamsRegistryReadAbi = [
   },
   {
     "type": "function",
+    "name": "pendingOwner",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "phase",
     "inputs": [
       {
@@ -352,6 +391,19 @@ export const streamsRegistryReadAbi = [
         "name": "",
         "type": "uint8",
         "internalType": "enum StreamsRoundRegistry.Phase"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "proxiableUUID",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes32",
+        "internalType": "bytes32"
       }
     ],
     "stateMutability": "view"
@@ -400,19 +452,6 @@ export const streamsRegistryReadAbi = [
   },
   {
     "type": "function",
-    "name": "settlementGrace",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "uint32",
-        "internalType": "uint32"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
     "name": "version",
     "inputs": [],
     "outputs": [
@@ -423,6 +462,19 @@ export const streamsRegistryReadAbi = [
       }
     ],
     "stateMutability": "pure"
+  },
+  {
+    "type": "function",
+    "name": "voidGrace",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint32",
+        "internalType": "uint32"
+      }
+    ],
+    "stateMutability": "view"
   }
 ] as const;
 

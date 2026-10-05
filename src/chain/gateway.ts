@@ -1,7 +1,7 @@
-import { createPublicClient, erc20Abi, formatUnits, isHash, parseAbi, type Address, type Hex, type Abi } from "viem";
+import { createPublicClient, erc20Abi, formatUnits, isHash, parseAbi, type Address, type Hex, type Abi, type PublicClient } from "viem";
 import { registryReadAbi, oracleReadAbi } from "./abi.ts";
 import { streamsRegistryReadAbi } from "./streams-abi.ts";
-import { STREAMS_RPCS, verifyStreamsDeployment, type StreamsChainId, type StreamsReader } from "./streams-manifest.ts";
+import { STREAMS_RPCS, verifyRegistryControl, verifyStreamsDeployment, type StreamsChainId, type StreamsReader } from "./streams-manifest.ts";
 import { NETWORKS, type NetworkId } from "./networks.ts";
 import { parseManifest, verifyDeployment, type DeploymentManifest, type VerifiedDeployment } from "./manifest.ts";
 import { rpcTransport } from "./rpc.ts";
@@ -31,28 +31,33 @@ export async function loadManifest(chainId: NetworkId, signal?: AbortSignal): Pr
   return parseManifest(JSON.parse(body) as unknown, chainId);
 }
 
+/** Every read is pinned to one block of one chain. */
+function streamsReader(chain: PublicClient, blockNumber: bigint): StreamsReader {
+  return {
+    chainId: () => chain.getChainId(),
+    code: (address) => chain.getCode({ address, blockNumber }),
+    storage: (address, slot) => chain.getStorageAt({ address, slot, blockNumber }),
+    read: (address, signature, args = []) => {
+      const abi = parseAbi([`function ${signature}`] as string[]);
+      const name = signature.slice(0, signature.indexOf("("));
+      return chain.readContract({ address, abi, functionName: name, args, blockNumber });
+    },
+  };
+}
+
 export async function checkDeployment(manifest: DeploymentManifest, snapshot: ChainSnapshot): Promise<VerifiedDeployment | null> {
   if (manifest.chainId !== snapshot.chainId) throw new Error("Deployment network mismatch.");
-  if (manifest.status === "unavailable") return null;
+  // Fail closed without reading any contract: an unavailable network and a planned release have nothing to verify.
+  if (manifest.status !== "configured") return null;
   fresh(snapshot.timestamp);
   const client = chainClient(snapshot.chainId);
   let result: VerifiedDeployment;
-  if (manifest.schemaVersion === 2) {
+  if (manifest.schemaVersion === 3) {
     const source = createPublicClient({ transport: rpcTransport(STREAMS_RPCS.base) });
     const sourceBlock = await source.getBlock();
     if (sourceBlock.number === null || !sourceBlock.hash) throw new Error("Base oracle network is unavailable.");
     fresh(sourceBlock.timestamp);
-    const reader = (chain: typeof source | typeof client, blockNumber: bigint): StreamsReader => ({
-      chainId: () => chain.getChainId(),
-      code: (address) => chain.getCode({ address, blockNumber }),
-      storage: (address, slot) => chain.getStorageAt({ address, slot, blockNumber }),
-      read: (address, signature, args = []) => {
-        const abi = parseAbi([`function ${signature}`] as string[]);
-        const name = signature.slice(0, signature.indexOf("("));
-        return chain.readContract({ address, abi, functionName: name, args, blockNumber });
-      },
-    });
-    const readers: Record<StreamsChainId, StreamsReader> = { 8453: reader(source, sourceBlock.number), 26514: reader(client, snapshot.blockNumber) };
+    const readers: Record<StreamsChainId, StreamsReader> = { 8453: streamsReader(source, sourceBlock.number), 26514: streamsReader(client, snapshot.blockNumber) };
     result = await verifyStreamsDeployment(manifest, readers);
     const anchored = await source.getBlock({ blockNumber: sourceBlock.number });
     if (anchored.hash !== sourceBlock.hash) throw new Error("Base verification snapshot changed; retry.");
@@ -78,16 +83,35 @@ export async function checkDeployment(manifest: DeploymentManifest, snapshot: Ch
 export const PHASES = ["Not scheduled", "Scheduled", "Awaiting opening price", "Trading window", "Closed", "Awaiting resolution", "Resolved", "Voided", "Ready to void"] as const;
 export type ObservationRead = { price: bigint; decimals: number; observedAt: bigint; validFrom: bigint | null; reportHash: Hex | null };
 export type RoundState = {
-  asset: number; duration: number; start: bigint; end: bigint; cutoff: bigint; openingDeadline: bigint; resolutionDeadline: bigint;
+  asset: number; duration: number; start: bigint; end: bigint; cutoff: bigint; openingDeadline: bigint;
+  /** Streams registry: an opened round can be voided only after this time, and only while no closing price was delivered. Null for the Pyth registry. */
+  voidableAfter: bigint | null;
+  /** Pyth registry only: the last time a closing observation is accepted. Null for the Streams registry, which has no such deadline. */
+  resolutionDeadline: bigint | null;
   openedAt: bigint; resolvedAt: bigint; outcome: number; opening: ObservationRead; closing: ObservationRead;
 };
 export type RoundRead = { roundId: Hex; phase: number; start: bigint; round: RoundState | null };
+/** Captions under the two price boxes. Phase 7 is Voided; phase 8 can be voided now and, with no opening price, can never resolve.
+ * While this round has not been read at the displayed block (a new block, or a failed read) its state is unknown, so nothing is promised. */
+export function priceCaptions(read: RoundRead | null, verified: boolean, failed = false): { opening: string; closing: string } {
+  const round = read?.round, phase = read?.phase;
+  const opened = Boolean(round?.openedAt);
+  const pending = !verified || (failed && !read) ? "Unavailable" : !read ? "Loading…" : phase === 0 ? "No scheduled round" : null;
+  return {
+    opening: opened ? "Verified opening observation" : pending ?? (phase === 7 || phase === 8 ? "No opening price recorded" : "Awaiting opening observation"),
+    closing: round?.outcome === 3 ? "Round voided" : round?.resolvedAt ? "Verified closing observation"
+      : pending ?? (phase === 8 ? opened ? "No closing price delivered" : "Can only be voided" : "Awaiting resolution"),
+  };
+}
 export async function readRound(deployment: VerifiedDeployment, snapshot: ChainSnapshot, asset: 0 | 1, duration: 300 | 900, offset: number): Promise<RoundRead> {
   if (deployment.manifest.chainId !== snapshot.chainId || ![-1, 0, 1].includes(offset)) throw new Error("Invalid round request.");
   fresh(snapshot.timestamp);
   const client = chainClient(snapshot.chainId);
   if (await client.getChainId() !== snapshot.chainId) throw new Error("Round RPC network mismatch.");
   const address = deployment.manifest.contracts.registry.address;
+  // The cached verification is older than this block, and the registry's owner can replace its code at any block.
+  // An upgrade or ownership change is refused here, at the block the round is read at, and not only when the cache expires.
+  if (deployment.manifest.schemaVersion === 3) await verifyRegistryControl(deployment.manifest, streamsReader(client, snapshot.blockNumber));
   const start = snapshot.timestamp / BigInt(duration) * BigInt(duration) + BigInt(offset * duration);
   // roundIdFor and phase have the same read signature across both reviewed schemas.
   const roundId = await client.readContract({ address, abi: registryReadAbi, functionName: "roundIdFor", args: [asset, duration, start], blockNumber: snapshot.blockNumber });
@@ -95,14 +119,14 @@ export async function readRound(deployment: VerifiedDeployment, snapshot: ChainS
   if (phase > 8) throw new Error("Unsupported market phase.");
   let round: RoundState | null = null;
   if (phase !== 0) {
-    if (deployment.manifest.schemaVersion === 2) {
+    if (deployment.manifest.schemaVersion === 3) {
       const raw = await client.readContract({ address, abi: streamsRegistryReadAbi, functionName: "getRound", args: [roundId], blockNumber: snapshot.blockNumber });
       const observation = (value: typeof raw.opening): ObservationRead => ({ price: value.price, decimals: value.decimals, observedAt: BigInt(value.observationsTimestamp), validFrom: BigInt(value.validFromTimestamp), reportHash: value.reportHash });
-      round = { ...raw, opening: observation(raw.opening), closing: observation(raw.closing) };
+      round = { ...raw, resolutionDeadline: null, opening: observation(raw.opening), closing: observation(raw.closing) };
     } else {
       const raw = await client.readContract({ address, abi: registryReadAbi, functionName: "getRound", args: [roundId], blockNumber: snapshot.blockNumber });
       const observation = (value: typeof raw.opening): ObservationRead => ({ price: value.price, decimals: -value.exponent, observedAt: value.publishTime, validFrom: null, reportHash: null });
-      round = { ...raw, opening: observation(raw.opening), closing: observation(raw.closing) };
+      round = { ...raw, voidableAfter: null, opening: observation(raw.opening), closing: observation(raw.closing) };
     }
     if (round.asset !== asset || round.duration !== duration || round.start !== start || round.end !== start + BigInt(duration)) throw new Error("Round identity did not match.");
   }
