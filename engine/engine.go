@@ -151,6 +151,12 @@ func copyReceipt(r Receipt) Receipt {
 }
 
 func (s *State) execute(c Command, r *Receipt) error {
+	// Opening, resolution and void mirror registry events: their windows are
+	// judged at the registry's inclusion time, never at this processing clock,
+	// which may already be later. That time can never be ahead of it.
+	if c.RegistryTime > s.Time {
+		return fail("registry time ahead of authenticated time")
+	}
 	switch c.Op {
 	case Register:
 		if _, e := s.account(c.Account); e == nil {
@@ -209,7 +215,7 @@ func (s *State) execute(c Command, r *Receipt) error {
 		if e != nil {
 			return e
 		}
-		if m.Status != "scheduled" || s.Time < m.Spec.Start || s.Time > m.Spec.OpeningDeadline || validateObservation(c.Observation, m.Spec.Feed, m.Spec.Start, m.Spec.ObservationWindow, s.Time) != nil || !isHex(c.Evidence, 64) {
+		if m.Status != "scheduled" || c.RegistryTime < m.Spec.Start || c.RegistryTime > m.Spec.OpeningDeadline || validateObservation(c.Observation, m.Spec.Feed, m.Spec.Start, m.Spec.ObservationWindow, c.RegistryTime) != nil || !isHex(c.Evidence, 64) {
 			return fail("invalid opening observation")
 		}
 		m.Status = "open"
@@ -261,7 +267,8 @@ func (s *State) execute(c Command, r *Receipt) error {
 			return fail("missing settlement evidence")
 		}
 		if c.Op == ResolveRound {
-			if m.Status != "open" || s.Time < m.Spec.End || s.Time > m.Spec.ResolutionDeadline || validateObservation(c.Observation, m.Spec.Feed, m.Spec.End, m.Spec.ObservationWindow, s.Time) != nil {
+			// No upper limit: the registry resolves whenever the closing price arrives.
+			if m.Status != "open" || c.RegistryTime < m.Spec.End || validateObservation(c.Observation, m.Spec.Feed, m.Spec.End, m.Spec.ObservationWindow, c.RegistryTime) != nil {
 				return fail("invalid closing observation")
 			}
 			m.Status = "resolved"
@@ -276,11 +283,11 @@ func (s *State) execute(c Command, r *Receipt) error {
 				m.Outcome = Up
 			}
 		} else {
-			deadline := m.Spec.ResolutionDeadline
+			deadline := m.Spec.VoidableAfter
 			if m.Status == "scheduled" {
 				deadline = m.Spec.OpeningDeadline
 			}
-			if s.Time <= deadline {
+			if c.RegistryTime <= deadline {
 				return fail("void timeout not reached")
 			}
 			m.Status = "void"
@@ -367,8 +374,10 @@ func (s *State) completeSet(c Command, r *Receipt) error {
 	if e != nil {
 		return e
 	}
-	if m.Status != "open" || s.Time >= m.Spec.Cutoff {
-		return fail("round not open for complete sets")
+	// A funded pair is worth exactly one collateral unit in every round state,
+	// so merge has no window (the vault's rule). Only minting needs live trading.
+	if c.Op == Mint && (m.Status != "open" || s.Time >= m.Spec.Cutoff) {
+		return fail("round not open for minting")
 	}
 	if c.Quantity == 0 || c.Quantity > MaxAtoms || c.Quantity%Lot != 0 {
 		return fail("invalid share quantity")

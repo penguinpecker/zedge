@@ -36,7 +36,7 @@ func Validate(s *State) error {
 	if s.Sequence > MaxAtoms || s.Time > MaxAtoms {
 		return fail("sequence/time capacity")
 	}
-	if !isHex(s.ArchiveRoot, 64) || s.ArchivedRounds > s.Sequence || s.ArchivedRounds == 0 && s.ArchiveRoot != hash([]byte("ZEDGE_ARCHIVES_V2")) {
+	if !isHex(s.ArchiveRoot, 64) || s.ArchivedRounds > s.Sequence || s.ArchivedRounds == 0 && s.ArchiveRoot != hash([]byte("ZEDGE_ARCHIVES_V3")) {
 		return fail("invalid archive commitment")
 	}
 	if s.AuthorityNonce > 0 && (!isHex(s.AuthorityDigest, 64) || s.AuthorityReceipt.CommandID != commandID(s.Config.Authority, s.AuthorityNonce) || s.AuthorityReceipt.Sequence > s.Sequence) {
@@ -160,7 +160,7 @@ func Validate(s *State) error {
 				return fail("settlement collateral mismatch")
 			}
 		case "void":
-			if m.Outcome != Void || !isHex(m.CloseEvidence, 64) || s.Time <= m.Spec.ResolutionDeadline && m.Opening != nil || s.Time <= m.Spec.OpeningDeadline && m.Opening == nil || m.Locked != u/2+d/2 || m.Closing != nil {
+			if m.Outcome != Void || !isHex(m.CloseEvidence, 64) || s.Time <= m.Spec.VoidableAfter && m.Opening != nil || s.Time <= m.Spec.OpeningDeadline && m.Opening == nil || m.Locked != u/2+d/2 || m.Closing != nil {
 				return fail("void collateral mismatch")
 			}
 			if m.Opening == nil {

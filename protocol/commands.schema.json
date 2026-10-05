@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/penguinpecker/zedge/protocol/commands.schema.json",
-  "title": "ZEDGE canonical engine command v2",
+  "title": "ZEDGE canonical engine command v3",
   "description": "Structural checks only. Engine additionally enforces canonical JSON, exact positive int192 prices, Solidity registry rules/round identity, authenticated context, nonce, capacities and conservation. AuthenticatedContext is never accepted here.",
   "type": "object",
   "additionalProperties": false,
@@ -41,7 +41,7 @@
           "pattern": "^[A-Za-z0-9_.-]+$"
         },
         "rulesVersion": {
-          "const": 2
+          "const": 3
         }
       }
     },
@@ -99,7 +99,7 @@
         "cutoff",
         "observationWindow",
         "openingDeadline",
-        "resolutionDeadline"
+        "voidableAfter"
       ],
       "properties": {
         "asset": {
@@ -137,7 +137,7 @@
           "minimum": 1,
           "maximum": 1000000000000000
         },
-        "resolutionDeadline": {
+        "voidableAfter": {
           "type": "integer",
           "minimum": 1,
           "maximum": 1000000000000000
@@ -213,6 +213,12 @@
     "evidence": {
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
+    },
+    "registryTime": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000000000000000,
+      "description": "Registry block timestamp (UTC seconds) that included the mirrored recordOpening / resolveRound / voidRound: getRound openedAt for open_round, resolvedAt for resolve_round and void_round. Adapter-authenticated chain data; the engine judges the round's windows at this time, not at processing time."
     },
     "observation": {
       "type": "object",
@@ -296,6 +302,7 @@
           "withdrawalId": false,
           "destination": false,
           "evidence": false,
+          "registryTime": false,
           "observation": false
         }
       }
@@ -331,6 +338,7 @@
           "orderId": false,
           "withdrawalId": false,
           "destination": false,
+          "registryTime": false,
           "observation": false
         }
       }
@@ -366,6 +374,7 @@
           "withdrawalId": false,
           "destination": false,
           "evidence": false,
+          "registryTime": false,
           "observation": false
         }
       }
@@ -386,6 +395,7 @@
           "op",
           "roundId",
           "evidence",
+          "registryTime",
           "observation"
         ],
         "properties": {
@@ -436,6 +446,7 @@
           "withdrawalId": false,
           "destination": false,
           "evidence": false,
+          "registryTime": false,
           "observation": false
         }
       }
@@ -471,6 +482,7 @@
           "withdrawalId": false,
           "destination": false,
           "evidence": false,
+          "registryTime": false,
           "observation": false
         }
       }
@@ -506,6 +518,7 @@
           "withdrawalId": false,
           "destination": false,
           "evidence": false,
+          "registryTime": false,
           "observation": false
         }
       }
@@ -540,6 +553,7 @@
           "withdrawalId": false,
           "destination": false,
           "evidence": false,
+          "registryTime": false,
           "observation": false
         }
       }
@@ -575,6 +589,7 @@
           "withdrawalId": false,
           "destination": false,
           "evidence": false,
+          "registryTime": false,
           "observation": false
         }
       }
@@ -609,6 +624,7 @@
           "withdrawalId": false,
           "destination": false,
           "evidence": false,
+          "registryTime": false,
           "observation": false
         }
       }
@@ -629,6 +645,7 @@
           "op",
           "roundId",
           "evidence",
+          "registryTime",
           "observation"
         ],
         "properties": {
@@ -663,7 +680,8 @@
           "nonce",
           "op",
           "roundId",
-          "evidence"
+          "evidence",
+          "registryTime"
         ],
         "properties": {
           "account": false,
@@ -714,6 +732,7 @@
           "withdrawalId": false,
           "destination": false,
           "evidence": false,
+          "registryTime": false,
           "observation": false
         }
       }
@@ -749,6 +768,7 @@
           "orderId": false,
           "withdrawalId": false,
           "evidence": false,
+          "registryTime": false,
           "observation": false
         }
       }
@@ -784,6 +804,7 @@
           "orderId": false,
           "destination": false,
           "evidence": false,
+          "registryTime": false,
           "observation": false
         }
       }
@@ -819,6 +840,7 @@
           "maxFee": false,
           "orderId": false,
           "destination": false,
+          "registryTime": false,
           "observation": false
         }
       }
@@ -854,6 +876,7 @@
           "maxFee": false,
           "orderId": false,
           "destination": false,
+          "registryTime": false,
           "observation": false
         }
       }
@@ -889,6 +912,7 @@
           "withdrawalId": false,
           "destination": false,
           "evidence": false,
+          "registryTime": false,
           "observation": false
         }
       }

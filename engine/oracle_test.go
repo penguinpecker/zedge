@@ -11,14 +11,24 @@ import (
 func mainnetPolicy() Config {
 	c := config()
 	c.Collateral = "0xdf7108f8b10f9b9ec1aba01cca057268cbf86b6c"
-	c.Oracle = RegistryConfig{ChainID: 26514, Registry: "0xdd3beaa92e5819333a5d5ccd185704427fab0e91", Oracle: "0xc800c3f18d35d492ae6b07655d7f31bfe98a4b6b",
-		RulesHash: "0x591860792894f856c548d908b50aac9bbecd793794da13ac995bf9d248aa7d7c", BTCFeedID: BTCStreamsFeed, ETHFeedID: ETHStreamsFeed,
-		Decimals: 18, ObservationWindow: 60, OpeningGrace: 150, SettlementGrace: 3600, CutoffBuffer: 30}
+	c.Oracle = RegistryConfig{ChainID: 26514, Registry: "0x4dd4aacdb7e8d2e6d06c5af38238f3deab836744", Oracle: "0xc800c3f18d35d492ae6b07655d7f31bfe98a4b6b",
+		RulesHash: "0x17258005a90dc55ca45ae167eb0310278363a2ca89d8204437e1d21cc79ac45d", BTCFeedID: BTCStreamsFeed, ETHFeedID: ETHStreamsFeed,
+		Decimals: 18, ObservationWindow: 60, OpeningGrace: 150, VoidGrace: 604800, CutoffBuffer: 30}
 	return c
 }
 
-// Public deployed rules hash plus independently encoded viem ABI vectors. No
-// RPC, oracle signature, or mainnet execution is performed by this test.
+// Known answers for the planned mainnet registry (proxy 0x4DD4…6744 on 26514),
+// computed independently of this package with Foundry:
+//
+//	cast keccak $(cast abi-encode "f(string,uint256,(address,address,bytes32,bytes32,uint8,uint8,uint32,uint32,uint32,uint32))" \
+//	  "$RegistryRulesVersion" 26514 "(oracle,collateral,btcFeed,ethFeed,18,18,60,150,604800,30)")
+//	cast keccak $(cast abi-encode "f(uint256,address,bytes32,uint8,uint32,uint64)" 26514 proxy rulesHash asset duration 1791100800)
+//
+// The same two commands reproduce the retired registry's published hash and
+// round IDs. No RPC, oracle signature, or mainnet execution is performed here.
+// The proxy address is CREATE(deployer, nonce 3) and nothing is deployed yet:
+// if the deployer's Horizen nonce moves first, the registry address and the
+// four round IDs below are stale and must be regenerated (this test cannot tell).
 func TestRegistryKeccakConformance(t *testing.T) {
 	c := mainnetPolicy()
 	h, err := RegistryRulesHash(c)
@@ -30,14 +40,14 @@ func TestRegistryKeccakConformance(t *testing.T) {
 		duration uint64
 		id       string
 	}{
-		{"BTC", 300, "0xdf5935ba7590986f2cd86d4dc4ef5b1621b3e32da5cd1c64d582e7a4249ca556"},
-		{"BTC", 900, "0xf112d564c6db17d54bd81072fdf1179780a6fc488cff984e8952b925b05d3124"},
-		{"ETH", 300, "0x88257428740e8c98742f578924d1bdcb9cc955fac982c9edcb981705cf471f76"},
-		{"ETH", 900, "0x6ddc52d8f378c42fb7420ef78955759d2e530f4fd5ce1c32cda8e1a7923a9fd1"},
+		{"BTC", 300, "0xd6ddd89dd7e2fa4749102c193d25b9ef2c50e0f2ed44769b64f56bd0c1f62e52"},
+		{"BTC", 900, "0xecee542cd8f10efbb6a797b8f63224dea094be323a4ef534747bc4dd9b67ae72"},
+		{"ETH", 300, "0xa2fd23e87713a1e61a74796b27fb7bea6cab35a6d9d94f49f151d669f1e9c9bd"},
+		{"ETH", 900, "0x7b8dc4d8b6de1dad0ad7cc9b63bb5d3b36746fae3da1a96114ead7e496b7c774"},
 	}
 	for _, v := range vectors {
 		r, e := NewRoundSpec(c, v.asset, v.duration, 1791100800)
-		if e != nil || r.RegistryRoundID != v.id || r.Cutoff != r.End-30 || r.OpeningDeadline != r.Start+210 || r.ResolutionDeadline != r.End+3660 {
+		if e != nil || r.RegistryRoundID != v.id || r.Cutoff != r.End-30 || r.OpeningDeadline != r.Start+210 || r.VoidableAfter != r.End+604860 {
 			t.Fatalf("round vector %s/%d: %+v %v", v.asset, v.duration, r, e)
 		}
 	}
@@ -145,7 +155,7 @@ func TestStreamsBoundaryAndFeedRejectAtomically(t *testing.T) {
 func TestRoundBindingRejectsSubstitutedIdentityAndPolicy(t *testing.T) {
 	mutations := []func(*RoundSpec){
 		func(r *RoundSpec) { r.RegistryRoundID = "0x" + strings.Repeat("a", 64) }, func(r *RoundSpec) { r.Feed = ETHStreamsFeed },
-		func(r *RoundSpec) { r.Cutoff-- }, func(r *RoundSpec) { r.OpeningDeadline++ }, func(r *RoundSpec) { r.ResolutionDeadline++ },
+		func(r *RoundSpec) { r.Cutoff-- }, func(r *RoundSpec) { r.OpeningDeadline++ }, func(r *RoundSpec) { r.VoidableAfter++ },
 		func(r *RoundSpec) { r.ObservationWindow++ }, func(r *RoundSpec) { r.Asset = "ETH" }, func(r *RoundSpec) { r.Start++ },
 	}
 	for _, mutate := range mutations {
@@ -175,15 +185,140 @@ func TestRoundBindingRejectsSubstitutedIdentityAndPolicy(t *testing.T) {
 	if _, e := NewRoundSpec(c, "BTC", 300, maxStreamsTimestamp-100); e == nil {
 		t.Fatal("schema3 overflow accepted")
 	}
-	c = config()
-	c.Domain.RulesVersion = 1
-	if _, e := New(c); e == nil {
-		t.Fatal("legacy domain accepted")
+	for _, legacy := range []uint32{1, 2} {
+		c = config()
+		c.Domain.RulesVersion = legacy
+		if _, e := New(c); e == nil {
+			t.Fatal("legacy domain accepted")
+		}
+		h := newHarness(t)
+		h.s.Version = legacy
+		if _, e := Encode(h.s); e == nil {
+			t.Fatal("legacy snapshot reinterpreted")
+		}
 	}
+	for grace, valid := range map[uint64]bool{3600: false, 86399: false, 86400: true, 21 * 86400: true, 21*86400 + 1: false} {
+		c = config()
+		c.Oracle.VoidGrace = grace
+		if _, e := RegistryRulesHash(c); (e == nil) != valid {
+			t.Fatalf("void grace %d validity", grace)
+		}
+	}
+}
+
+// Version 2 is not migrated: its domain, its field names and its commands
+// without a registry inclusion time all reject under version 3.
+func TestVersion2SnapshotsAndCommandsReject(t *testing.T) {
 	h := newHarness(t)
-	h.s.Version = 1
-	if _, e := Encode(h.s); e == nil {
-		t.Fatal("legacy snapshot reinterpreted")
+	h.setup(alice)
+	current, _ := Encode(h.s)
+	for _, edit := range [][2]string{{`{"version":3,`, `{"version":2,`}, {`"rulesVersion":3`, `"rulesVersion":2`}, {`"voidGrace"`, `"settlementGrace"`}, {`"voidableAfter"`, `"resolutionDeadline"`}} {
+		legacy := bytes.ReplaceAll(current, []byte(edit[0]), []byte(edit[1]))
+		if bytes.Equal(legacy, current) {
+			t.Fatalf("fixture has no %s", edit[0])
+		}
+		if _, e := Decode(legacy); e == nil {
+			t.Fatalf("version-2 snapshot field %s accepted", edit[1])
+		}
+	}
+	c, x := h.command(Command{Op: Mint, RoundID: h.round, Quantity: Lot}, alice, 0)
+	c.Domain.RulesVersion = 2
+	if _, _, e := Apply(h.s, c, x); e == nil {
+		t.Fatal("version-2 command domain accepted")
+	}
+	// The registry time belongs to open/resolve/void only, and is mandatory there.
+	h.reject(Command{Op: Mint, RoundID: h.round, Quantity: Lot, RegistryTime: 900}, alice, 0)
+	h.reject(Command{Op: Checkpoint, RegistryTime: 900}, auth, 0)
+	for _, op := range []Operation{ResolveRound, VoidRound} {
+		c, x = h.command(Command{Op: op, RoundID: h.round, Evidence: hash([]byte("v2"))}, auth, 88211)
+		if op == ResolveRound {
+			c.Observation = testObservation("1", 1800)
+		}
+		if _, _, e := Apply(h.s, c, x); e != nil {
+			t.Fatalf("control %s: %v", op, e)
+		}
+		c.RegistryTime = 0
+		if _, _, e := Apply(h.s, c, x); e == nil {
+			t.Fatalf("%s without registry time accepted", op)
+		}
+	}
+	spec, _ := NewRoundSpec(h.s.Config, "ETH", 900, 1800)
+	r := h.must(Command{Op: CreateRound, Round: &spec}, auth, 0)
+	open := testObservation("1", 1800)
+	open.FeedID = ETHStreamsFeed
+	c, x = h.command(Command{Op: OpenRound, RoundID: r.RoundID, Observation: open, Evidence: hash([]byte("v2-open"))}, auth, 1800)
+	if _, _, e := Apply(h.s, c, x); e != nil {
+		t.Fatalf("control open: %v", e)
+	}
+	c.RegistryTime = 0
+	if _, _, e := Apply(h.s, c, x); e == nil {
+		t.Fatal("open without registry time accepted")
+	}
+}
+
+// Finding D7. The registry judges its windows at block inclusion; the engine
+// mirrors that time and must not substitute the later moment it processes the
+// event, nor let its own clock make a void valid.
+func TestRegistryInclusionTimeGovernsDeadlines(t *testing.T) {
+	h := &harness{t: t}
+	var err error
+	if h.s, err = New(mainnetPolicy()); err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range []string{alice, bob} {
+		h.must(Command{Op: Register}, a, 1)
+		h.deposit(a, 200*AtomScale)
+	}
+	const start = 1_800_000_000
+	spec, _ := NewRoundSpec(h.s.Config, "BTC", 300, start)
+	h.round = h.must(Command{Op: CreateRound, Round: &spec}, auth, 1).RoundID
+	open := Command{Op: OpenRound, RoundID: h.round, Observation: testObservation("97000000000000000000000", start), Evidence: hash([]byte("open"))}
+	void := Command{Op: VoidRound, RoundID: h.round, Evidence: hash([]byte("void"))}
+
+	// An unrelated command moves the engine past the opening deadline before
+	// the confirmed registry event reaches it.
+	h.must(Command{Op: Checkpoint}, auth, spec.OpeningDeadline+1)
+	void.RegistryTime = spec.OpeningDeadline
+	h.reject(void, auth, 0)
+	void.RegistryTime = spec.OpeningDeadline + 1
+	missing := *h
+	missing.must(void, auth, 0)
+	open.RegistryTime = spec.OpeningDeadline + 1
+	h.reject(open, auth, 0)
+	// A report cannot postdate the block that recorded it, whatever the time is now.
+	future := open
+	future.Observation, future.RegistryTime = testObservation("97000000000000000000000", start+30), start+29
+	h.reject(future, auth, 0)
+	open.RegistryTime = spec.OpeningDeadline
+	h.must(open, auth, 0)
+
+	h.mint(alice, 10*AtomScale)
+	h.must(Command{Op: PlaceOrder, RoundID: h.round, Outcome: Up, Side: Sell, Price: 60, Quantity: 10 * AtomScale, TIF: GTC, Expiry: spec.Cutoff, MaxFee: MaxAtoms}, alice, 0)
+	h.must(Command{Op: PlaceOrder, RoundID: h.round, Outcome: Up, Side: Buy, Price: 60, Quantity: 10 * AtomScale, TIF: IOC, Expiry: spec.Cutoff, MaxFee: MaxAtoms}, bob, 0)
+
+	// The engine clock runs past every deadline before the result is mirrored.
+	h.must(Command{Op: Checkpoint}, auth, spec.VoidableAfter+10)
+	void.RegistryTime = spec.VoidableAfter
+	h.reject(void, auth, 0)
+	void.RegistryTime = spec.VoidableAfter + 1
+	timeout := *h
+	timeout.must(void, auth, 0)
+	resolve := Command{Op: ResolveRound, RoundID: h.round, Observation: testObservation("97000000000000000000001", uint32(spec.End)), Evidence: hash([]byte("close"))}
+	resolve.RegistryTime = spec.VoidableAfter + 11
+	h.reject(resolve, auth, 0)
+	resolve.RegistryTime = spec.End - 1
+	h.reject(resolve, auth, 0)
+	future = resolve
+	future.Observation, future.RegistryTime = testObservation("97000000000000000000001", uint32(spec.End)+30), spec.End+29
+	h.reject(future, auth, 0)
+	// Mined six days after end, far beyond the retired one-hour window.
+	resolve.RegistryTime = spec.End + 6*86400
+	h.must(resolve, auth, 0)
+	if paid := h.must(Command{Op: Redeem, RoundID: h.round}, bob, 0).Amount; paid != 10*AtomScale {
+		t.Fatalf("winner paid %d", paid)
+	}
+	if paid := h.must(Command{Op: Redeem, RoundID: h.round}, alice, 0).Amount; paid != 0 {
+		t.Fatalf("loser paid %d", paid)
 	}
 }
 

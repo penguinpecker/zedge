@@ -4,7 +4,7 @@
 package engine
 
 const (
-	Version                 = 2
+	Version                 = 3
 	AtomScale        uint64 = 1_000_000
 	Lot              uint64 = 1_000
 	MaxAtoms         uint64 = 1_000_000_000_000_000
@@ -87,7 +87,7 @@ type RegistryConfig struct {
 	Decimals          uint8  `json:"decimals"`
 	ObservationWindow uint64 `json:"observationWindow"`
 	OpeningGrace      uint64 `json:"openingGrace"`
-	SettlementGrace   uint64 `json:"settlementGrace"`
+	VoidGrace         uint64 `json:"voidGrace"`
 	CutoffBuffer      uint64 `json:"cutoffBuffer"`
 }
 
@@ -116,20 +116,23 @@ type AuthenticatedContext struct {
 }
 
 type RoundSpec struct {
-	Asset              string `json:"asset"`
-	Feed               string `json:"feed"`
-	RegistryRoundID    string `json:"registryRoundId"`
-	Start              uint64 `json:"start"`
-	End                uint64 `json:"end"`
-	Cutoff             uint64 `json:"cutoff"`
-	ObservationWindow  uint64 `json:"observationWindow"`
-	OpeningDeadline    uint64 `json:"openingDeadline"`
-	ResolutionDeadline uint64 `json:"resolutionDeadline"`
+	Asset             string `json:"asset"`
+	Feed              string `json:"feed"`
+	RegistryRoundID   string `json:"registryRoundId"`
+	Start             uint64 `json:"start"`
+	End               uint64 `json:"end"`
+	Cutoff            uint64 `json:"cutoff"`
+	ObservationWindow uint64 `json:"observationWindow"`
+	OpeningDeadline   uint64 `json:"openingDeadline"`
+	VoidableAfter     uint64 `json:"voidableAfter"`
 }
 
 // Command is the canonical application command, not a wallet signing format.
 // The adapter binds its canonical digest to authorization and verified context.
 // Only fields relevant to Op may be nonzero; unknown JSON fields are rejected.
+// RegistryTime is the registry block timestamp that included the mirrored
+// recordOpening/resolveRound/voidRound (getRound openedAt/resolvedAt). Like
+// Evidence it is adapter-authenticated chain data, never the processing clock.
 type Command struct {
 	Domain       Domain              `json:"domain"`
 	ID           string              `json:"id"`
@@ -150,6 +153,7 @@ type Command struct {
 	WithdrawalID string              `json:"withdrawalId,omitempty"`
 	Destination  string              `json:"destination,omitempty"`
 	Evidence     string              `json:"evidence,omitempty"`
+	RegistryTime uint64              `json:"registryTime,omitempty"`
 	Observation  *StreamsObservation `json:"observation,omitempty"`
 }
 

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/penguinpecker/zedge/protocol/config.schema.json",
-  "title": "ZEDGE engine configuration v2",
+  "title": "ZEDGE engine configuration v3",
   "description": "Bootstrap configuration, not a user command. Engine recomputes the exact Streams registry rulesHash and validates cross-field scheduling bounds; adapter must authenticate deployment/runtime identity.",
   "type": "object",
   "additionalProperties": false,
@@ -42,7 +42,7 @@
           "pattern": "^[A-Za-z0-9_.-]+$"
         },
         "rulesVersion": {
-          "const": 2
+          "const": 3
         }
       }
     },
@@ -78,7 +78,7 @@
         "decimals",
         "observationWindow",
         "openingGrace",
-        "settlementGrace",
+        "voidGrace",
         "cutoffBuffer"
       ],
       "properties": {
@@ -129,10 +129,10 @@
           "minimum": 1,
           "maximum": 299
         },
-        "settlementGrace": {
+        "voidGrace": {
           "type": "integer",
-          "minimum": 1,
-          "maximum": 86400
+          "minimum": 86400,
+          "maximum": 1814400
         },
         "cutoffBuffer": {
           "type": "integer",

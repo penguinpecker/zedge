@@ -100,9 +100,9 @@ func TestAuthenticatedObservationWindowsAndTimeouts(t *testing.T) {
 	h.setup(alice)
 	h.mint(alice, AtomScale)
 	h.reject(Command{Op: ResolveRound, RoundID: h.round, Observation: testObservation("1", 1811), Evidence: hash([]byte("late-feed"))}, auth, 1811)
-	h.reject(Command{Op: ResolveRound, RoundID: h.round, Observation: testObservation("1", 1810), Evidence: hash([]byte("late-proof"))}, auth, 2101)
-	h.reject(Command{Op: VoidRound, RoundID: h.round, Evidence: hash([]byte("void"))}, auth, 2100)
-	h.must(Command{Op: ResolveRound, RoundID: h.round, Observation: testObservation("1", 1810), Evidence: hash([]byte("close-window"))}, auth, 2100)
+	h.reject(Command{Op: VoidRound, RoundID: h.round, Evidence: hash([]byte("void"))}, auth, 88210)
+	// Resolution has no deadline: six days after end, and after voidableAfter, the closing price still settles.
+	h.must(Command{Op: ResolveRound, RoundID: h.round, Observation: testObservation("1", 1810), Evidence: hash([]byte("close-window"))}, auth, 1800+6*86400)
 	m, _ := h.s.round(h.round)
 	if m.Outcome != Down || m.Closing.ObservationsTimestamp != 1810 {
 		t.Fatal("wrong boundary result")
@@ -119,7 +119,10 @@ func TestAuthenticatedObservationWindowsAndTimeouts(t *testing.T) {
 	missing.reject(Command{Op: OpenRound, RoundID: r.RoundID, Observation: testObservation("3000000000000000000000", 911), Evidence: hash([]byte("late"))}, auth, 920)
 	missing.reject(Command{Op: OpenRound, RoundID: r.RoundID, Observation: testObservation("3000000000000000000000", 910), Evidence: hash([]byte("good"))}, auth, 931)
 	missing.reject(Command{Op: VoidRound, RoundID: r.RoundID, Evidence: hash([]byte("missing"))}, auth, 930)
+	// A never-opened round keeps its slot until a recorded void is mirrored.
+	missing.reject(Command{Op: ArchiveRound, RoundID: r.RoundID}, auth, 931)
 	missing.must(Command{Op: VoidRound, RoundID: r.RoundID, Evidence: hash([]byte("missing"))}, auth, 931)
+	missing.must(Command{Op: ArchiveRound, RoundID: r.RoundID}, auth, 0)
 }
 
 func TestRoundIDBindsAllRulesAndDeployment(t *testing.T) {

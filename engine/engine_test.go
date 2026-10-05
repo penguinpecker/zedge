@@ -14,7 +14,7 @@ const auth = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 func config() Config {
 	c := Config{Domain: Domain{ChainID: 2651420, Endpoint: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", ApplicationID: "zedge-test", RulesVersion: Version}, Authority: auth, Collateral: "0xcccccccccccccccccccccccccccccccccccccccc", FeeBps: 100,
-		Oracle: RegistryConfig{ChainID: 2651420, Registry: "0xdddddddddddddddddddddddddddddddddddddddd", Oracle: "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", BTCFeedID: BTCStreamsFeed, ETHFeedID: ETHStreamsFeed, Decimals: 18, ObservationWindow: 10, OpeningGrace: 20, SettlementGrace: 290, CutoffBuffer: 5}}
+		Oracle: RegistryConfig{ChainID: 2651420, Registry: "0xdddddddddddddddddddddddddddddddddddddddd", Oracle: "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", BTCFeedID: BTCStreamsFeed, ETHFeedID: ETHStreamsFeed, Decimals: 18, ObservationWindow: 10, OpeningGrace: 20, VoidGrace: 86400, CutoffBuffer: 5}}
 	c.Oracle.RulesHash, _ = RegistryRulesHash(c)
 	return c
 }
@@ -61,6 +61,11 @@ func (h *harness) command(c Command, who string, at uint64) (Command, Authentica
 		if at == 0 {
 			at = 1
 		}
+	}
+	// Unless a test says otherwise, the registry included the mirrored event at
+	// the moment the engine processes it.
+	if (c.Op == OpenRound || c.Op == ResolveRound || c.Op == VoidRound) && c.RegistryTime == 0 {
+		c.RegistryTime = at
 	}
 	return c, AuthenticatedContext{Domain: h.s.Config.Domain, Principal: who, Timestamp: at, System: sys}
 }
@@ -232,7 +237,7 @@ func TestResolutionTieUpAndRedemption(t *testing.T) {
 		t.Fatal("collateral not emptied")
 	}
 	h.reject(Command{Op: Redeem, RoundID: h.round}, bob, 0)
-	h.reject(Command{Op: VoidRound, RoundID: h.round, Evidence: hash([]byte("void"))}, auth, 2101)
+	h.reject(Command{Op: VoidRound, RoundID: h.round, Evidence: hash([]byte("void"))}, auth, 88211)
 }
 
 func TestVoidHalfPayoutAndMerge(t *testing.T) {
@@ -242,13 +247,59 @@ func TestVoidHalfPayoutAndMerge(t *testing.T) {
 	h.must(Command{Op: Merge, RoundID: h.round, Quantity: AtomScale}, alice, 0)
 	h.order(alice, Sell, 60, AtomScale, GTC)
 	h.order(bob, Buy, 60, AtomScale, IOC)
-	h.reject(Command{Op: VoidRound, RoundID: h.round, Evidence: hash([]byte("void"))}, auth, 2099)
-	h.must(Command{Op: VoidRound, RoundID: h.round, Evidence: hash([]byte("void"))}, auth, 2101)
+	h.reject(Command{Op: VoidRound, RoundID: h.round, Evidence: hash([]byte("void"))}, auth, 88210)
+	h.must(Command{Op: VoidRound, RoundID: h.round, Evidence: hash([]byte("void"))}, auth, 88211)
 	for _, who := range []string{alice, bob} {
 		r := h.must(Command{Op: Redeem, RoundID: h.round}, who, 0)
 		if r.Amount != AtomScale/2 {
 			t.Fatal("void not half")
 		}
+	}
+}
+
+// A funded pair pays exactly one collateral unit in every round state (the
+// vault's rule). Reserved shares stay locked, minting still stops at cutoff and
+// merging before redeeming never changes what a settled round pays in total.
+func TestMergeCompletePairAtAnyTime(t *testing.T) {
+	for _, settle := range []Operation{ResolveRound, VoidRound} {
+		h := newHarness(t)
+		h.setup(alice, bob)
+		merge := func(q, at uint64) Receipt {
+			return h.must(Command{Op: Merge, RoundID: h.round, Quantity: q}, alice, at)
+		}
+		next, _ := NewRoundSpec(h.s.Config, "BTC", 900, 1800)
+		scheduled := h.must(Command{Op: CreateRound, Round: &next}, auth, 0).RoundID
+		h.reject(Command{Op: Merge, RoundID: scheduled, Quantity: Lot}, alice, 0)
+		h.mint(alice, 10*AtomScale)
+		h.order(alice, Sell, 60, 4*AtomScale, GTC)
+		h.order(bob, Buy, 60, 2*AtomScale, IOC)
+		h.reject(Command{Op: Merge, RoundID: h.round, Quantity: 7 * AtomScale}, alice, 0)
+		merge(AtomScale, 0)
+		h.reject(Command{Op: Mint, RoundID: h.round, Quantity: Lot}, alice, 1795)
+		if r := merge(AtomScale, 1795); len(r.ReleasedOrders) != 1 || h.account(alice).holding(h.round).ReservedUp != 0 {
+			t.Fatal("cutoff sweep did not release the resting sell before the merge")
+		}
+		merge(AtomScale, 1800)
+		if settle == VoidRound {
+			h.must(Command{Op: VoidRound, RoundID: h.round, Evidence: hash([]byte("void"))}, auth, 88211)
+		} else {
+			h.must(Command{Op: ResolveRound, RoundID: h.round, Observation: testObservation("1", 1800), Evidence: hash([]byte("close"))}, auth, 1800)
+		}
+		direct := *h
+		direct.must(Command{Op: Redeem, RoundID: h.round}, alice, 0)
+		h.reject(Command{Op: Merge, RoundID: h.round, Quantity: 6 * AtomScale}, alice, 0)
+		if merge(2*AtomScale, 0).Amount != 2*AtomScale {
+			t.Fatal("settled pair did not pay one unit")
+		}
+		h.must(Command{Op: Redeem, RoundID: h.round}, alice, 0)
+		if got, want := h.account(alice).Cash, direct.account(alice).Cash; got != want {
+			t.Fatalf("%s: merge then redeem paid %d, redeem alone %d", settle, got, want)
+		}
+		h.must(Command{Op: Redeem, RoundID: h.round}, bob, 0)
+		if m, _ := h.s.round(h.round); m.Locked != 0 || m.UpSupply != 0 || m.DownSupply != 0 {
+			t.Fatal("collateral not emptied")
+		}
+		h.must(Command{Op: ArchiveRound, RoundID: h.round}, auth, 0)
 	}
 }
 
@@ -452,7 +503,7 @@ func FuzzCommandSequences(f *testing.F) {
 			mode = data[0] % 3
 		}
 		if mode == 2 {
-			h.must(Command{Op: VoidRound, RoundID: h.round, Evidence: hash([]byte("fuzz-void"))}, auth, 2101)
+			h.must(Command{Op: VoidRound, RoundID: h.round, Evidence: hash([]byte("fuzz-void"))}, auth, 88211)
 		} else {
 			price := "1"
 			if mode == 1 {
@@ -460,8 +511,16 @@ func FuzzCommandSequences(f *testing.F) {
 			}
 			h.must(Command{Op: ResolveRound, RoundID: h.round, Observation: testObservation(price, 1800), Evidence: hash([]byte("fuzz-close"))}, auth, 1800)
 		}
-		for _, who := range []string{alice, bob, carol} {
-			h.must(Command{Op: Redeem, RoundID: h.round}, who, 0)
+		for i, who := range []string{alice, bob, carol} {
+			// Merging the paired part after settlement must leave nothing behind either.
+			held := *h.account(who).holding(h.round)
+			if pair := min(held.Up, held.Down); pair > 0 && len(data) > i && data[i]&1 == 1 {
+				h.must(Command{Op: Merge, RoundID: h.round, Quantity: pair}, who, 0)
+				held.Up, held.Down = held.Up-pair, held.Down-pair
+			}
+			if held.Up+held.Down > 0 {
+				h.must(Command{Op: Redeem, RoundID: h.round}, who, 0)
+			}
 		}
 		m, _ := h.s.round(h.round)
 		if m.Locked != 0 || m.UpSupply != 0 || m.DownSupply != 0 {

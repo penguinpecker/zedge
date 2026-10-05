@@ -9,7 +9,7 @@ import (
 )
 
 const MaxOraclePrice = "3138550867693340381917894711603833208051177722232017256447"
-const RegistryRulesVersion = "zedge-streams-rounds-v1:schema3:boundary-window:exact-price:no-confidence:tie-up:void-half"
+const RegistryRulesVersion = "zedge-streams-rounds-v2:schema3:boundary-window:exact-price:no-confidence:tie-up:late-resolution:void-half"
 const BTCStreamsFeed = "0x00039d9e45394f473ab1f050a1b963e6b05351e52d71e507509ada0c95ed75b8"
 const ETHStreamsFeed = "0x000362205e10b3a147d02792eccee483dca6c7b44ecce7012cb8c6e0b68b3ae9"
 const maxStreamsTimestamp uint64 = 1<<32 - 1
@@ -64,7 +64,7 @@ func registryFieldsValid(c Config) bool {
 	return o.ChainID > 0 && o.ChainID <= MaxAtoms && address(o.Registry) && address(o.Oracle) && address(c.Collateral) &&
 		streamFeed(o.BTCFeedID) && streamFeed(o.ETHFeedID) && o.BTCFeedID != o.ETHFeedID && o.Decimals == 18 &&
 		o.ObservationWindow <= 60 && o.OpeningGrace > 0 && o.OpeningGrace < 300 &&
-		o.SettlementGrace > 0 && o.SettlementGrace <= 86400-o.ObservationWindow &&
+		o.VoidGrace >= 86400 && o.VoidGrace <= 21*86400 &&
 		o.CutoffBuffer > 0 && o.CutoffBuffer < 300 && o.ObservationWindow+o.OpeningGrace < 300-o.CutoffBuffer
 }
 
@@ -80,7 +80,7 @@ func RegistryRulesHash(c Config) (string, error) {
 	for _, value := range []string{o.Oracle, c.Collateral, o.BTCFeedID, o.ETHFeedID} {
 		b = append(b, abiHex(value)...)
 	}
-	for _, value := range []uint64{uint64(o.Decimals), uint64(o.Decimals), o.ObservationWindow, o.OpeningGrace, o.SettlementGrace, o.CutoffBuffer} {
+	for _, value := range []uint64{uint64(o.Decimals), uint64(o.Decimals), o.ObservationWindow, o.OpeningGrace, o.VoidGrace, o.CutoffBuffer} {
 		b = append(b, abiUint(value)...)
 	}
 	b = append(b, abiUint(uint64(len(RegistryRulesVersion)))...)
@@ -96,7 +96,7 @@ func registryValid(c Config) bool {
 	return err == nil && hash32(c.Oracle.RulesHash) && h == c.Oracle.RulesHash
 }
 
-// RegistryRoundID reproduces the deployed registry's fixed ABI/Keccak identity.
+// RegistryRoundID reproduces the registry's fixed ABI/Keccak identity.
 func RegistryRoundID(c Config, asset string, duration, start uint64) (string, error) {
 	if !registryValid(c) || (asset != "BTC" && asset != "ETH") || (duration != 300 && duration != 900) ||
 		start == 0 || start%duration != 0 || start > maxStreamsTimestamp-duration-c.Oracle.ObservationWindow {
@@ -128,7 +128,7 @@ func NewRoundSpec(c Config, asset string, duration, start uint64) (RoundSpec, er
 	end := start + duration
 	return RoundSpec{Asset: asset, Feed: feed, RegistryRoundID: id, Start: start, End: end,
 		Cutoff: end - o.CutoffBuffer, ObservationWindow: o.ObservationWindow,
-		OpeningDeadline: start + o.ObservationWindow + o.OpeningGrace, ResolutionDeadline: end + o.ObservationWindow + o.SettlementGrace}, nil
+		OpeningDeadline: start + o.ObservationWindow + o.OpeningGrace, VoidableAfter: end + o.ObservationWindow + o.VoidGrace}, nil
 }
 
 func validateObservation(o *StreamsObservation, feed string, boundary, window, now uint64) error {

@@ -71,6 +71,16 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	// The engine derives both registry identities from the policy fields alone. The harness
+	// compares these with what the compiled contract returned.
+	rulesHash, err := engine.RegistryRulesHash(cfg)
+	if err != nil {
+		return err
+	}
+	registryRoundID, err := engine.RegistryRoundID(cfg, f.Spec.Asset, f.Spec.End-f.Spec.Start, f.Spec.Start)
+	if err != nil {
+		return err
+	}
 	nonces := map[string]uint64{}
 	apply := func(c engine.Command, principal string, at uint64, system bool) (engine.Receipt, error) {
 		c.Domain = cfg.Domain
@@ -100,34 +110,48 @@ func run() error {
 		return err
 	}
 	round := r.RoundID
-	if _, err = apply(engine.Command{Op: engine.OpenRound, RoundID: round, Observation: &f.Opening, Evidence: evidence(f.RegistryRoundID + ":open")}, authority, f.OpenedAt, true); err != nil {
+	// A registry event can be mirrored only after it is included, so the engine clock is
+	// already past the event's own time: one second is enough to cross an inclusive deadline.
+	// Every window must be judged at the registry time the command carries (finding D7).
+	opened, settled := f.OpenedAt+1, f.ResolvedAt+1
+	if _, err = apply(engine.Command{Op: engine.OpenRound, RoundID: round, Observation: &f.Opening, Evidence: evidence(f.RegistryRoundID + ":open"), RegistryTime: f.OpenedAt}, authority, opened, true); err != nil {
 		return err
 	}
-	if _, err = apply(engine.Command{Op: engine.Mint, RoundID: round, Quantity: 100 * engine.AtomScale}, alice, f.OpenedAt, false); err != nil {
+	if _, err = apply(engine.Command{Op: engine.Mint, RoundID: round, Quantity: 100 * engine.AtomScale}, alice, opened, false); err != nil {
 		return err
 	}
-	ask, err := apply(engine.Command{Op: engine.PlaceOrder, RoundID: round, Outcome: engine.Up, Side: engine.Sell, Price: 60, Quantity: 20 * engine.AtomScale, TIF: engine.GTC, Expiry: f.Spec.Cutoff, MaxFee: engine.AtomScale}, alice, f.OpenedAt, false)
+	ask, err := apply(engine.Command{Op: engine.PlaceOrder, RoundID: round, Outcome: engine.Up, Side: engine.Sell, Price: 60, Quantity: 20 * engine.AtomScale, TIF: engine.GTC, Expiry: f.Spec.Cutoff, MaxFee: engine.AtomScale}, alice, opened, false)
 	if err != nil {
 		return err
 	}
-	fill, err := apply(engine.Command{Op: engine.PlaceOrder, RoundID: round, Outcome: engine.Up, Side: engine.Buy, Price: 70, Quantity: 10 * engine.AtomScale, TIF: engine.IOC, Expiry: f.Spec.Cutoff, MaxFee: engine.AtomScale}, bob, f.OpenedAt, false)
+	fill, err := apply(engine.Command{Op: engine.PlaceOrder, RoundID: round, Outcome: engine.Up, Side: engine.Buy, Price: 70, Quantity: 10 * engine.AtomScale, TIF: engine.IOC, Expiry: f.Spec.Cutoff, MaxFee: engine.AtomScale}, bob, opened, false)
 	if err != nil {
 		return err
 	}
 	if len(fill.Fills) != 1 || fill.Fills[0].Price != 60 || fill.Fills[0].Quantity != 10*engine.AtomScale {
 		return fmt.Errorf("unexpected execution")
 	}
-	if _, err = apply(engine.Command{Op: engine.CancelOrder, OrderID: ask.OrderID}, alice, f.OpenedAt, false); err != nil {
+	if _, err = apply(engine.Command{Op: engine.CancelOrder, OrderID: ask.OrderID}, alice, opened, false); err != nil {
 		return err
 	}
-	if _, err = apply(engine.Command{Op: engine.ResolveRound, RoundID: round, Observation: &f.Closing, Evidence: evidence(f.RegistryRoundID + ":close")}, authority, f.ResolvedAt, true); err != nil {
+	settle := engine.Command{Op: engine.ResolveRound, RoundID: round, Observation: &f.Closing, Evidence: evidence(f.RegistryRoundID + ":close"), RegistryTime: f.ResolvedAt}
+	if f.ExpectedOutcome == engine.Void {
+		// The registry voids an opened round only strictly after voidableAfter. The engine must
+		// refuse that exact second too, although its own clock is already past it.
+		settle = engine.Command{Op: engine.VoidRound, RoundID: round, Evidence: evidence(f.RegistryRoundID + ":void"), RegistryTime: f.Spec.VoidableAfter}
+		if _, err = apply(settle, authority, settled, true); err == nil {
+			return fmt.Errorf("engine voided at voidableAfter")
+		}
+		settle.RegistryTime = f.ResolvedAt
+	}
+	if _, err = apply(settle, authority, settled, true); err != nil {
 		return err
 	}
 	if s.Rounds[0].Outcome != f.ExpectedOutcome {
 		return fmt.Errorf("contract/engine outcome mismatch")
 	}
 	for _, account := range []string{alice, bob} {
-		if _, err = apply(engine.Command{Op: engine.Redeem, RoundID: round}, account, f.ResolvedAt, false); err != nil {
+		if _, err = apply(engine.Command{Op: engine.Redeem, RoundID: round}, account, settled, false); err != nil {
 			return err
 		}
 	}
@@ -137,14 +161,14 @@ func run() error {
 			amount = a.Cash
 		}
 	}
-	w, err := apply(engine.Command{Op: engine.RequestWithdrawal, Amount: amount, Destination: bob}, bob, f.ResolvedAt, false)
+	w, err := apply(engine.Command{Op: engine.RequestWithdrawal, Amount: amount, Destination: bob}, bob, settled, false)
 	if err != nil {
 		return err
 	}
-	if _, err = apply(engine.Command{Op: engine.ExportWithdrawal, WithdrawalID: w.WithdrawalID, Evidence: evidence("withdraw")}, authority, f.ResolvedAt, true); err != nil {
+	if _, err = apply(engine.Command{Op: engine.ExportWithdrawal, WithdrawalID: w.WithdrawalID, Evidence: evidence("withdraw")}, authority, settled, true); err != nil {
 		return err
 	}
-	if _, err = apply(engine.Command{Op: engine.ConfirmClaim, WithdrawalID: w.WithdrawalID, Evidence: evidence("claim")}, authority, f.ResolvedAt, true); err != nil {
+	if _, err = apply(engine.Command{Op: engine.ConfirmClaim, WithdrawalID: w.WithdrawalID, Evidence: evidence("claim")}, authority, settled, true); err != nil {
 		return err
 	}
 	if err = engine.Validate(s); err != nil {
@@ -156,6 +180,7 @@ func run() error {
 	}
 	return json.NewEncoder(os.Stdout).Encode(struct {
 		EvaluationOnly  bool           `json:"evaluationOnly"`
+		RulesHash       string         `json:"rulesHash"`
 		RegistryRoundID string         `json:"registryRoundId"`
 		EngineRoundID   string         `json:"engineRoundId"`
 		Outcome         engine.Outcome `json:"outcome"`
@@ -165,5 +190,5 @@ func run() error {
 		PaidOut         uint64         `json:"paidOut"`
 		Fees            uint64         `json:"fees"`
 		StateHash       string         `json:"stateHash"`
-	}{true, f.RegistryRoundID, round, s.Rounds[0].Outcome, s.Sequence, s.Deposited, s.Custody, s.PaidOut, s.Fees, stateHash})
+	}{true, rulesHash, registryRoundID, round, s.Rounds[0].Outcome, s.Sequence, s.Deposited, s.Custody, s.PaidOut, s.Fees, stateHash})
 }

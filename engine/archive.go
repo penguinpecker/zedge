@@ -13,7 +13,7 @@ func ArchiveDigest(record RoundArchive) (string, error) {
 		Count        uint64 `json:"count"`
 		PreviousRoot string `json:"previousRoot"`
 		Round        Round  `json:"round"`
-	}{"ZEDGE_ROUND_ARCHIVE_V2", record.Count, record.PreviousRoot, record.Round})
+	}{"ZEDGE_ROUND_ARCHIVE_V3", record.Count, record.PreviousRoot, record.Round})
 	if err != nil {
 		return "", err
 	}

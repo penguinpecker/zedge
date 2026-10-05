@@ -127,7 +127,7 @@ func DecodeCommand(b []byte) (Command, error) {
 	return c, nil
 }
 func New(c Config) (*State, error) {
-	s := &State{Version: Version, Config: c, JournalHash: hash([]byte("ZEDGE_ENGINE_V2")), Accounts: []Account{}, Rounds: []Round{}, Orders: []Order{}, Withdrawals: []Withdrawal{}, ExternalEvidence: []string{}, ArchiveRoot: hash([]byte("ZEDGE_ARCHIVES_V2"))}
+	s := &State{Version: Version, Config: c, JournalHash: hash([]byte("ZEDGE_ENGINE_V3")), Accounts: []Account{}, Rounds: []Round{}, Orders: []Order{}, Withdrawals: []Withdrawal{}, ExternalEvidence: []string{}, ArchiveRoot: hash([]byte("ZEDGE_ARCHIVES_V3"))}
 	if e := Validate(s); e != nil {
 		return nil, e
 	}
@@ -228,12 +228,14 @@ func validateFields(c Command) error {
 	case OpenRound, ResolveRound:
 		z.RoundID = ""
 		z.Evidence = ""
+		z.RegistryTime = 0
 		z.Observation = nil
 	case ArchiveRound:
 		z.RoundID = ""
 	case VoidRound:
 		z.RoundID = ""
 		z.Evidence = ""
+		z.RegistryTime = 0
 	case Mint, Merge:
 		z.RoundID = ""
 		z.Quantity = 0
