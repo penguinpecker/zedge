@@ -1,0 +1,22 @@
+# EVALUATION ONLY. Contracts for the local Vela slice (chain 31337): the clock
+# trigger and a 6-decimal test token. Kept out of contracts/ so that production
+# contract CI never builds them. Build output goes to build/ (git-ignored).
+[profile.default]
+src = "src"
+test = "test"
+out = "build/out"
+cache_path = "build/cache"
+libs = []
+allow_paths = ["../../../../contracts/lib/forge-std", "../../../../contracts/node_modules/@openzeppelin/contracts"]
+solc = "0.8.30"
+evm_version = "paris"
+optimizer = true
+optimizer_runs = 200
+bytecode_hash = "none"
+remappings = [
+  "forge-std/=../../../../contracts/lib/forge-std/src/",
+  "@openzeppelin/contracts/=../../../../contracts/node_modules/@openzeppelin/contracts/",
+]
+
+[profile.default.fuzz]
+runs = 1024

@@ -1,0 +1,26 @@
+# EVALUATION ONLY: software TEE, no attestation, test token, fixture oracle;
+# sender, amount and time are trusted from the manager. Not private, not
+# secure, not production-ready. Applied over the Vela starter kit's compose file (fetched by
+# up.sh into build/, never copied here). The upstream images are linux/amd64
+# only and run emulated on an arm64 host. The executor and manager need neither
+# privileged mode nor /dev/vsock here: the local executor is a software TEE with
+# no attestation, so neither container gets host device access.
+services:
+  executor:
+    platform: linux/amd64
+    privileged: false
+    devices: !reset []
+  manager:
+    platform: linux/amd64
+    privileged: false
+    devices: !reset []
+  authorityservice:
+    platform: linux/amd64
+  chain:
+    platform: linux/amd64
+  deployer:
+    platform: linux/amd64
+  subgraph-deployer:
+    platform: linux/amd64
+  subgraph-node:
+    platform: linux/amd64
