@@ -76,7 +76,7 @@ contract OutcomeVaultRegistryFixture {
     address public collateral;
     uint256 public deploymentChainId;
     bytes32 public rulesHash = keccak256("test registry rules");
-    string public version = "zedge-streams-round-registry-v1";
+    string public version = "zedge-streams-round-registry-v2";
     uint8 public up;
     uint8 public down;
     uint8 public denominator;

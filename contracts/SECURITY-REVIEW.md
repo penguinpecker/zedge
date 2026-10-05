@@ -2,6 +2,13 @@
 
 Reviewed 2026-10-04. This is an implementation self-review, internal peer review and automated test record, **not an independent security audit** or approval for real funds. Current source scope includes both Pyth contracts, the four Streams/native-route contracts, the public outcome vault, their interfaces and deployment helpers. External verifier/bridge/token implementations and Vela are dependencies, not contracts audited by this review. See the [whole-system review](../security/WHOLE-SYSTEM-REVIEW.md) for integration boundaries.
 
+**Update 2026-10-05.** The Streams round registry deployed on 2026-10-04 is retired and replaced in source by an upgradeable registry with late resolution and a stricter void rule; the replacement is not deployed. Details and evidence are in [STREAMS-SECURITY-REVIEW.md](STREAMS-SECURITY-REVIEW.md#registry-replacement-2026-10-05). Where this record differs, the following supersedes it:
+
+- Current suite: **152 passed, zero failed, eight skipped** across 14 suites / 160 entries; 13 fuzz functions; six stateful invariants. Slither 0.11.5 analysed 77 contracts/interfaces with the isolated build below (57 with the CI command, same findings): 18 Low (17 `timestamp`, one `reentrancy-benign`), two Informational on the registry's storage gap, zero Medium/High.
+- "Immutable outcomes" below holds for the Pyth registry. In the Streams registry a recorded result is one-way under the current implementation, but its owner can replace the implementation, so that property now depends on the owner key. Resolution no longer has a deadline, and an opened round can be voided only after the void grace and only without a cached closing price.
+- "Deployed artifact preservation" now covers the three live contracts (adapter, publisher, price cache): their sources, creation bytecode and metadata are unchanged. The registry artifact intentionally no longer matches the retired deployment.
+- The public vault accepts only the new registry's version marker; its 24 tests and invariant pass against the proxied registry.
+
 Four noncustodial contracts have been deployed on Base/Horizen using funded public transactions; a genuine historical BTC report also completed the native delivery route. Their addresses, canonical receipts, runtime/configuration checks, source-verification caveats and exact smoke scope are recorded in [MAINNET.md](deployment/MAINNET.md). The Pyth foundation remains undeployed. `CollateralizedOutcomeVault` is implemented and tested but remains **undeployed at this review**; it provides public claims, not private exchange custody.
 
 ## Current verification evidence

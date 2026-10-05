@@ -5,7 +5,7 @@ import {Test} from "forge-std/Test.sol";
 import {CollateralizedOutcomeVault} from "../src/CollateralizedOutcomeVault.sol";
 import {StreamsRoundRegistry} from "../src/StreamsRoundRegistry.sol";
 import {IStreamsBoundaryOracle} from "../src/interfaces/IStreamsBoundaryOracle.sol";
-import {MockStreamsBoundaryOracle} from "./mocks/MockStreamsBoundaryOracle.sol";
+import {MockStreamsBoundaryOracle, StreamsRegistryProxy} from "./mocks/MockStreamsBoundaryOracle.sol";
 import {OutcomeVaultTokenFixture} from "./mocks/OutcomeVaultFixtures.sol";
 
 contract OutcomeVaultHandler is Test {
@@ -26,7 +26,7 @@ contract OutcomeVaultHandler is Test {
         vm.warp(START - 600);
         token = new OutcomeVaultTokenFixture(6);
         MockStreamsBoundaryOracle oracle = new MockStreamsBoundaryOracle();
-        registry = new StreamsRoundRegistry(
+        registry = StreamsRegistryProxy.deploy(
             StreamsRoundRegistry.Config(
                 address(oracle),
                 address(token),
@@ -36,9 +36,10 @@ contract OutcomeVaultHandler is Test {
                 18,
                 10,
                 20,
-                60,
+                1 days,
                 30
-            )
+            ),
+            address(this)
         );
         rounds[0] = registry.createRound(StreamsRoundRegistry.Asset.BTC, 300, START);
         rounds[1] = registry.createRound(StreamsRoundRegistry.Asset.ETH, 900, START);
@@ -119,8 +120,8 @@ contract OutcomeVaultHandler is Test {
         bytes32 id = rounds[roundRaw % 2];
         StreamsRoundRegistry.Round memory round = registry.getRound(id);
         if (round.outcome != StreamsRoundRegistry.Outcome.Pending) return;
-        if (result % 3 == 2 || block.timestamp > round.resolutionDeadline) {
-            if (block.timestamp <= round.resolutionDeadline) vm.warp(round.resolutionDeadline + 1);
+        if (result % 3 == 2 || block.timestamp > round.voidableAfter) {
+            if (block.timestamp <= round.voidableAfter) vm.warp(round.voidableAfter + 1);
             registry.voidRound(id);
         } else {
             if (block.timestamp < round.end) vm.warp(round.end);

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.30;
 
-/// @notice Read-only surface of the immutable Streams round registry used by collateral claims.
+/// @notice Read-only surface of the upgradeable Streams round registry used by collateral claims.
 interface IOutcomeSettlementRegistry {
     function version() external view returns (string memory);
     function collateral() external view returns (address);

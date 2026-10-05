@@ -11,8 +11,9 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {IOutcomeSettlementRegistry} from "./interfaces/IOutcomeSettlementRegistry.sol";
 
-/// @notice Fully collateralized, PUBLIC Up/Down claims against one immutable Streams round registry.
-/// @dev No owner, proxy, privileged minter, matching authority, balance attestation or withdrawal signer.
+/// @notice Fully collateralized, PUBLIC Up/Down claims against one Streams round registry.
+/// @dev No owner, proxy, privileged minter, matching authority, balance attestation or withdrawal signer
+/// in this vault. The bound registry is an upgradeable proxy: its owner can change its rules by upgrade.
 /// This is not private custody: balances, transfers, mints, burns and payouts are visible on chain.
 contract CollateralizedOutcomeVault is ERC1155Supply, ReentrancyGuard {
     using SafeERC20 for IERC20;
@@ -67,7 +68,7 @@ contract CollateralizedOutcomeVault is ERC1155Supply, ReentrancyGuard {
         address token = candidate.collateral();
         if (
             candidate.deploymentChainId() != block.chainid || candidate.rulesHash() != expectedRulesHash_
-                || keccak256(bytes(candidate.version())) != keccak256("zedge-streams-round-registry-v1")
+                || keccak256(bytes(candidate.version())) != keccak256("zedge-streams-round-registry-v2")
                 || token.code.length == 0 || IERC20Metadata(token).decimals() != COLLATERAL_DECIMALS
         ) revert InvalidConfig();
         registry = candidate;

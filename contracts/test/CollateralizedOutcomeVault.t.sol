@@ -8,7 +8,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 import {CollateralizedOutcomeVault} from "../src/CollateralizedOutcomeVault.sol";
 import {StreamsRoundRegistry} from "../src/StreamsRoundRegistry.sol";
 import {IStreamsBoundaryOracle} from "../src/interfaces/IStreamsBoundaryOracle.sol";
-import {MockStreamsBoundaryOracle} from "./mocks/MockStreamsBoundaryOracle.sol";
+import {MockStreamsBoundaryOracle, StreamsRegistryProxy} from "./mocks/MockStreamsBoundaryOracle.sol";
 import {
     OutcomeVaultTokenFixture,
     OutcomeVaultRegistryFixture,
@@ -17,6 +17,8 @@ import {
 
 contract CollateralizedOutcomeVaultTest is Test {
     uint32 internal constant START = 1_800_000_000;
+    // end + observationWindow + voidGrace of the five-minute round under the fixture rules.
+    uint32 internal constant VOIDABLE_AFTER = START + 300 + 10 + 1 days;
     uint256 internal constant LOT = 1000;
     uint256 internal constant UNIT = 1_000_000;
     address internal constant ALICE = address(0xA11CE);
@@ -34,7 +36,7 @@ contract CollateralizedOutcomeVaultTest is Test {
         vm.warp(START - 600);
         token = new OutcomeVaultTokenFixture(6);
         oracle = new MockStreamsBoundaryOracle();
-        registry = new StreamsRoundRegistry(
+        registry = StreamsRegistryProxy.deploy(
             StreamsRoundRegistry.Config(
                 address(oracle),
                 address(token),
@@ -44,9 +46,10 @@ contract CollateralizedOutcomeVaultTest is Test {
                 18,
                 10,
                 20,
-                60,
+                1 days,
                 30
-            )
+            ),
+            address(this)
         );
         id = registry.createRound(StreamsRoundRegistry.Asset.BTC, 300, START);
         otherId = registry.createRound(StreamsRoundRegistry.Asset.ETH, 900, START);
@@ -89,7 +92,7 @@ contract CollateralizedOutcomeVaultTest is Test {
 
     function _settle(uint8 result) internal {
         if (result == 2) {
-            vm.warp(START + 371);
+            vm.warp(VOIDABLE_AFTER + 1);
             registry.voidRound(id);
         } else {
             vm.warp(START + 300);
@@ -139,7 +142,11 @@ contract CollateralizedOutcomeVaultTest is Test {
         new CollateralizedOutcomeVault(address(registry), keccak256("wrong rules"));
         OutcomeVaultRegistryFixture fake = new OutcomeVaultRegistryFixture(address(token));
         bytes32 rules = fake.rulesHash();
-        fake.configure(block.chainid + 1, rules, "zedge-streams-round-registry-v1");
+        fake.configure(block.chainid + 1, rules, "zedge-streams-round-registry-v2");
+        vm.expectRevert(CollateralizedOutcomeVault.InvalidConfig.selector);
+        new CollateralizedOutcomeVault(address(fake), rules);
+        // The retired registry's marker is no longer an accepted binding.
+        fake.configure(block.chainid, rules, "zedge-streams-round-registry-v1");
         vm.expectRevert(CollateralizedOutcomeVault.InvalidConfig.selector);
         new CollateralizedOutcomeVault(address(fake), rules);
         fake.configure(block.chainid, rules, "unreviewed-registry-version");
@@ -226,10 +233,10 @@ contract CollateralizedOutcomeVaultTest is Test {
         vm.prank(ALICE);
         vault.safeTransferFrom(ALICE, BOB, _tokenId(id, 1), 3 * LOT, "");
         oracle.setFailure(true);
-        vm.warp(START + 370);
+        vm.warp(VOIDABLE_AFTER);
         vm.expectRevert(StreamsRoundRegistry.TimeoutNotReached.selector);
         registry.voidRound(id);
-        vm.warp(START + 371);
+        vm.warp(VOIDABLE_AFTER + 1);
         vm.prank(CAROL);
         registry.voidRound(id);
         vm.prank(ALICE);

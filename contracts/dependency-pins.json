@@ -2,6 +2,11 @@
   "solc": "0.8.30",
   "evmVersion": "paris",
   "openzeppelinContracts": "5.6.1",
+  "openzeppelinContractsUpgradeable": {
+    "package": "@openzeppelin/contracts-upgradeable",
+    "version": "5.6.1",
+    "scope": "Ownable2StepUpgradeable closure for the proxied Streams round registry; imported by relative path so no remapping changes; compiles for Paris"
+  },
   "openzeppelinContractsParis": {
     "npmAlias": "@openzeppelin/contracts-paris",
     "package": "@openzeppelin/contracts",
