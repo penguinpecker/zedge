@@ -4,7 +4,7 @@
 
 **Decision:** retain the selected ZEDGE V1 interface and build an original, deterministic, fully collateralized prediction-market engine. Isolate Vela behind an integration boundary. Use Vela first for encrypted orders, account state, and participant receipts in an approved test environment. Production activation depends on the gates below.
 
-The current public application remains a paper-trading prototype. Implementation has started in [contracts](../contracts/README.md), [engine](../engine/README.md), the isolated chain interface and SDK crypto evaluation. See the [security/implementation record](../security/README.md) for actual work and unresolved boundaries. This research itself does not establish a deployed private exchange.
+The current public application remains a paper-trading prototype. Implementation has started in [contracts](../contracts/README.md), [engine](../engine/README.md), the isolated chain interface, the [public round keeper](../services/keeper/README.md), SDK crypto evaluation and an [evaluation-only Vela guest](../adapters/vela/guest/README.md) run on Horizen's local Vela stack. See the [security/implementation record](../security/README.md) for actual work and unresolved boundaries. This research itself does not establish a deployed private exchange.
 
 ## Read the research
 
@@ -15,9 +15,9 @@ The current public application remains a paper-trading prototype. Implementation
 | [Horizen ecosystem and Builder Fund](horizen-builder-program.md) | The requested fund page and `#why` section, application categories, infrastructure, USDC.e, oracle dependencies, budget inputs, and grant milestones. |
 | [Product requirements and interaction inventory](product-requirements.md) | Screens, feature priorities, dialogs, small interactions, failure states, and acceptance criteria for the prediction-market platform. |
 | [Deployment preflight](deployment-preflight.md) | Live oracle availability, Chainlink alternatives, collateral proxy identity and source-verification readiness. |
-| [Mainnet deployment record](../contracts/deployment/MAINNET.md) | Confirmed Horizen registry/cache and Base Chainlink verification/publication contracts, transaction evidence and remaining integration work. |
+| [Mainnet deployment record](../contracts/deployment/MAINNET.md) | Confirmed Horizen price cache and Base Chainlink verification/publication contracts, the registry retired on 2026-10-05 and its planned replacement, transaction evidence and remaining integration work. |
 | [Chainlink Streams on Base](chainlink-streams-base.md) | Exact feed IDs, precision, verifier governance, and genuine signed-report checks. |
-| [Horizen-first native oracle route](hybrid-chain-routing.md) | Base verification with native authenticated delivery to the Horizen registry. |
+| [Horizen-first native oracle route](hybrid-chain-routing.md) | Base verification with native authenticated delivery to the Horizen price cache that the registry reads, and the 2026-10-05 note on delivery that can be priced out. |
 | [Deployment gas snapshot](deployment-costs.md) | Scoped estimates for the two original contracts, distinct from a complete exchange launch budget. |
 
 ## Findings that change the build
@@ -95,9 +95,9 @@ These are proposed modules, not directories or services already implemented:
 | --- | --- | --- |
 | `protocol/` | Market rules, versioned commands, signed domains, private/public event schemas, cross-language fixtures. | Original specification. Explicit integer bounds and canonical encoding. |
 | `engine/` | Pure Go ledger, reservations, matcher, lifecycle, redemption and fee accounting. | No network, system clock, database or Vela imports. Verify compatibility with the selected TinyGo/WASI toolchain. |
-| `adapters/vela/guest/` | Map the reviewed WASM ABI into validated core commands. | Pinned evaluation dependencies until production rights and environment are established. |
+| `adapters/vela/guest/` | Map the reviewed WASM ABI into validated core commands. (As built on 2026-10-05: an evaluation-only guest covering deployment, deposits, withdrawals, claims and a trusted clock tick, run on the local v0.2.0 stack with a software enclave, no attestation and a test token; order-book commands and round mirroring are designed, not built. See its [README](../adapters/vela/guest/README.md) and the [stack slice](../adapters/vela/stack/README.md).) | Pinned evaluation dependencies until production rights and environment are established. |
 | `adapters/vela/client/` | Deployment verification, key lifecycle, encryption, submission, receipts and reconciliation. | Pin the actual SDK implementation; test documentation discrepancies explicitly. |
-| `contracts/` | Immutable round definitions, oracle verification, admission trigger, and the selected custody/recovery integration. | No fabricated deployed addresses. Review token allowlists and administrative roles. |
+| `contracts/` | Immutable round definitions, oracle verification, admission trigger, and the selected custody/recovery integration. (As built: a round's terms are fixed at creation, but since 2026-10-05 the Streams registry is upgradeable by its owner; see the [contract README](../contracts/README.md#proxy-and-ownership).) | No fabricated deployed addresses. Review token allowlists and administrative roles. |
 | `services/` | Ciphertext relay, public indexing, oracle evidence capture, aggregate publishing and health signals. | Secrets stay server-side; private trading inputs stay encrypted. |
 | Existing React V1 | Tickets, charts, private account views, lifecycle states, disclosure and recovery entry points. | Browser state is a cache of verified results, never the financial authority. |
 
@@ -109,9 +109,9 @@ Use one confidential application containing many uniquely identified rounds. Cha
 
 A signature authenticates an observation; it does not by itself prove that a submitter chose the first eligible observation. Before selecting a provider, specify the exact opening/closing selection rule and prove how omitted or selectively chosen observations are handled. A trusted collector is an additional declared assumption, not equivalent to a unique historical observation proof.
 
-The architecture report originally evaluated Pyth's fixed-time verification, conditional on actual target-network deployment and service access. Legacy Horizen EON support must not be substituted for support on the current Horizen L3. The subsequent approved route uses Chainlink Streams verification on Base and authenticated native messaging into a Horizen registry/cache; see the [mainnet deployment record](../contracts/deployment/MAINNET.md). Continuous fresh report access and production integration remain release dependencies.
+The architecture report originally evaluated Pyth's fixed-time verification, conditional on actual target-network deployment and service access. Legacy Horizen EON support must not be substituted for support on the current Horizen L3. The subsequent approved route uses Chainlink Streams verification on Base and authenticated native messaging into a Horizen registry/cache; see the [mainnet deployment record](../contracts/deployment/MAINNET.md). The registry deployed on that route on 2026-10-04 is retired; its replacement is planned and not deployed. Continuous fresh report access and production integration remain release dependencies.
 
-Market lifecycle: `scheduled → opening pending → trading → closed → resolution pending → resolved`, with a predeclared failure/void policy. Opening evidence must be fixed before funded orders become executable. Missing evidence cannot trigger an administrator-selected replacement after the outcome is known.
+Market lifecycle: `scheduled → opening pending → trading → closed → resolution pending → resolved`, with a predeclared failure/void policy. Opening evidence must be fixed before funded orders become executable. Missing evidence cannot trigger an administrator-selected replacement after the outcome is known. The Streams registry's code keeps to this, but since 2026-10-05 its owner can replace that code, so the rule now depends on the owner key.
 
 ## Build sequence and acceptance evidence
 

@@ -26,7 +26,7 @@ jobs:
       - run: npm ci
       - run: npm run check
       - run: npm run test:keeper
-      - run: node --test contracts/scripts/broadcast-hybrid.test.mjs contracts/scripts/broadcast-hybrid-smoke.test.mjs
+      - run: node --test contracts/scripts/*.test.mjs
       - run: npm audit --audit-level=low
 
   engine:
@@ -98,6 +98,38 @@ jobs:
       # See security/README.md. A passing job is not a clean audit claim.
       - run: npm audit --audit-level=moderate
 
+  # Native tests of the Vela guest (evaluation only). No wasm is built and upstream Vela (BSL) is not
+  # fetched here, so the wasm and upstream conformance tests skip; they run locally (adapters/vela/guest/README.md).
+  # Also the stack slice's evaluation contracts (clock trigger, test token), kept out of the contracts job.
+  vela-guest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: adapters/vela/guest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: 1.27.1
+          cache: false
+      - run: test -z "$(gofmt -l .)"
+      - run: go vet ./...
+      - run: go test -count=1 ./...
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22.22.2
+      - uses: foundry-rs/foundry-toolchain@908c540300062bd5a7e473851cdb4282204cee09 # v1
+        with:
+          version: v1.7.1
+      # forge-std and OpenZeppelin come from contracts/, by relative path (adapters/vela/stack/contracts/foundry.toml).
+      - run: bash contracts/scripts/install-deps.sh
+        working-directory: .
+      - run: forge fmt --check && forge test
+        working-directory: adapters/vela/stack/contracts
+
   protocol-conformance:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -118,6 +150,11 @@ jobs:
       - run: npm ci
       - run: bash contracts/scripts/install-deps.sh
       - run: forge build --root contracts
+      # The deployment tools create only the build the committed release pins. This is the job that has
+      # both the node modules and the forge output, so the pin is compared with a real build here.
+      - run: node --test contracts/scripts/*.test.mjs
+        env:
+          ZEDGE_REQUIRE_BUILD: 1
       - run: python3 scripts/install-wasm-tools.py "$RUNNER_TEMP/zedge-tools"
       - run: bash scripts/build-wasm.sh
         env:

@@ -1,6 +1,6 @@
 # Horizen-first oracle routing
 
-Reviewed 2026-10-04. The user approved deploying supported components on Horizen and using Base for dependencies absent on Horizen. This is an explicit two-chain architecture, not a claim that a Base address exists on Horizen.
+Reviewed 2026-10-04; corrected on 2026-10-05 where marked, with an [audit note](#audit-note-2026-10-05) at the end. The user approved deploying supported components on Horizen and using Base for dependencies absent on Horizen. This is an explicit two-chain architecture, not a claim that a Base address exists on Horizen.
 
 ## Verified native route
 
@@ -29,6 +29,8 @@ Scanning 10,000 recent Base blocks found one native bridge message. Its version-
 
 This is one successful ETH-bridge message, not a ZEDGE oracle delivery, percentile, finality measurement, or availability guarantee. It demonstrates a functioning native route. It does not establish that every five-minute opening will arrive before its deadline. The 60-second observation bound must remain separate from delivery grace; a delayed message must not gain permission to substitute a later price. Current registry limits require `observationWindow + openingGrace < 300 - cutoffBuffer`. Measure actual oracle publication and delivery before funding markets, and retain deterministic timeout/void handling.
 
+**Correction, 2026-10-05.** The sampled message was not third-party traffic. Its Base transaction is the deployment account's own first transaction, a `bridgeETH` deposit that funded the same account on Horizen. The only other timing on record, the 24-second smoke publication in the [deployment record](../contracts/deployment/MAINNET.md#verification-and-smoke-status), was also sent by that account. All route-latency evidence is therefore two self-generated messages. They show that the route works. They do not show how long delivery takes for other senders, under load, or while the deposit fee is being pushed up.
+
 ## Deployment partition
 
 1. **Base:** Chainlink's existing supported Streams verifier; ZEDGE's Streams boundary adapter; a permissionless publisher that verifies a signed report, binds its feed and time window, stores its authenticated observation, and sends it through the native Base messenger.
@@ -41,7 +43,7 @@ The publisher/cache constructors bind their own predicted addresses as well as t
 
 The canonical interface is `sendMessage(address target, bytes message, uint32 minGasLimit)` payable. Version-1 delivery invokes `relayMessage(uint256 nonce,address sender,address target,uint256 value,uint256 minGasLimit,bytes message)`. Successful and failed hashes are tracked separately. Parent-to-child messages execute through derivation automatically; a failed message can be retried according to messenger rules. Set sufficient destination gas; a source receipt alone is not proof of destination success. Monitor `RelayedMessage` / `FailedRelayedMessage`, then the receiver's stored observation. [Messenger ABI and behavior](https://specs.optimism.io/protocol/messengers.html).
 
-The destination must not reapply the report's verification-expiry check to bridge arrival: Base already authenticated the report while usable. It must still validate the signed window, positive price, configured scale, nonzero report hash, and expiry not preceding observation. The registry separately enforces its own arrival deadlines. A native delivery cannot authorize late opening, alter a settled result, or make an old report fresh. Arrival populates the cache; recording the round's opening or resolution is a separate permissionless Horizen transaction, so the delivery budget must include that transaction too.
+The destination must not reapply the report's verification-expiry check to bridge arrival: Base already authenticated the report while usable. It must still validate the signed window, positive price, configured scale, nonzero report hash, and expiry not preceding observation. The registry separately enforces its own opening deadline. A native delivery cannot authorize late opening, alter a settled result, or make an old report fresh. (Corrected 2026-10-05: the registry deployed on 2026-10-04 also had a closing deadline, one hour after the observation window, and is retired for that reason. Its replacement accepts the closing observation whenever it arrives.) Arrival populates the cache; recording the round's opening or resolution is a separate permissionless Horizen transaction, so the delivery budget must include that transaction too.
 
 ## Local implementation evidence
 
@@ -72,3 +74,14 @@ Horizen's `L1Block` predeploy at `0x4200000000000000000000000000000000000015` ex
 No official turnkey Base-Streams-to-Horizen oracle relay was found. ZEDGE's publisher/cache remains custom application code requiring tests and actual end-to-end confirmation. An isolated public registry on Base would avoid messaging but would not settle Horizen custody without a similarly authenticated link; do not create independent authoritative registries with divergent outcomes.
 
 Privacy/custody cannot be marked live just because the public oracle path works. Vela's current published environments remain local and access-gated Base Sepolia; Base mainnet is listed as forthcoming, and a production Horizen Vela deployment is not established by that page. Neither native messaging nor a public registry supplies confidential order admission, custody, recovery or an attested production guest. [Vela availability](https://docs.horizen.io/vela/roadmap/).
+
+## Audit note (2026-10-05)
+
+An internal audit showed that this document's risk model was incomplete: native delivery is not only slow or fast, it is a priced resource that an outsider can make unaffordable.
+
+- Every publication or resend buys a fixed 924,355 gas of Horizen deposit capacity on the Base portal. That figure follows from the route's immutable 600,000 minimum gas limit; the one real relay used 162,474 gas. The portal burns that amount, multiplied by its own deposit base fee, inside the publishing transaction.
+- The deposit base fee has a floor of 1 gwei and no practical ceiling. It rises by up to about 2.1 times per full block, and on an idle deposit market any Base account can raise it and hold it there.
+- Above roughly 18 to 20 gwei a publication needs more gas than Base's limit of 2^24 per transaction, so nobody can publish or resend, and the price cache has no other way in. On a fork of Base on 2026-10-05, raising the fee that far cost about 0.0017 ETH and holding it cost about 0.37 ETH per hour.
+- `resendBoundary` is permissionless and unlimited. Duplicate deliveries are harmless on Horizen, but each one is a new deposit and is one way to push the fee up.
+
+The registry deployed on 2026-10-04 turned such a hold into money: an opened round could be voided at 1/2 + 1/2 one hour after its end, moving value from winners to losers. That registry is retired. The replacement has no deadline for the closing price and allows a void of an opened round only after seven days with no closing price in the cache, so a hold would have to last the whole seven days. Openings are still exposed: a round whose opening price is not recorded within 210 seconds is voided before it trades, which moves no value. The route contracts themselves are unchanged and immutable; a lower per-message gas limit or a second delivery path would need a new publisher and cache.

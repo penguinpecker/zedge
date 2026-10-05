@@ -1,17 +1,49 @@
 ZEDGE — HORIZEN / VELA SDK AND CONFIDENTIAL TRADING LEARNINGS
 Source review date: 2026-10-04 (Asia/Kolkata)
 
+CURRENT HANDOFF STATUS — 2026-10-04
+----------------------------------
+Read the local handoff document (kept out of the repository) for the complete
+takeover guide, deployed addresses, commands, privacy boundaries, completed work
+and remaining acceptance criteria. The latest user instruction pauses
+implementation for a handoff and this learning-log update. The preceding request
+to keep implementing is superseded.
+
+Last implementation commit: 0715b4be07369e921aae777a3783d0a8787b61a2
+Branch: feat/production-core; draft PR https://github.com/penguinpecker/zedge/pull/1
+That exact commit has 17/17 successful GitHub checks; it is not assumed merged
+into main. This handoff documentation is subsequent to that tested code baseline.
+
+Four public oracle/round contracts are deployed on Base and Horizen. The V1 demo
+is preserved; ?mode=chain verifies and reads the real deployed route. The keeper
+and public ERC1155 vault are implemented and tested, but the keeper is not active
+and the vault is not deployed. The engine is protocol v2 with exact 18-decimal
+Streams observations. Private custody, authenticated admission, native Vela
+integration, persistent private services and usable unilateral recovery remain
+unfinished. Production Vela access/rights and fresh Chainlink subscription access
+are unresolved. Deposits, withdrawals and real trading remain unavailable.
+
+[2026-10-05: superseded in part. The round registry among those four contracts
+is retired and its replacement is not deployed; the keeper is rewritten; the
+engine is protocol v3. See "Audit and fix program — 2026-10-05" at the end.]
+
+The entries below are chronological research/engineering notes. Earlier statements
+about unconfigured contracts, Pyth, the old engine or a failed browser visit are
+historical; use dated later evidence and the handoff for the current state.
+
 Purpose
 -------
 Record the source-backed findings from our Vela research, especially whether
 public orders can coexist with private fills, what the SDK supplies, and what
 ZEDGE must implement or validate before a production privacy claim.
 
-Evidence level: source inspection, independent agent cross-checks, and the
-read-only network observations recorded in the research reports. We have not
-demonstrated these flows in a running ZEDGE Nitro enclave, audited the platform,
+Original SDK review evidence: source inspection, internal cross-checks,
+and the read-only observations recorded in the research reports. Later dated
+entries separately record actual public oracle deployments and native delivery.
+We have not demonstrated these flows in a running ZEDGE Nitro enclave, audited the platform,
 benchmarked production execution, or observed a live deployment leaking data.
-The current ZEDGE application remains a paper-trading interface.
+The default V1 application remains a paper-trading interface; the separate chain
+mode now reads deployed public contracts. Neither is a live private exchange.
 
 Reviewed versions
 -----------------
@@ -411,6 +443,10 @@ Initial public profile: observation window 60s, opening grace 150s, resolution
 grace 3600s, cutoff buffer 30s. Late arrival cannot extend a round. Source report
 expiration is checked at Base verification; already authenticated historical data
 may arrive after expiry, subject to the independent Horizen round deadlines.
+[2026-10-05: the one-hour resolution grace is gone. The replacement registry has
+no closing deadline and a seven-day void grace, and a closing price that arrives
+late still resolves the round. The 23-second sample was the deployment account's
+own deposit, not independent traffic.]
 
 The existing engine and frontend are not automatically compatible with the new
 18-decimal registry. Do not truncate prices to fit the old uint64/int64 models or
@@ -424,6 +460,8 @@ hashes. Horizen (26514) hosts HorizenStreamsOracle and StreamsRoundRegistry.
 Base (8453) hosts ChainlinkStreamsBoundaryOracle and BaseStreamsPublisher.
 Public addresses, transactions and verification evidence are recorded in
 contracts/deployment/MAINNET.md. The original Pyth contracts remain undeployed.
+[2026-10-05: that StreamsRoundRegistry is retired with zero rounds; the other
+three contracts are kept unchanged.]
 
 RPC behavior matters operationally: Base PublicNode accepted current state and
 submission but rejected historical receipts and state calls without a token.
@@ -463,11 +501,15 @@ four local EVM BTC/ETH 5m/15m scenarios, including a one-atom ETH decline.
 A safe archive operation removes only terminal rounds with no remaining shares,
 collateral or reservations; lifetime account/evidence limits still need operations
 and migration design. AuthenticatedContext remains an external trust boundary.
+[2026-10-05: the engine and protocol are now version 3; see the last section.]
 
 The frontend mainnet manifest now binds and verifies the actual four application
 contracts and their upstream dependencies on both chains. It reads public round
 state using exact precision. This does not turn the demo into private trading.
 Funding, orders and encrypted balances remain unavailable in chain mode.
+[2026-10-05: the fourth of those contracts is the retired registry. The manifest
+must pin the replacement's proxy, implementation and owner before the site
+shows mainnet rounds again.]
 
 The new keeper fetches exact historical boundary reports using official Chainlink
 HMAC authentication, then eth_calls the real adapter before publishing. It has a
@@ -476,6 +518,8 @@ journal, sign-before-send crash tracking, canonical receipt reconciliation and
 strict source/destination deadlines. Report-access loss blocks new markets while
 cached settlement and timeout recovery remain available. No paid API credentials
 were supplied and no keeper signed mainnet transaction has been submitted.
+[2026-10-05: this keeper was replaced. Its strict deadlines and stop-on-doubt
+behaviour were the main audit findings; see the last section.]
 
 The public CollateralizedOutcomeVault mints collateral-backed Up/Down ERC1155
 pairs, merges pairs and redeems fixed settled/void payouts. It has no administrator
@@ -500,3 +544,371 @@ The original repeated check used 113 RPC methods (20 runtime downloads,70 getter
 poll intervals must not repeat that whole workload per visitor. Provider backoff,
 bounded read-only verification freshness and hidden-tab pause are availability
 requirements; they do not make the public endpoint a production availability SLA.
+
+
+Final production follow-up and handoff — 2026-10-04
+------------------------------------------------
+Implementation is paused at the user's request. The local handoff document
+records the complete repository/branch/PR state, selected design, deployment
+identities, architecture, source map, test commands, known issues and prioritized
+remaining work. No new implementation, keeper activation, contract signing or
+deployment was performed as part of this handoff task. The documentation contains
+locations and variable names only, never credentials.
+
+Selected product: V1, branded ZEDGE with the colored Z. Preserve saved alternative
+versions. This is a collateralized binary prediction-share market, not perps.
+Horizen-first routing and the user's Chainlink preference remain deliberate.
+Do not copy demo cent rounding, fees, whole-order fills or cutoff timing into the
+production ledger. Gas is ETH on both Base and the current Horizen L3; the pinned
+six-decimal collateral is Stargate USDC.e, not Circle-native USDC.
+
+Final production UI: https://zedge-markets.vercel.app/?mode=chain
+Immutable build:
+https://edge-markets-v1-p8pm4zsrn-penguinpeckers-projects.vercel.app
+Vercel deployment: dpl_GMcZi5DWQPcPa2adBvPJtQk6kv4z, production READY.
+Code baseline: 0715b4be07369e921aae777a3783d0a8787b61a2.
+
+The earlier production visit at about 12:26 UTC genuinely failed because the
+Horizen provider returned HTTP 429 / Retry-After 900. The final deployment visit
+at 12:37:49 UTC subsequently verified BOTH chains successfully after the provider
+recovered. BTC 15m correctly showed the 12:30-12:45 slot as Not scheduled; the
+observed chain state included block 27720212. Deposits and withdrawals stayed
+disabled, private balance stayed locked, and 390px mobile layout/explorer links
+passed. A passive 30-second refresh made six Horizen HTTP-200 requests and zero
+Base requests; the route-check time stayed unchanged while the round read advanced
+to 12:38:15 UTC. These are two distinct observations, not a rewritten past failure.
+The final visit did not trigger cooldown UI, so that branch was unit-tested rather
+than claimed live-tested during the successful visit.
+
+Current RPC policy: shared per-endpoint monotonic cooldown within one page's RAM,
+not across tabs, visitors or keeper processes; zero automatic retry,
+bounded numeric/HTTP-date Retry-After for 429/503, hidden-tab pause and visible
+30-second polling. Full read-only verification is cached for at most 120 seconds,
+keyed by network and the entire manifest; its TTL starts BEFORE the work. Pending
+work is shared, errors/overlong checks are not cached, refresh cannot bypass
+cooldown, and expiry removes displayed round data. The check time is visible.
+This cache never authorizes a signature, deposit or trade; keeper verification
+is separate and uncached. Public provider recovery is not a production RPC SLA.
+
+Final code verification at the baseline commit:
+[These counts are for that commit on 2026-10-04. Counts after the 2026-10-05
+fixes are in the last section.]
+- GitHub: 17/17 checks passed, zero open CodeQL alerts, zero findings in exact-
+  commit Go and JavaScript/TypeScript analyses. The branch remains a draft PR.
+- Frontend: 46 tests plus lint/build passed, including 8 RPC and 4 cache tests.
+- Keeper: 20 tests passed; broadcaster/canonical-receipt tests: 34 passed.
+- SDK encryption/session evaluation: 9 tests plus TypeScript check passed.
+- Contracts: 131 passed, zero failed; 7 optional fork checks skipped offline.
+  Earlier 7 actual fork passes are separate evidence, not inferred from skips.
+- Fuzz: 12 functions x 4,096 cases = 49,152. Five invariants each reported
+  131,072 calls with no handler reverts. Aggregate calls are not necessarily
+  distinct generated sequences. The public-vault subset is already included.
+- Whole-contract Slither: zero High/Medium and 18 Low findings (17 timestamp,
+  1 guarded publisher reentrancy-benign). Focused vault: no High/Medium/Low.
+- Engine: race/vet passed, 82.8% coverage; four local EVM scenarios produced
+  identical native/TinyGo hashes. This is not a production enclave/custody test.
+- Git history, 169 staged public files and the final static artifact had no
+  detected secret leaks. Frontend/contracts npm audits reported zero issues.
+  The isolated SDK still has one elliptic advisory represented by two Low
+  entries, and x/crypto has four unused-module advisories with no reachable or
+  imported-package vulnerability found by the recorded govulncheck run.
+
+Seven keeper findings were fixed and tested: preflight report/head timing,
+void-backlog scheduling priority, canonical revert restart handling, durable
+creation tracking before signing, corrupted fee reservations, report-access
+revocation during boundary retrieval, and the post-fsync deadline/signer race.
+Uncertain signed hashes remain persisted and must never automatically retry;
+reverted costs/nonces remain reserved. Empty EOA code is checked exactly, not
+with a generic falsy condition. Three confirmations do not mean L1 finality.
+[2026-10-05: "must never automatically retry" is superseded. For a sole operator
+whose every action is idempotent or self-rejecting, never retrying was itself a
+defect; see the last section.]
+
+Remaining work is substantial, not just deployment or credentials: a measured
+native Vela guest and verified ingress; trusted canonical pre-cutoff admission;
+funded private custody and exact-once deposit/withdrawal effects; chain/endpoint/
+application/code/root/sequence binding; withdrawal nullifiers; durable encrypted
+state and latest-state witnesses; independent availability and unilateral exits
+that prevent concurrent private spending; key registration/rotation/recovery;
+real private APIs, quote/chart services and funded UI; actual liquidity, capacity
+migration, fee treasury policy, operations and independent integrated audit.
+Do not trust caller-supplied AuthenticatedContext or System=true, call a scenario
+WASI binary a Vela deployment, or label public ERC1155 transfers confidential.
+
+Next useful integration milestone: one supported BTC 15m test-collateral round
+with authentic encrypted admission, actual backing, real counterparties, partial
+fills/cancel, authenticated settlement or timeout void, real withdrawal and
+operator-failure recovery; then all four markets and production qualification.
+Chainlink subscription credentials and a supported/permitted production Vela
+environment remain external gates. An Etherscan key or extra wallet ETH supplies
+neither. No vendor contact, grant submission or subscription purchase occurred.
+
+Handoff precision notes from the final internal cross-check:
+- Evidence must execute on chain by the opening/resolution deadline, inclusive;
+  broadcasting before the deadline does not ensure timely inclusion. Trading
+  ends strictly at cutoff, and void is strictly after its applicable deadline.
+  [2026-10-05: there is no resolution deadline any more. The opening deadline
+  and the strictly-after rule for void still apply.]
+- Recipient metadata observed by the outside-enclave manager/operator is not
+  automatically proof that every recipient ID is published on the public chain.
+- A better sell execution price can increase absolute fees above the authorized
+  cap, causing atomic rejection. Clients must authorize the intended documented
+  worst-case bound; do not silently raise it after signing.
+- The frontend cooldown and verification cache share only one page's RAM. They
+  do not coordinate separate tabs, visitors, keeper instances or RPC quotas.
+
+
+Audit and fix program — 2026-10-05
+----------------------------------
+An internal audit of the deployed route, the keeper, the engine and the chain
+interface ran on 2026-10-05, with proofs of concept on local chains and forks.
+It is same-team work, not an independent audit. No funds were at risk: no
+contract holds money and the registry had zero rounds. The fixes are in source.
+Nothing new is deployed and nothing was sent to a real chain.
+
+State after the fixes: three contracts stay live and unchanged (the Base
+adapter, the Base publisher and the Horizen price cache). The Horizen round
+registry deployed on 2026-10-04 is retired. Its replacement is planned and not
+deployed. Addresses and hashes are in contracts/deployment/MAINNET.md.
+
+What the audit found, by class, and how each class was fixed
+
+1. A timeout that pays out is an attack surface.
+   The retired registry let anyone void an opened round one hour after its end
+   and pay 1/2 + 1/2 when no result had been recorded. An outsider could cause
+   that on purpose: each price message buys a fixed 924,355 gas of Horizen
+   deposit capacity on Base, the deposit fee can be raised by anyone, and above
+   roughly 18 to 20 gwei no publication fits into one Base transaction. The same
+   void also fired when the closing price was already cached on Horizen and
+   simply nobody had called resolve.
+   Fix: a new registry. Resolution has no deadline. An opened round can be
+   voided only strictly after end + 60 s + 7 days, and only while the price
+   cache holds no closing price for it; otherwise the call reverts and the round
+   must be resolved.
+   Lesson: never let "nobody acted in time" move value between winners and
+   losers. Make the timeout long compared with what blocking costs, and make it
+   give way to evidence that exists.
+
+2. Immutable everywhere leaves no repair.
+   A billing, access or deactivation change at the upstream verifier would have
+   stranded an immutable registry and every round on it.
+   Fix: the registry is a UUPS proxy. The owner can upgrade it or transfer
+   ownership in two steps, nothing else; renouncing is disabled. A test pins the
+   storage layout, so an upgrade that moves a variable fails the suite.
+   Cost: the owner key is a new trust assumption. An upgrade can change any
+   rule and any stored result. The three route contracts stay immutable, so an
+   upstream break still needs new route contracts; the registry can then be
+   pointed at them.
+
+3. A sole operator must not exit on routine trouble.
+   The first keeper treated nearly every surprise as fatal: a fee above a fixed
+   gas number, somebody else taking its next step, a rate-limited endpoint, a
+   report that was not valid yet, any change in 16 pinned upstream dependencies,
+   a lifetime allowance of about ten Base transactions, a signed transaction
+   that never landed. It never retried a reverted publication. It sent one
+   transaction per ten-second step, so six transactions plus the relay could
+   miss the 210-second opening window at a 15-minute boundary. Every exit left
+   rounds to be voided.
+   Fix: a rewrite on four rules. (a) Exit only when continuing could
+   double-spend, overspend, or act for a deployment or signer that cannot be
+   identified. (b) "Somebody else already did it" is success. (c) "Not yet" is a
+   wait with backoff that holds up only that action or that chain. (d) A
+   reverted action is tried again under a new attempt number. Spending is
+   limited by a rolling 24-hour budget per chain in wei; each transaction is
+   priced from live fees and may take at most one twentieth of that budget.
+   Each chain has its own lane, and neither waits for the other.
+   Lesson: sort every failure into done, retry, skip or stop before writing the
+   loop. Stopping is right for a signer that might double-spend. It is wrong
+   for everything else when every action is permissionless and either
+   idempotent or self-rejecting.
+
+4. A mirror must judge events on the source's clock.
+   The engine compared registry deadlines with the time at which it processed a
+   command. A result mined at the deadline and processed a second later was
+   rejected, and the engine would then pay 1/2 + 1/2 where the registry pays
+   the winner. Its merge rule also differed from the vault's.
+   Fix: protocol version 3. Open, resolve and void commands carry the registry
+   block time of the event; windows are judged at that time, which only has to
+   be no later than the engine's own time. A complete pair merges at any time.
+   Lesson: mirror a chain event at its inclusion time. Mirror a void only from
+   a recorded void, never from a clock or from a "Voidable" read. The old
+   conformance run could not see this bug because it processed every event at
+   its own timestamp; it now applies each event one second late.
+
+5. Status text must cover dead ends.
+   The chain interface said "Awaiting resolution" and "Awaiting opening
+   observation" for rounds that were voided or could only be voided, and the
+   rules text blamed "missing evidence" where the contract's trigger was that
+   nobody had recorded the result in time.
+   Lesson: write copy for every phase the contract can report, and name the
+   trigger the contract actually uses.
+
+6. A guard nobody asserts is not a guard yet.
+   Several registry guards had no test, including the unknown-round check in
+   voidRound; without it a round could be voided before it was created and
+   would then be created already void. Each now has a test, and 55 scripted
+   mutations of the registry were all caught.
+   Test counts in the documents had drifted (106, then 131, now 152).
+   Lesson: date every count and say which command produced it.
+
+7. Check where evidence came from.
+   The "one bridge message found by scanning" was the deployment account's own
+   funding deposit. Both delivery timings on record, 23 s and 24 s, are
+   self-generated. They show that the route works and nothing about load.
+
+What remains a trust assumption
+
+- The registry owner key. The planned owner is the deployment account.
+- Chainlink. The first published report that covers a boundary wins, and that
+  only one such report exists is Chainlink's guarantee, not something the
+  contracts enforce. If no observation is produced within 60 seconds after a
+  boundary, no report is acceptable for it.
+- The OP Stack path. Sequencing and derivation decide when a message lands.
+  Anyone can raise the deposit fee or resend stored observations without limit.
+  This can still delay prices and cost the operator an opening.
+- The opening window. An opening not recorded within 210 seconds voids the
+  round before it trades. A five-minute round may trade for only 60 seconds.
+- The seven-day lock. If a closing price can never be published, one-sided
+  positions wait seven days for the void. Complete pairs can merge at any time.
+- USDC.e, the verifier, the messengers and the portal keep their own owners.
+
+What an operator must know
+
+- Nothing runs until the replacement registry is deployed and the release file
+  says so. The keeper refuses a planned release, except in rehearsal mode
+  against local forks.
+- An address is not an identity. 0xdD3bEAA92E5819333A5D5ccD185704427fAB0e91 is
+  the retired registry on Horizen and the live adapter on Base. The planned
+  implementation address on Horizen is the same string as the Base publisher.
+  Always key on chain and address together.
+- The planned registry addresses come from the deployment account's Horizen
+  nonce. Any other transaction from that account on Horizen first changes both
+  addresses and every round ID derived from them.
+- At the registry address the code is a generic proxy. Verify the
+  implementation slot, the implementation's code hash, owner(), pendingOwner()
+  and the rules hash. The implementation's code embeds its own address, so its
+  hash is only valid at that address.
+- Pin the proxy address, never a version string. The bare implementation
+  answers version() and accepts createRound and voidRound on its own empty
+  storage. Never call proxiableUUID() through the proxy; it reverts.
+- An upgrade or a new owner is a different deployment. The keeper stops on it
+  by design, and the site must show mainnet as unavailable, until a reviewed
+  release names the new state.
+- "Voidable" on an opened round means only that seven days passed with nothing
+  cached. The closing report stays verifiable on Base for about 30 days and a
+  recorded void is final. Publish, relay and resolve first; void only when no
+  report can be obtained.
+- The keeper needs: one process per wallet under a supervisor; a state
+  directory on a local disk, never a network share; a host clock within five
+  seconds (the report service rejects anything further off); an endpoint on
+  each chain that serves transaction receipts; a private Horizen endpoint (the
+  public one has answered 429 with Retry-After 900). Do not run it from a
+  timer in one-shot mode: relay timers and backoff live in the process.
+- The keeper wallet is for the keeper only. A transaction sent from it by hand
+  looks like a stolen key, stops the keeper, and needs a new state directory.
+- Budget: one number per chain for a rolling 24 hours; a single transaction
+  may reserve at most one twentieth of it. At 2026-10-04 fees a Base
+  publication cost about 0.000007 ETH and there are 576 a day, so about
+  0.004 ETH a day on Base and well under 0.001 ETH on Horizen. These are
+  estimates, not measurements of sustained operation.
+- Registry calls take empty evidence bytes. The price cache rejects anything
+  else.
+- An engine round must be created before its start, together with its registry
+  round. A round the engine never created cannot be mirrored later.
+
+Smaller technical notes worth keeping
+
+- OpenZeppelin Contracts Upgradeable 5.6.1 has no upgradeable reentrancy guard.
+  The plain 5.6.1 guard keeps its flag in a namespaced slot where zero reads as
+  "not entered", so it is safe behind a proxy without an initializer.
+- ERC1967Proxy 5.6.1 reverts on empty initialisation data, so the proxy cannot
+  be deployed uninitialised and front-run.
+- The proxy and upgrade code compiles for the Paris EVM target; nothing in it
+  needs transient storage or MCOPY. The three live contracts' bytecode is
+  byte-identical before and after.
+- settlementGrace and resolutionDeadline still exist in the undeployed Pyth
+  registry and its ABI. They are not leftovers; do not rename them.
+
+Verification on 2026-10-05 (local; see security/WHOLE-SYSTEM-REVIEW.md)
+
+- Contracts: 152 passed, 0 failed, 8 fork tests skipped offline (160 entries,
+  14 suites); 13 fuzz functions at 4,096 cases; six invariants at 131,072 calls
+  each with no handler reverts. Slither: 18 Low, zero Medium/High.
+- Keeper: 62 tests, with at least one regression per audit finding and a
+  simulated-clock timing run in which all four openings at a 15-minute boundary
+  were recorded within about 40 seconds at 250 ms per request.
+- Engine: race and vet pass, 83.5% statement coverage.
+- Conformance: six local rounds on the proxied registry, including a late
+  resolution and a timeout void; native Go and TinyGo output identical.
+
+Not verified: the live report service with a subscription, what it returns for
+a second that has no report of its own, sustained keeper operation, and any
+mainnet transaction under the new rules. An independent audit is still needed.
+
+
+Dress rehearsal and Vela evaluation slice — 2026-10-05
+------------------------------------------------------
+Both ran on this machine against local chains only. Nothing was sent to a
+public chain and nothing was deployed.
+
+Keeper dress rehearsal (scripts/rehearsal/README.md). The unmodified keeper ran
+--watch --rehearsal on Anvil forks of Base and Horizen at their live heads,
+with the planned registry deployed at its planned address by the deployment
+tools in rehearsal mode. Stand-ins: a test verifier in place of Chainlink's (it
+checks no signature), a local report service with synthetic prices, and a
+harness relay with a fixed delay in place of the bridge. Four runs of 24 to 30
+minutes. In the two without faults, publications mined 3 to 5 s after each
+boundary, every market opened 28 to 34 s after its boundary, and rounds that
+ended during a run resolved within 40 s. In the two with faults, one per
+boundary (a gap second, a Horizen 429, a deposit fee above the keeper's cap for
+two minutes, a closing price relayed 300 s late and six and a half minutes of
+front-running), every market opened inside 210 s except the one whose opening
+price was held back on purpose (voided as unopened), the late round resolved
+and was never voided, and the keeper never stopped. The gas it used, priced at
+that evening's live fees, is about 0.0039 ETH a day on Base and 0.00025 ETH a
+day on Horizen, in line with the earlier estimate.
+Not shown: the live report service and DON signatures, the real bridge, real
+fees, public-endpoint latency, the seven-day overdue path, restarts and
+reorganisations.
+
+- A fork is not the chain. Anvil estimates gas past Base's 2^24
+  per-transaction cap; Base refuses such an eth_estimateGas with -32003 "gas
+  required exceeds" (eth_call is not capped). The keeper read that refusal as
+  an endpoint failure and backed off all of Base for up to a minute, which can
+  cost an opening after a fee spike. Fixed: it is a wait on that one action.
+  For every path a rehearsal fakes, probe what the real endpoint answers.
+- A lone reverted registry step after which the round moves on is a lost race,
+  not an alert. A raced publication or relay still costs a second bridge
+  message, because the route contract accepts repeats.
+- "No report" for a boundary whose report would still verify on Base proves
+  nothing: a partial outage of the historical lookup looks the same. The keeper
+  now counts such answers toward voiding an opened round only once any covering
+  report would have expired, about 30 days after the boundary. Cost: an opened
+  round whose closing report never existed is voided by the keeper about 30
+  days after its end, not seven. voidRound is permissionless, so anyone can void
+  it by hand once the registry's seven-day grace has passed.
+
+Vela evaluation slice (adapters/vela/stack/README.md). The ZEDGE guest wasm ran
+on Horizen's local Vela v0.2.0 Docker stack: software TEE with fixed
+development keys, no attestation, chain 31337, a test token and the registry on
+an unsigned fixture oracle; the sender, amount and time the guest sees come
+from the manager. 106 of 106 checks passed from clean volumes. Key
+registration, deposit, withdrawal, claim, private refusals, refunds and the
+trigger's clock behaved as specified, and app custody reconciled exactly with
+the chain and with the engine's own ledger. Executor work was a few
+milliseconds per request on states of a few kilobytes; the manager handled one
+transition per 5-second poll (the starter kit's setting).
+Not shown: confidentiality, attestation, a genuine sender, amount or time, the
+order book, round mirroring, MaxActivations/MaxSweeps on a full book, and
+performance on real hardware.
+
+- The v0.2.0 manager does not recover. Restarted in the second between its
+  state update being mined and its seeing the inclusion, it rolls back its
+  database and then refuses to start for good; with its database removed it
+  panics on every start. Either way no request is processed again and app
+  custody has no way out. This is the "no exit" risk, observed.
+- Every deposit result is logged at INFO with the whole guest state in clear,
+  salt and ledger included, plus the receipt plaintext and its recipient.
+  Nothing is private from the host on v0.2.0.
+- Anvil drops an evm_increaseTime offset across docker compose down/up. Block
+  time then goes backwards and the guest rightly refuses later ticks.
