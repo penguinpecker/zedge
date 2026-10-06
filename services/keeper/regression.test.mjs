@@ -11,23 +11,24 @@ import { tmpdir, hostname } from 'node:os';
 import { join } from 'node:path';
 import { HttpRequestError, TimeoutError, RpcRequestError, CallExecutionError, ContractFunctionExecutionError, toFunctionSelector, keccak256, toHex, parseAbi } from 'viem';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
-import { simulate, fixture, BTC, ETH, RECEIPTS, MULTICALL3 } from './sim.mjs';
+import { simulate, fixture, allMarkets, BTC, ETH, RECEIPTS, MULTICALL3 } from './sim.mjs';
 import { step, plan, settings } from './main.mjs';
 import { createChainAccess } from './chain.mjs';
 import { Journal, spent } from './journal.mjs';
 import { StreamsClient } from './streams.mjs';
 import { classify } from './errors.mjs';
 
-const T = 1_800_000_000; // aligned to 300 and 900: four rounds open here and four close here
+const T = 1_800_000_000; // aligned to 300 and 900: four rounds open here and four close here (all four markets, see keeper)
 const REGISTRY = 'StreamsRoundRegistry', PUBLISHER = 'BaseStreamsPublisher';
 
-// A keeper on a pinned host clock starting `at` (seconds); run(until) ticks it once per simulated second.
+// A keeper on a pinned host clock starting `at` (seconds); run(until) ticks it once per simulated second. It works
+// all four markets the registry knows (allMarkets), as these scenarios were written for.
 // Date.now is mocked once per test and follows the newest keeper's clock: the runner restores mocks oldest first,
 // so a second mock of the same method would leave the first one in place for every test that follows.
 const clocks = new WeakMap();
 async function keeper(t, at, journal) {
   const clock = { now: at * 1000 };
-  if (!clocks.has(t)) { clocks.set(t, {}); t.mock.method(Date, 'now', () => clocks.get(t).current.now); }
+  if (!clocks.has(t)) { clocks.set(t, {}); allMarkets(t); t.mock.method(Date, 'now', () => clocks.get(t).current.now); }
   clocks.get(t).current = clock;
   const s = await simulate(), k = { s, clock, journal: journal ?? s.journal(), world: {}, log: [] };
   k.run = async until => {

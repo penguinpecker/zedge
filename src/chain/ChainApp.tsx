@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ArrowDownRight, ArrowSquareOut, ArrowUpRight, ArrowsClockwise, CaretLeft, CaretRight, ChartLine, CurrencyBtc, CurrencyEth, Info, LockKey, Wallet } from "@phosphor-icons/react";
+import { ArrowDownRight, ArrowSquareOut, ArrowUpRight, ArrowsClockwise, CaretLeft, CaretRight, ChartLine, CurrencyBtc, Info, LockKey, Wallet } from "@phosphor-icons/react";
 import AccountDrawer, { type DrawerView } from "./AccountDrawer";
 import SiteFooter from "../components/SiteFooter";
 import { DEFAULT_NETWORK, isNetworkId, NETWORKS, type NetworkId } from "./networks.ts";
@@ -21,11 +21,9 @@ function networkError(network: NetworkId) {
   return remaining > 0 ? `Network busy. Retrying after ${verificationTime(Date.now() + remaining)} UTC.` : "The public network is busy or unavailable. Please try again shortly.";
 }
 
+// The contracts support BTC and ETH rounds of 5 and 15 minutes; only BTC 15-minute rounds are offered for now.
 const MARKETS = [
-  { id: "btc-5m", asset: "BTC", name: "Bitcoin", duration: 300, assetId: 0 },
   { id: "btc-15m", asset: "BTC", name: "Bitcoin", duration: 900, assetId: 0 },
-  { id: "eth-5m", asset: "ETH", name: "Ethereum", duration: 300, assetId: 1 },
-  { id: "eth-15m", asset: "ETH", name: "Ethereum", duration: 900, assetId: 1 },
 ] as const;
 type Connection = {
   network: NetworkId;
@@ -49,7 +47,7 @@ export default function ChainApp() {
   const [refresh, setRefresh] = useState(0);
   const [refreshing, setRefreshing] = useState(true);
   const [connection, setConnection] = useState<Connection | null>(null);
-  const [marketIndex, setMarketIndex] = useState(1);
+  const [marketIndex, setMarketIndex] = useState(0);
   const [page, setPage] = useState<"markets" | "portfolio" | "history">("markets");
   const [drawer, setDrawer] = useState<DrawerView | null>(null);
   const [outcome, setOutcome] = useState<"Up" | "Down">("Up");
@@ -198,7 +196,7 @@ export default function ChainApp() {
       {active?.rpcError && <p className="chain-error" role="alert">{active.rpcError}</p>}
       {wallet.session && !sameNetwork && <div className="chain-network-warning" role="status">Your wallet uses a different network.<button onClick={openAccount}>Review connection <CaretRight /></button></div>}
       {page === "markets" ? <>
-        <section className="chain-market-cards" aria-label="Choose a market">{MARKETS.map((item, index) => <button className={`chain-market-card ${marketIndex === index ? "selected" : ""}`} key={item.id} aria-pressed={marketIndex === index} onClick={() => chooseMarket(index)}><span className="chain-card-heading"><span className={`coin ${item.asset.toLowerCase()} small`}>{item.asset === "BTC" ? <CurrencyBtc weight="bold" /> : <CurrencyEth weight="fill" />}</span><strong>{item.name}</strong><span className="chain-duration">{item.duration / 60}m</span></span><span className="chain-card-question">Higher or lower?</span><span className="chain-card-prices"><span>Up <b>—</b></span><span>Down <b>—</b></span></span><span className="chain-card-foot">{verified ? "View round" : "Unavailable"}<CaretRight /></span></button>)}</section>
+        <section className="chain-market-cards" aria-label="Choose a market">{MARKETS.map((item, index) => <button className={`chain-market-card ${marketIndex === index ? "selected" : ""}`} key={item.id} aria-pressed={marketIndex === index} onClick={() => chooseMarket(index)}><span className="chain-card-heading"><span className={`coin ${item.asset.toLowerCase()} small`}><CurrencyBtc weight="bold" /></span><strong>{item.name}</strong><span className="chain-duration">{item.duration / 60}m</span></span><span className="chain-card-question">Higher or lower?</span><span className="chain-card-prices"><span>Up <b>—</b></span><span>Down <b>—</b></span></span><span className="chain-card-foot">{verified ? "View round" : "Unavailable"}<CaretRight /></span></button>)}</section>
         <div className="workspace-label"><div><span>CRYPTO</span><CaretRight size={11} /><span>{market.asset}</span><CaretRight size={11} /><strong>{market.duration / 60} MIN UP / DOWN</strong></div></div>
         <div className="chain-workspace">
           <div className="chain-left-column">

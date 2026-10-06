@@ -41,13 +41,13 @@ export function validateBoundary(observation, boundary, sourceTime, window = 60)
     && sourceTime <= observation.expiresAt, 'STREAMS_BOUNDARY_WINDOW');
 }
 
-async function boundedJSON(response) {
-  requireCondition(response.body && Number(response.headers.get('content-length') ?? 0) <= 131072, 'STREAMS_RESPONSE_SIZE');
+export async function boundedJSON(response, limit = 131072) {
+  requireCondition(response.body && Number(response.headers.get('content-length') ?? 0) <= limit, 'STREAMS_RESPONSE_SIZE');
   const reader = response.body.getReader(); const chunks = []; let size = 0;
   try {
     while (true) {
       const item = await reader.read(); if (item.done) break;
-      size += item.value.length; requireCondition(size <= 131072, 'STREAMS_RESPONSE_SIZE'); chunks.push(Buffer.from(item.value));
+      size += item.value.length; requireCondition(size <= limit, 'STREAMS_RESPONSE_SIZE'); chunks.push(Buffer.from(item.value));
     }
     return JSON.parse(Buffer.concat(chunks).toString('utf8'));
   } finally { await reader.cancel().catch(() => {}); }

@@ -10,6 +10,7 @@ import { decodeFunctionData, encodeFunctionResult, encodeErrorResult, encodeAbiP
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { createChainAccess } from './chain.mjs';
 import { StreamsClient } from './streams.mjs';
+import { MARKETS } from './lifecycle.mjs';
 
 export const BTC = '0x00039d9e45394f473ab1f050a1b963e6b05351e52d71e507509ada0c95ed75b8';
 export const ETH = '0x000362205e10b3a147d02792eccee483dca6c7b44ecce7012cb8c6e0b68b3ae9';
@@ -17,6 +18,11 @@ const ZERO32 = `0x${'0'.repeat(64)}`, GAS_ORACLE = '0x42000000000000000000000000
 const IMPLEMENTATION_SLOT = '0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc';
 const URLS = { base: 'https://base.sim.invalid', horizen: 'https://horizen.sim.invalid' };
 export const RECEIPTS = 'https://mainnet.base.org'; // the profile's receipt endpoint for Base (its default endpoint serves none); here it is the same simulated Base
+// Every market the registry knows. The keeper works MARKETS (lifecycle.mjs: BTC 15-minute rounds); the audit
+// scenarios were written for, and still run, all four at once (two feeds and two durations meeting at one boundary):
+// allMarkets(t) widens MARKETS to these for the rest of test t.
+export const ALL_MARKETS = [300, 900].flatMap(duration => [0, 1].map(asset => ({ asset, duration })));
+export function allMarkets(t) { const kept = MARKETS.splice(0, Infinity, ...ALL_MARKETS); t.after(() => { MARKETS.splice(0, Infinity, ...kept); }); }
 // Multicall3 at its canonical address on both chains, as the keeper calls it: delete s.codes[MULTICALL3] for a chain without it.
 export const MULTICALL3 = '0xca11bde05977b3631167028862be2a173976ca11';
 const multicallAbi = parseAbi(['struct Call3 { address target; bool allowFailure; bytes callData; }', 'struct Result { bool success; bytes returnData; }',
@@ -75,8 +81,8 @@ export async function simulate({ rtt = 0, relay = 24, status = 'deployed', key =
     [26514n, ADDRESS.StreamsRoundRegistry, files.release.rulesHash, asset, duration, BigInt(start)]));
   s.seed = (asset, duration, start, openedAt = 0) => { const id = s.roundId(asset, duration, start);
     s.rounds.set(id, { asset, duration, start, end: start + duration, openingDeadline: start + 210, voidableAfter: start + duration + 60 + 300, openedAt, resolvedAt: 0, outcome: 0 }); return id; };
-  // Every market's rounds around boundary T: the one ending there (opened), the one starting there and the next two.
-  s.schedule = T => { for (const asset of [0, 1]) for (const duration of [300, 900]) for (let i = -1; i <= 2; i++) s.seed(asset, duration, T + i * duration, i < 0 ? T - duration + 30 : 0); };
+  // The rounds of every market worked (MARKETS) around boundary T: the one ending there (opened), the one starting there and the next two.
+  s.schedule = T => { for (const { asset, duration } of MARKETS) for (let i = -1; i <= 2; i++) s.seed(asset, duration, T + i * duration, i < 0 ? T - duration + 30 : 0); };
   // An observation already published on Base and delivered to the Horizen cache at time `at`.
   s.deliver = (feed, boundary, at) => { const { fullReport } = s.report(feed, boundary), entry = { observation: s.reports.get(fullReport.toLowerCase()), at };
     s.published.set(`${feed}:${boundary}`, entry); s.cache.set(`${feed}:${boundary}`, entry); return fullReport; };

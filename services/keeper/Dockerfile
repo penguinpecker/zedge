@@ -12,9 +12,9 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 COPY contracts/abi/*.json contracts/abi/
 COPY contracts/deployment/hybrid-mainnet.json contracts/deployment/mainnet-addresses.json contracts/deployment/
-# The test suite's one fixture, so the image can prove itself on the host that will run it (see README).
+# The test suite's two fixtures, so the image can prove itself on the host that will run it (see README).
 COPY research/chainlink-streams-base.md research/
-COPY services/keeper/*.mjs services/keeper/
+COPY services/keeper/*.mjs services/keeper/solana-fixtures.json services/keeper/
 # The journal lives on a volume owned by the unprivileged user the keeper runs as (uid 1000).
 RUN install -d -o node -g node -m 700 /state
 USER node

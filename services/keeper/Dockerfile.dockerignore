@@ -8,3 +8,4 @@
 !contracts/deployment/mainnet-addresses.json
 !research/chainlink-streams-base.md
 !services/keeper/*.mjs
+!services/keeper/solana-fixtures.json

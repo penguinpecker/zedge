@@ -5,9 +5,10 @@ import { fileURLToPath } from 'node:url';
 import { privateKeyToAccount } from 'viem/accounts';
 import { keccak256, toHex } from 'viem';
 import { StreamsClient, requireCondition, validateBoundary } from './streams.mjs';
+import { SolanaReports, withFallback } from './solana.mjs';
 import { Journal, privateFile, encodeJSON, spent, FINAL, DAILY_MAXIMUM } from './journal.mjs';
 import { createChainAccess, sendOnce, reconcile, held, heldUntil, defaultStateDirectory } from './chain.mjs';
-import { schedules, chooseAction, orderedActions } from './lifecycle.mjs';
+import { MARKETS, schedules, chooseAction, orderedActions } from './lifecycle.mjs';
 import { classify } from './errors.mjs';
 
 const registry = 'StreamsRoundRegistry';
@@ -16,7 +17,7 @@ const destination = 'HorizenStreamsOracle';
 const MAX_REVERTS = 5; // on-chain reverts of one intent per rolling day before it is left alone
 const MAX_RESENDS = 4; // relays of one stored observation per rolling day
 const RESEND_AFTER = 60; // seconds an observation may sit on Base undelivered before the first relay; doubles per relay
-const LOOK = 2700, LOOK_EVERY = 15000; // a new state directory reads this many seconds of older boundaries (24 rounds) in one look, at most this often
+const LOOK = 2700, LOOK_EVERY = 15000; // a new state directory reads this many seconds of older boundaries (three BTC rounds) in one look, at most this often
 const OPENING_RETRY = 15000; // longest wait between tries of an action an opening depends on (its window is 210 s)
 const SETTLED = 180; // seconds a round's phase must have stood before reads of it are spared; until then a reorganisation could still undo it
 const GIVE_UP = 120; // seconds after its void time, and of this process's own attempts, before the keeper voids an opened round (Voidable rounds)
@@ -62,8 +63,17 @@ export async function settings(option) {
       const v = env[`KEEPER_${chain.toUpperCase()}_DAILY_BUDGET_WEI`]; requireCondition(/^[1-9][0-9]{0,18}$/.test(v ?? ''), 'KEEPER_BUDGET_CONFIG');
       budgets[chain] = BigInt(v); requireCondition(budgets[chain] <= DAILY_MAXIMUM[chain], 'KEEPER_BUDGET_CONFIG');
     }
+    // Where signed reports come from: the paid Data Streams API (the default), or the copies of the same reports in
+    // public Solana transactions (solana.mjs), which needs no credentials; with credentials as well, the paid API
+    // stands behind the copies (withFallback). Either way each one is checked here and by the Base adapter before
+    // anything is signed.
+    const source = env.KEEPER_REPORT_SOURCE ?? 'chainlink';
+    requireCondition(['chainlink', 'solana'].includes(source), 'KEEPER_REPORT_SOURCE');
     const origin = option.rehearsal && env.KEEPER_STREAMS_ORIGIN ? { origin: env.KEEPER_STREAMS_ORIGIN } : {};
-    return { rpc, account, budgets, streams: new StreamsClient({ username: env.CHAINLINK_STREAMS_USERNAME, secret: env.CHAINLINK_STREAMS_SECRET, ...origin }) };
+    const paid = () => new StreamsClient({ username: env.CHAINLINK_STREAMS_USERNAME, secret: env.CHAINLINK_STREAMS_SECRET, ...origin });
+    if (source === 'chainlink') return { rpc, account, budgets, streams: paid() };
+    const free = new SolanaReports({ url: env.KEEPER_SOLANA_RPC_URL || undefined });
+    return { rpc, account, budgets, streams: env.CHAINLINK_STREAMS_USERNAME || env.CHAINLINK_STREAMS_SECRET ? withFallback(free, paid()) : free };
   } finally { bytes.fill(0); }
 }
 
@@ -92,7 +102,8 @@ export async function discover(access, persisted = {}, lookBack = 4800) {
   const specs = new Map(schedules(wall, lookBack).map(s => [name(s), s]));
   for (const spec of Object.values(persisted)) {
     requireCondition([0, 1].includes(spec.asset) && [300, 900].includes(spec.duration) && Number.isSafeInteger(spec.start), 'KEEPER_PERSISTED_ROUND');
-    specs.set(name(spec), spec);
+    // A round of another market (an earlier build worked all four) stays on record and is left alone.
+    if (MARKETS.some(m => m.asset === spec.asset && m.duration === spec.duration)) specs.set(name(spec), spec);
   }
   requireCondition(specs.size <= 1024, 'KEEPER_ACTIVE_CAPACITY');
   const memo = access.rounds ??= new Map(), entries = [...specs.values()], unknown = entries.filter(s => !memo.has(name(s)));
@@ -134,8 +145,8 @@ export async function discover(access, persisted = {}, lookBack = 4800) {
 // A new state directory knows only the rounds of the last 80 minutes. An opened round that was never resolved can
 // still hold funds however old it is: awaiting resolution with its closing price cached, or Voidable. So a new
 // directory also walks back seven days (LOOK_END, a fixed recovery depth; it was the void grace until 2026-10-06),
-// newest first, and tracks every such round. That is about 5,400 rounds, read 24 at a time and never more often than
-// every 15 seconds (an hour or two in all), so a rate-limited endpoint sees no burst on top of a boundary. The
+// newest first, and tracks every such round. That is 672 rounds, read three at a time and never more often than
+// every 15 seconds (about an hour in all), so a rate-limited endpoint sees no burst on top of a boundary. The
 // position, and where the walk ends (fixed by its first look, so that the hours it takes do not move the end past
 // rounds that were pending when it began), are kept in the journal: a restart carries on where the walk was.
 async function lookBack(access, journal, world, now) {
@@ -144,7 +155,7 @@ async function lookBack(access, journal, world, now) {
   world.looked = Date.now();
   data.catchUpEnd ??= now - LOOK_END;
   const top = Math.min(data.catchUp, Math.ceil((now - 4800) / 900) * 900), specs = [];
-  for (const duration of [300, 900]) for (const asset of [0, 1]) for (let start = top - duration; start >= top - LOOK && start > 0; start -= duration) specs.push({ asset, duration, start });
+  for (const { asset, duration } of MARKETS) for (let start = top - duration; start >= top - LOOK && start > 0; start -= duration) specs.push({ asset, duration, start });
   const ids = (await look(access, 'horizen', specs.map(s => [registry, 'roundIdFor', [s.asset, s.duration, BigInt(s.start)]]))).results;
   const phases = (await look(access, 'horizen', ids.map(id => [registry, 'phase', [id]]))).results;
   // An opened Voidable one is still worked (Voidable rounds); one nobody opened holds nothing and is left alone.
@@ -311,7 +322,7 @@ export async function step(access, journal, auth, world = {}) {
   const fetchReport = async (feedId, boundary) => {
     try {
       const report = await auth.streams.report(feedId, boundary, window);
-      if (boundary === undefined) requireCondition(report.observation.observationsTimestamp >= Date.now() / 1000 - 60, 'KEEPER_STREAMS_STALE');
+      if (boundary === undefined) requireCondition(report.observation.observationsTimestamp >= Date.now() / 1000 - (auth.streams.latestWithin ?? 60), 'KEEPER_STREAMS_STALE');
       feeds.set(feedId, { ok: true, at: Date.now(), okAt: Date.now(), observed: report.observation.observationsTimestamp }); return report;
     } catch (error) {
       // A miss for one boundary is an answer, not an outage: the service is up and accepted this account.
@@ -359,7 +370,13 @@ export async function step(access, journal, auth, world = {}) {
         requireCondition(report.observation.observationsTimestamp <= base.now, 'STREAMS_REPORT_AHEAD_OF_BASE');
         validateBoundary(report.observation, boundary, base.now, window);
       } catch (error) { if (error.next) await witness(action, error); throw error; }
-      return send(action.id, access.call(source, 'publishBoundary', [feedId, BigInt(boundary), report.payload]), report.observation.reportHash);
+      try { return await send(action.id, access.call(source, 'publishBoundary', [feedId, BigInt(boundary), report.payload]), report.observation.reportHash); }
+      catch (error) {
+        // The Base adapter refused this report in simulation, or verified a different one: it is not tried again. The
+        // next try asks the source afresh, and the Solana source then offers its next copy (solana.mjs).
+        if (/^REVERT_|^KEEPER_STREAMS_AUTHENTICATION$/.test(classify(error).code)) reports.delete(key);
+        throw error;
+      }
     }
     if (kind === 'await-delivery') {
       // Stored on Base, by this keeper or anyone else, and not yet on Horizen. Delivery is normally well under a minute.
@@ -398,8 +415,11 @@ export async function step(access, journal, auth, world = {}) {
         if (c.class === 'stop' || c.rpc) throw error;
         if (c.class === 'done') { out.done.push({ action: action.id, already: c.code }); continue; }
         // retry: 1 s, 2 s, 4 s ... up to 5 min, or up to 15 s for an action an opening depends on: a cause that
-        // clears inside the opening window must find another try inside it. skip: 5 min. Only this intent waits.
-        const tries = (hold?.tries ?? 0) + 1, until = Date.now() + (c.class === 'skip' ? 300000 : Math.min(2 ** tries * 500, urgent(action) ? OPENING_RETRY : 300000));
+        // clears inside the opening window must find another try inside it. The same for publishing a closing price
+        // until the keeper would give its round up (Voidable rounds): one found after the opening window still
+        // resolves the round. skip: 5 min. Only this intent waits.
+        const closing = action.kind === 'publish' && wall <= action.boundary + rules.observationWindow + rules.voidGrace + GIVE_UP;
+        const tries = (hold?.tries ?? 0) + 1, until = Date.now() + (c.class === 'skip' ? 300000 : Math.min(2 ** tries * 500, urgent(action) || closing ? OPENING_RETRY : 300000));
         defer.set(action.id, { tries, code: c.code, until }); out.waiting.push({ action: action.id, wait: c.code, retryAt: iso(until) });
       }
     }
@@ -412,9 +432,11 @@ export async function step(access, journal, auth, world = {}) {
   const flying = data.transactions.some(t => !FINAL.includes(t.status) && Date.now() - Date.parse(t.preparedAt) < 30000);
   const soonest = Math.min(...[...out.waiting, ...Object.values(out.chains)].map(w => w.retryAt ? Date.parse(w.retryAt) - Date.now() : 1000));
   // Poll fast while a transaction is in flight, and at the pace of whatever is being waited for otherwise. With
-  // nothing to do, nothing can become due before the next five-minute boundary: look once every 30 s, be there one
-  // second after the boundary, and look every second for the first 15 s after it in case a chain head is late.
-  const next = flying ? 500 : Math.max(250, Math.min(soonest, wall % 300 < 15 ? 1000 : 30000, (300 - wall % 300) * 1000 + 1000));
+  // nothing to do, nothing can become due before the next boundary of a market worked (every 15 minutes): look once
+  // every 30 s, be there one second after the boundary, and look every second for the first 15 s after it in case a
+  // chain head is late.
+  const every = Math.min(...MARKETS.map(m => m.duration));
+  const next = flying ? 500 : Math.max(250, Math.min(soonest, wall % every < 15 ? 1000 : 30000, (every - wall % every) * 1000 + 1000));
   const wei = amount => Object.fromEntries(['base', 'horizen'].map(chain => [chain, amount(chain, spent(data, chain))]));
   return { status: out.sent.length ? 'sent' : out.waiting.length || Object.keys(out.chains).length ? 'waiting' : 'idle',
     rounds: view ? view.rounds.filter(r => r.phase > 0 && r.phase < 6 || r.phase === 8).length : null, ...out,
@@ -422,10 +444,12 @@ export async function step(access, journal, auth, world = {}) {
     spentWei: wei((chain, used) => used.toString()),
     remainingWei: wei((chain, used) => auth.budgets ? (auth.budgets[chain] > used ? auth.budgets[chain] - used : 0n).toString() : null),
     // The head each chain's endpoint returned on this tick (the previous one while that chain is backing off), and
-    // per feed the last time the report service returned a usable report, with the reason while it is not answering.
+    // per feed the last time the report service returned a usable report, with the reason while it is not answering,
+    // and with the free source when each of its sources last supplied it.
     heads: { ...heads },
-    reports: Object.fromEntries([['BTC', access.config.feeds.btcFeedId], ['ETH', access.config.feeds.ethFeedId]].map(([name, feedId]) => [name, {
+    reports: Object.fromEntries([['BTC', access.config.feeds.btcFeedId, 0], ['ETH', access.config.feeds.ethFeedId, 1]].filter(([, , asset]) => MARKETS.some(m => m.asset === asset)).map(([name, feedId]) => [name, {
       lastOkAt: feeds.get(feedId)?.okAt ? iso(feeds.get(feedId).okAt) : null, observed: feeds.get(feedId)?.observed ?? null,
+      ...(auth.streams?.served ? { sources: Object.fromEntries(Object.entries(auth.streams.served(feedId)).map(([source, at]) => [source, at && iso(at)])) } : {}),
       ...(feeds.get(feedId)?.ok === false ? { failing: feeds.get(feedId).code } : {}) }])),
     next };
 }

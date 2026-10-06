@@ -10,7 +10,7 @@ import { Journal, privateFile, validateJournal, spent } from './journal.mjs';
 import { validateReceipt, sendOnce, reconcile, held } from './chain.mjs';
 import { options, discover, step } from './main.mjs';
 import { classify } from './errors.mjs';
-import { simulate, ETH } from './sim.mjs';
+import { simulate, allMarkets, ETH } from './sim.mjs';
 const feed = `0x0003${'1'.repeat(60)}`;
 const secret = 'test-only-not-a-real-secret';
 const docs = await readFile(new URL('../../research/chainlink-streams-base.md', import.meta.url), 'utf8');
@@ -96,11 +96,11 @@ test('round lifecycle respects exact deadlines and never substitutes a late pric
   assert.equal(chooseAction({ ...r, phase: 0 }, 880, false, false), null);
 });
 
-test('scheduler covers both assets/durations with aligned rounds, prioritizing imminent evidence', () => {
+test('scheduler covers BTC 15-minute rounds only, aligned, prioritizing imminent evidence', () => {
   const rows = schedules(1791100805);
   assert(rows.every(r => r.start % r.duration === 0));
   assert.equal(new Set(rows.map(r => `${r.asset}:${r.duration}:${r.start}`)).size, rows.length);
-  assert.equal(new Set(rows.map(r => `${r.asset}:${r.duration}`)).size, 4);
+  assert.deepEqual([...new Set(rows.map(r => `${r.asset}:${r.duration}`))], ['0:900']);
   assert.equal(orderedActions([{ kind: 'create', deadline: 10, boundary: 10 }, { kind: 'open', deadline: 20, boundary: 1 }])[0].kind, 'open');
   const backlog = Array.from({ length: 100 }, (_, i) => ({ kind: 'void', deadline: Number.MAX_SAFE_INTEGER, boundary: i }));
   assert.equal(orderedActions([...backlog, { kind: 'create', deadline: 1000, boundary: 1000 }])[0].kind, 'create');
@@ -183,18 +183,22 @@ test('canonical revert consumes its original budget/nonce and permits restart wi
   await reconcile({ clients: { base: reader } }, journal, 'base'); assert.equal(saves, 1);
 });
 
-test('persisted create intent remains discoverable after a crash and a long restart gap', async t => {
-  const now = 1791200805, old = Math.floor((now - 86400) / 300) * 300; t.mock.method(Date, 'now', () => now * 1000);
+test('persisted create intent remains discoverable after a crash and a long restart gap; rounds of other markets are kept, not worked', async t => {
+  const now = 1791200805, old = Math.floor((now - 86400) / 900) * 900; t.mock.method(Date, 'now', () => now * 1000);
   const seen = [];
   const access = { clients: { horizen: { getBlock: async () => ({ timestamp: BigInt(now), number: 10n, hash: 'fixture-block' }) } },
     config: { feeds: { btcFeedId: feed, ethFeedId: feed } },
     read: async (_, fn, args) => {
       if (fn === 'roundIdFor') { seen.push(Number(args[2])); return `0x${BigInt(args[2]).toString(16).padStart(64, '0')}`; }
       if (fn === 'phase') return Number(BigInt(args[0])) === old ? 8 : 0;
-      return { asset: 0, duration: 300, start: BigInt(old), end: BigInt(old + 300), openedAt: 0n, openingDeadline: BigInt(old + 210), voidableAfter: BigInt(old + 300 + 60 + 300) };
+      return { asset: 0, duration: 900, start: BigInt(old), end: BigInt(old + 900), openedAt: 0n, openingDeadline: BigInt(old + 210), voidableAfter: BigInt(old + 900 + 60 + 300) };
     } };
-  const result = await discover(access, { old: { asset: 0, duration: 300, start: old } });
+  // A state directory of an earlier build that worked all four markets: its ETH and five-minute rounds pass validation
+  // and are left alone. A kind the registry does not know is still a stop.
+  const result = await discover(access, { old: { asset: 0, duration: 900, start: old }, eth: { asset: 1, duration: 900, start: old }, short: { asset: 0, duration: 300, start: old - 300 } });
   assert(seen.includes(old)); assert.equal(chooseAction(result.rounds.find(r => r.start === old), now, false, false).kind, 'void');
+  assert(result.rounds.every(r => r.asset === 0 && r.duration === 900)); assert(!seen.includes(old - 300));
+  await assert.rejects(discover(access, { odd: { asset: 2, duration: 900, start: old } }), /KEEPER_PERSISTED_ROUND/);
 });
 
 test('uncertain and duplicate submissions stop before signer or RPC access', async () => {
@@ -265,6 +269,7 @@ test('CLI defaults read-only and cannot implicitly load a signer', () => {
 });
 
 test('feed readiness is per feed, and a latest report newer than the Base head is normal', async t => {
+  allMarkets(t); // two feeds
   const T = 1800000000; let now = (T + 100) * 1000; t.mock.method(Date, 'now', () => now);
   const s = await simulate(); s.streams.latency = 0; // the latest report carries the current second: always ahead of Base's 2 s blocks
   const journal = s.journal(), world = {}, sent = [], waits = new Set();
@@ -310,6 +315,7 @@ function stepAccess(now, active) {
 }
 
 test('revoked entitlement during boundary fetch preserves timeout recovery and blocks new creation', async t => {
+  allMarkets(t); // the five-minute rounds below
   const start = 1791100800, now = start + 20; t.mock.method(Date, 'now', () => now * 1000);
   const old = start - 600;
   const access = stepAccess(now, { [`0:300:${start}`]: { phase: 2 }, [`1:300:${old}`]: { phase: 8 } });

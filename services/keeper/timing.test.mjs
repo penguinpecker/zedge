@@ -6,11 +6,12 @@
 // T+210, resolve the four rounds that end at T, and create the four rounds that come into view.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { simulate, virtualClock, BTC, ETH } from './sim.mjs';
+import { simulate, virtualClock, allMarkets, ALL_MARKETS as markets, BTC, ETH } from './sim.mjs';
 import { watch } from './main.mjs';
 
 const T = 1_800_000_000; // aligned to 900 (and 300)
-const markets = [0, 1].flatMap(asset => [300, 900].map(duration => ({ asset, duration })));
+// Measured with all four markets the registry knows (allMarkets): the keeper works BTC 15-minute rounds only, a
+// quarter of the openings, resolutions and creations of each boundary here and half its publications.
 // JSON-RPC calls (not HTTP requests: a batch counts each call it carries) sent to one chain between T+from and
 // T+to, and the most that fell into any ten seconds. This is what a public endpoint's rate limit counts.
 function volume(s, chain, from, to) {
@@ -37,8 +38,8 @@ async function boundary({ rtt, relay = 24, from = -40, until = 130 }) {
   } finally { clock.restore(); }
 }
 
-test('D19: at 250 ms per request a 900-aligned boundary is published, relayed and opened well inside the 210 s window', async () => {
-  const r = await boundary({ rtt: 250 });
+test('D19: at 250 ms per request a 900-aligned boundary is published, relayed and opened well inside the 210 s window', async t => {
+  allMarkets(t); const r = await boundary({ rtt: 250 });
   console.log(`# 250 ms RTT, 24 s relay: publications mined T+${r.publications} | cache T+${r.delivered} | openings T+${r.openings} | resolutions T+${r.resolutions} | creations T+${r.creations}`);
   console.log(`# requests T-40..T+130: Base ${r.s.requests.base}, Horizen ${r.s.requests.horizen}, Chainlink ${r.s.requests.streams}; status lines ${r.lines.length}`);
   assert.equal(r.failure, undefined); assert.equal(r.finished, true); assert.equal(r.s.defect, undefined); assert.equal(r.failed, 0);
@@ -58,7 +59,8 @@ test('D19: at 250 ms per request a 900-aligned boundary is published, relayed an
   assert(base.calls <= 110 && base.peak <= 60, `Base calls in the boundary minute: ${base.calls}, ${base.peak} in 10 s`);
 });
 
-test('D19: the margin holds across request latency, loop phase and a slow relay', async () => {
+test('D19: the margin holds across request latency, loop phase and a slow relay', async t => {
+  allMarkets(t);
   for (const rtt of [0, 100, 250, 500, 1000]) {
     const last = [];
     for (const from of [-40, -37.3, -33.1]) { const r = await boundary({ rtt, from }); assert.equal(r.failure, undefined); assert.equal(r.failed, 0); last.push(Math.max(...r.openings)); assert(r.openings.every(at => at > 0)); }
@@ -71,8 +73,8 @@ test('D19: the margin holds across request latency, loop phase and a slow relay'
   assert(slow.openings.every(at => at > 0 && at <= 190)); assert.equal(slow.failed, 0);
 });
 
-test('D19: between boundaries the keeper is quiet, and identity is re-verified once a minute per chain, not per send', async () => {
-  const r = await boundary({ rtt: 250, from: -260, until: -20 }); // four idle minutes: every round is trading
+test('D19: between boundaries the keeper is quiet, and identity is re-verified once a minute per chain, not per send', async t => {
+  allMarkets(t); const r = await boundary({ rtt: 250, from: -260, until: -20 }); // four idle minutes: every round is trading
   const perMinute = chain => (r.s.requests[chain] / 4).toFixed(1);
   console.log(`# idle: ${perMinute('horizen')} Horizen and ${perMinute('base')} Base requests per minute`);
   assert(r.s.requests.horizen <= 16, `Horizen requests in four idle minutes: ${r.s.requests.horizen}`);

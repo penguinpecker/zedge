@@ -5,16 +5,17 @@ Runs the unmodified round keeper (`services/keeper/main.mjs --watch --rehearsal`
 ```sh
 node scripts/rehearsal/rehearse.mjs main     # about 27 minutes: 24 minutes of keeper time, no faults
 node scripts/rehearsal/rehearse.mjs faults   # about 30 minutes: five faults, one per boundary
+node scripts/rehearsal/rehearse.mjs real     # about 53 minutes: no faults, real signed reports (see "Real reports")
 ```
 
-Options: `--minutes <n>` (main only, default 24), `--relay-delay <seconds>` (default 24, the delivery time observed on mainnet), `--out <directory>` (default `evidence/keeper-rehearsal-<date>/<scenario>/`; `evidence/` is git-ignored; a directory that already holds a run is refused, so a second run on one day needs its own). Ctrl-C stops everything it started.
+Options: `--minutes <n>` (main 24 and real 50 by default), `--relay-delay <seconds>` (default 24, the delivery time observed on mainnet), `--out <directory>` (default `evidence/keeper-rehearsal-<date>/<scenario>/`; `evidence/` is git-ignored; a directory that already holds a run is refused, so a second run on one day needs its own). Ctrl-C stops everything it started.
 
 Needs: Node 22, `npm install` done at the repository root, Anvil 1.7 on `PATH`, `contracts/out` built (the registry planner reads the build artifacts), and network access to `https://mainnet.base.org` and the Horizen endpoint named in `contracts/deployment/hybrid-mainnet.json`. It listens on 127.0.0.1 ports 39101, 39102 (the forks), 39111, 39112 (the keeper's endpoints) and 39120 (the report service stand-in); the registry planner starts one more short-lived Anvil child on a port the operating system picks.
 
 ## What one run does
 
 1. Forks Base (from `mainnet.base.org`, which serves archive state and receipts) and Horizen at their current heads minus five blocks, pinned so Anvil caches upstream state, with 2 s and 1 s blocks, and sets both clocks to wall-clock time (`evm_setTime`; the keeper refuses a head more than 60 s from the host clock).
-2. Deploys the new registry on the Horizen fork with the registry deployment tools in rehearsal mode (`contracts/scripts/plan-registry.mjs`, then `broadcast-registry.mjs`, both `--rehearsal <fork> --evidence <out>/deploy`): deployer impersonation, no key, the planned addresses. It then checks the proxy runtime hash against the committed release.
+2. With a release whose status is `planned`, deploys the new registry on the Horizen fork with the registry deployment tools in rehearsal mode (`contracts/scripts/plan-registry.mjs`, then `broadcast-registry.mjs`, both `--rehearsal <fork> --evidence <out>/deploy`): deployer impersonation, no key, the planned addresses. With a `deployed` release the fork already holds it and nothing is deployed. Either way it then checks the proxy runtime hash against the committed release.
 3. Replaces the Chainlink VerifierProxy's code on the Base fork (`anvil_setCode`) with a 38-byte test verifier that returns the report body of whatever envelope it is given.
 4. Serves reports from the keeper simulator's report service (`services/keeper/sim.mjs`): the real HMAC scheme with a 5 s clock tolerance, one report per second and feed, exact-second lookups (404 for a second without a report), the page endpoint, `/latest`, and gap seconds.
 5. Relays every `SentMessage` of the Base messenger to the Horizen fork the way the native bridge does: `relayMessage` from the aliased messenger address (impersonated), with the message's own nonce, sender, target, gas limit and data, an explicit 2,000,000 gas limit, `--relay-delay` seconds after the Base block that holds it.
@@ -22,6 +23,10 @@ Needs: Node 22, `npm install` done at the repository root, Anvil 1.7 on `PATH`, 
 7. Stops the keeper with SIGTERM, reads every registry, cache and publisher event of the run from the forks, and writes `summary.json`.
 
 The keeper's endpoints are a small proxy in front of each fork. It passes every call through to Anvil one at a time (a cold fork stopped answering concurrent batches), answers `eth_maxPriorityFeePerGas` with the live chain's quote read once at start (Anvil quotes a 1 gwei floor neither chain has, which would put every keeper transaction over its per-transaction cap), answers a Base `eth_estimateGas` above 2^24 gas the way Base does (`-32003 out of gas: gas required exceeds: 16777216`, read from `mainnet.base.org` on 2026-10-05; the fork itself estimates past the cap), counts the keeper's calls, and injects the faults below.
+
+## Real reports
+
+`real` runs the keeper as `main` does, with three differences. The Chainlink verifier on the Base fork is left as deployed (step 3 is skipped). There is no report service stand-in: the settings file says `KEEPER_REPORT_SOURCE=solana` and holds no Chainlink credentials, so the keeper takes the signed reports from public Solana transactions on the public Solana endpoint (`services/keeper/solana.mjs`) and nothing stands behind them. And the publication path is warmed with the copy that source returns for the last five-minute boundary, taken by the harness at start (two or three public Solana reads), so a run fails at once if the verifier refuses a copy. Each boundary in `summary.json` then also carries when the keeper signed its publication and what it waited on before (`publications_signed`, from its status lines), the opening and closing prices, the round creation times and the gas used on each chain (`gas_used`); `transactions` lists every keeper transaction with its gas.
 
 ## The fault scenario
 

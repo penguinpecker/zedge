@@ -3,9 +3,11 @@
 // what it proves and what it does not.
 //   node scripts/rehearsal/rehearse.mjs main   [--minutes 24] [--relay-delay 24] [--out <dir>]
 //   node scripts/rehearsal/rehearse.mjs faults [--relay-delay 24] [--out <dir>]
-// Ports 39101/39102 (forks), 39111/39112 (the keeper's endpoints), 39120 (report service stand-in). Nothing is sent
-// to a public chain: public endpoints serve the forks' state (and the registry planner's own reads), a head and a fee quote
-// per chain at start and a base fee per chain at the end.
+//   node scripts/rehearsal/rehearse.mjs real   [--minutes 50] [--relay-delay 24] [--out <dir>]
+// Ports 39101/39102 (forks), 39111/39112 (the keeper's endpoints), 39120 (report service stand-in, not in real). Nothing is
+// sent to a public chain: public endpoints serve the forks' state (and the registry planner's own reads), a head and a fee
+// quote per chain at start and a base fee per chain at the end. real: the keeper reads signed reports from public Solana
+// transactions (KEEPER_REPORT_SOURCE=solana, read-only) and the real Chainlink verifier checks them on the Base fork.
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { createWriteStream, openSync, readFileSync } from 'node:fs';
@@ -18,11 +20,16 @@ import { parseArgs } from 'node:util';
 import { decodeEventLog, decodeFunctionData, encodeFunctionData, decodeFunctionResult, keccak256, numberToHex, parseAbi, parseTransaction, toEventSelector } from 'viem';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { simulate, BTC, ETH } from '../../services/keeper/sim.mjs';
+import { SolanaReports } from '../../services/keeper/solana.mjs';
+import { MARKETS } from '../../services/keeper/lifecycle.mjs';
 
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
 const { values: opt, positionals: [scenario = 'main'] } = parseArgs({ allowPositionals: true,
-  options: { minutes: { type: 'string', default: '24' }, 'relay-delay': { type: 'string', default: '24' }, out: { type: 'string' } } });
-if (!['main', 'faults'].includes(scenario)) throw new Error('scenario: main or faults');
+  options: { minutes: { type: 'string' }, 'relay-delay': { type: 'string', default: '24' }, out: { type: 'string' } } });
+if (!['main', 'faults', 'real'].includes(scenario)) throw new Error('scenario: main, faults or real');
+const REAL = scenario === 'real', MINUTES = Number(opt.minutes ?? (REAL ? 50 : 24));
+// The feeds and boundaries the keeper works (lifecycle.mjs, MARKETS).
+const FEEDS = [...new Set(MARKETS.map(m => m.asset))].map(asset => [BTC, ETH][asset]), STEP = Math.min(...MARKETS.map(m => m.duration));
 const OUT = resolve(opt.out ?? join(ROOT, 'evidence', `keeper-rehearsal-${new Date().toISOString().slice(0, 10)}`, scenario));
 if ((await readdir(OUT).catch(() => [])).length) throw new Error(`${OUT} holds an earlier run: give --out a new directory`);
 const PORT = { base: 39101, horizen: 39102 }, PROXY = { base: 39111, horizen: 39112 }, STREAMS = 39120;
@@ -204,19 +211,23 @@ try {
   say(`forks: base ${forkBlock.base}, horizen ${forkBlock.horizen}; live priority-fee quotes base ${BigInt(tips.base)} wei, horizen ${BigInt(tips.horizen)} wei`);
   servers.push(await proxy('base'), await proxy('horizen'));
 
-  // 2. The registry, deployed by the unmodified registry deployment tools in rehearsal mode (same addresses as planned).
-  const tool = (script, args) => new Promise(ok => { const child = run('deploy', process.execPath, [`contracts/scripts/${script}`, ...args]); child.once('exit', ok); });
-  const deployArgs = ['--rehearsal', `http://127.0.0.1:${PROXY.horizen}`, '--evidence', join(OUT, 'deploy')];
-  if (await tool('plan-registry.mjs', deployArgs) !== 0 || await tool('broadcast-registry.mjs', deployArgs) !== 0) throw new Error('registry rehearsal deployment failed: see deploy.log');
+  // 2. The registry: once the release is deployed, the one the fork already holds; before that, deployed by the
+  // unmodified registry deployment tools in rehearsal mode (same addresses as planned).
+  const deployed = release.status === 'deployed';
+  if (!deployed) {
+    const tool = (script, args) => new Promise(ok => { const child = run('deploy', process.execPath, [`contracts/scripts/${script}`, ...args]); child.once('exit', ok); });
+    const deployArgs = ['--rehearsal', `http://127.0.0.1:${PROXY.horizen}`, '--evidence', join(OUT, 'deploy')];
+    if (await tool('plan-registry.mjs', deployArgs) !== 0 || await tool('broadcast-registry.mjs', deployArgs) !== 0) throw new Error('registry rehearsal deployment failed: see deploy.log');
+  }
   const registryCode = await rpc('horizen', 'eth_getCode', [at('StreamsRoundRegistry'), 'latest']);
   if (keccak256(registryCode) !== release.contracts.find(c => c.name === 'StreamsRoundRegistry').runtimeCodeHash) throw new Error('registry proxy runtime differs from the release');
   const deployBlock = Number(await rpc('horizen', 'eth_blockNumber'));
-  say(`registry deployed at ${at('StreamsRoundRegistry')} (Horizen fork block ${deployBlock})`);
+  say(`registry ${deployed ? 'as deployed' : 'deployed'} at ${at('StreamsRoundRegistry')} (Horizen fork block ${deployBlock})`);
 
-  // 3. Test verifier on Base, bridge addresses, accounts.
-  const sim = await simulate({});
+  // 3. Test verifier on Base (real: the Chainlink verifier as deployed), bridge addresses, accounts.
+  const sim = REAL ? null : await simulate({});
   const publisher = at('BaseStreamsPublisher');
-  ADDR.verifier = (await view('base', at('ChainlinkStreamsBoundaryOracle'), 'verifierProxy')); await rpc('base', 'anvil_setCode', [ADDR.verifier, TEST_VERIFIER]);
+  ADDR.verifier = (await view('base', at('ChainlinkStreamsBoundaryOracle'), 'verifierProxy')); if (!REAL) await rpc('base', 'anvil_setCode', [ADDR.verifier, TEST_VERIFIER]);
   ADDR.messenger = await view('base', publisher, 'nativeMessenger'); ADDR.l2Messenger = await view('base', publisher, 'destinationMessenger');
   ADDR.portal = await view('base', ADDR.messenger, 'portal');
   ADDR.alias = `0x${((BigInt(ADDR.messenger) + 0x1111000000000000000000000000000000001111n) % 2n ** 160n).toString(16).padStart(40, '0')}`;
@@ -230,21 +241,28 @@ try {
   scanned = Number(await rpc('base', 'eth_blockNumber'));
   // Warm the forks: a first publication and the fee views make Anvil fetch hundreds of slots upstream one by one
   // (seconds that a real endpoint does not take), so they are fetched now, and each boundary's observation slots are
-  // read 40 s before it (the second loop in step 4). Reads only; nothing on either fork changes.
-  const recent = Math.floor(Date.now() / 1000 / 60) * 60 - 60, sample = sim.report(BTC, recent);
-  await rpc('base', 'eth_estimateGas', [{ from: FRONT, to: publisher, data: encodeFunctionData({ abi: ABI.publisher, functionName: 'publishBoundary', args: [BTC, BigInt(recent), sample.fullReport] }) }]);
+  // read 40 s before it (the second loop in step 4). Reads only; nothing on either fork changes. real: with the copy of
+  // the last five-minute boundary's report the keeper's own source finds now, which the real verifier must accept.
+  let recent = Math.floor(Date.now() / 1000 / 60) * 60 - 60, evidence;
+  if (REAL) { const copy = await new SolanaReports().report(BTC); recent = Math.floor(copy.observation.observationsTimestamp / 300) * 300; evidence = copy.payload; }
+  else evidence = sim.report(BTC, recent).fullReport;
+  // A cold fork fetches every slot of the verification path upstream one by one; a try that times out has cached some.
+  for (let i = 1; ; i++) {
+    try { await rpc('base', 'eth_estimateGas', [{ from: FRONT, to: publisher, data: encodeFunctionData({ abi: ABI.publisher, functionName: 'publishBoundary', args: [BTC, BigInt(recent), evidence] }) }]); break; }
+    catch (error) { if (i === 3 || !/anvil TimeoutError/.test(error.message)) throw error; say(`warm-up publication timed out (try ${i})`); }
+  }
   for (const chain of ['base', 'horizen']) { await view(chain, GAS_ORACLE, 'getL1FeeUpperBound', [300n]); await view(chain, GAS_ORACLE, 'getOperatorFee', [300000n]); }
-  say(`verifier ${ADDR.verifier} replaced; messenger ${ADDR.messenger} -> ${ADDR.l2Messenger} via alias ${ADDR.alias}; portal ${ADDR.portal}; keeper ${signer.address}; front-runner ${FRONT}`);
+  say(`verifier ${ADDR.verifier} ${REAL ? `kept, and it accepted the copy of the report for ${iso(recent * 1000)}` : 'replaced'}; messenger ${ADDR.messenger} -> ${ADDR.l2Messenger} via alias ${ADDR.alias}; portal ${ADDR.portal}; keeper ${signer.address}; front-runner ${FRONT}`);
 
   // 4. The report service stand-in (the keeper simulator's: real HMAC check, exact-second lookups, gap seconds) and the bridge.
-  servers.push(await listen(STREAMS, async req => {
+  if (!REAL) servers.push(await listen(STREAMS, async req => {
     const r = await sim.streamsFetch(`http://stand-in${req.url}`, { headers: { Authorization: req.headers.authorization, 'X-Authorization-Timestamp': req.headers['x-authorization-timestamp'],
       'X-Authorization-Signature-SHA256': req.headers['x-authorization-signature-sha256'] } });
     return { status: r.status, headers: { date: r.headers.get('date') }, body: await r.text() };
   }));
   (async () => { while (!stopping) { try { await bridgeTick(); } catch (e) { say(`bridge error: ${e.message}`); } await sleep(1000); } })();
-  (async () => { for (let warmed = 0; !stopping; await sleep(1000)) { const next = Math.ceil(Date.now() / 1000 / 300) * 300; if (warmed === next || next - Date.now() / 1000 > 40) continue;
-    try { for (const feed of [BTC, ETH]) { await view('base', publisher, 'getObservation', [feed, BigInt(next)], ABI.publisher); await view('horizen', at('HorizenStreamsOracle'), 'getObservation', [feed, BigInt(next)], ABI.cache); } warmed = next; }
+  (async () => { for (let warmed = 0; !stopping; await sleep(1000)) { const next = Math.ceil(Date.now() / 1000 / STEP) * STEP; if (warmed === next || next - Date.now() / 1000 > 40) continue;
+    try { for (const feed of FEEDS) { await view('base', publisher, 'getObservation', [feed, BigInt(next)], ABI.publisher); await view('horizen', at('HorizenStreamsOracle'), 'getObservation', [feed, BigInt(next)], ABI.cache); } warmed = next; }
     catch (e) { say(`warm-up error: ${e.message}`); } } })();
   (async () => { const load = createWriteStream(join(OUT, 'load.log')); while (!stopping) {
     const [b, h] = await Promise.all(['base', 'horizen'].map(c => rpc(c, 'eth_getBlockByNumber', ['latest', false]).then(x => Number(x.timestamp)).catch(() => null)));
@@ -254,9 +272,12 @@ try {
   // 5. The keeper, unmodified, with a throwaway key and its own rehearsal switches only.
   secretsDir = await mkdtemp(join(tmpdir(), 'keeper-rehearsal-'));
   const secrets = join(secretsDir, 'keeper.env');
-  await writeFile(secrets, [`KEEPER_PRIVATE_KEY=${key}`, `KEEPER_ADDRESS=${signer.address}`, `CHAINLINK_STREAMS_USERNAME=${sim.username}`, `CHAINLINK_STREAMS_SECRET=${sim.secret}`,
+  // real: the free source on its public endpoint, without Chainlink credentials (so without the paid fallback).
+  const reportSource = REAL ? ['KEEPER_REPORT_SOURCE=solana']
+    : [`CHAINLINK_STREAMS_USERNAME=${sim.username}`, `CHAINLINK_STREAMS_SECRET=${sim.secret}`, `KEEPER_STREAMS_ORIGIN=http://127.0.0.1:${STREAMS}`];
+  await writeFile(secrets, [`KEEPER_PRIVATE_KEY=${key}`, `KEEPER_ADDRESS=${signer.address}`, ...reportSource,
     'KEEPER_BASE_DAILY_BUDGET_WEI=20000000000000000', 'KEEPER_HORIZEN_DAILY_BUDGET_WEI=4000000000000000', `KEEPER_BASE_RPC_URL=http://127.0.0.1:${PROXY.base}`,
-    `KEEPER_HORIZEN_RPC_URL=http://127.0.0.1:${PROXY.horizen}`, `KEEPER_STREAMS_ORIGIN=http://127.0.0.1:${STREAMS}`].join('\n') + '\n', { mode: 0o600 });
+    `KEEPER_HORIZEN_RPC_URL=http://127.0.0.1:${PROXY.horizen}`].join('\n') + '\n', { mode: 0o600 });
   const keeperArgs = ['services/keeper/main.mjs', '--rehearsal', '--secrets', secrets];
   // Read-only first. On a cold fork the first tick's single eth_call makes Anvil fetch about a hundred storage slots
   // upstream one by one (about 35 s), past the keeper's 12 s request timeout; a later try finds them cached.
@@ -278,7 +299,7 @@ try {
   const t0 = Math.floor(started / 1000), B = [0, 1, 2, 3, 4].map(i => Math.ceil((t0 + 90) / 300) * 300 + 300 * i), windows = {};
   const mark = (name, from, to, extra = {}) => { windows[name] = { from, to, ...extra }; };
   let end;
-  if (scenario === 'main') { end = t0 + Number(opt.minutes) * 60; await until(end); }
+  if (scenario !== 'faults') { end = t0 + MINUTES * 60; await until(end); }
   else {
     fault.delay = (feed, boundary) => feed === BTC && boundary === B[3] ? 300 : RELAY_DELAY;
     mark('gapSecond', B[0], B[0] + 210, { boundary: B[0] }); mark('horizen429', B[1] - 5, B[1] + 55, { boundary: B[1] });
@@ -308,24 +329,31 @@ try {
   for (const e of registryEvents) {
     if (e.eventName === 'RoundCreated') rounds.set(e.args.roundId, { market: `${e.args.asset === 0 ? 'BTC' : 'ETH'}${e.args.duration / 60}m`, start: Number(e.args.start), end: Number(e.args.end), createdAt: e.time, createdBy: e.from });
     const r = rounds.get(e.args.roundId); if (!r) continue;
-    if (e.eventName === 'OpeningRecorded') Object.assign(r, { openedAt: e.time, openedBy: e.from });
-    if (e.eventName === 'RoundResolved') Object.assign(r, { resolvedAt: e.time, resolvedBy: e.from, outcome: e.args.outcome });
+    if (e.eventName === 'OpeningRecorded') Object.assign(r, { openedAt: e.time, openedBy: e.from, openingPrice: e.args.price });
+    if (e.eventName === 'RoundResolved') Object.assign(r, { resolvedAt: e.time, resolvedBy: e.from, outcome: e.args.outcome, closingPrice: e.args.closingPrice });
     if (e.eventName === 'RoundVoided') Object.assign(r, { voidedAt: e.time, voidedBy: e.from, openingMissing: e.args.openingMissing });
   }
   const first = (list, name, feed, boundary) => list.find(e => e.eventName === name && e.args.feedId === feed && Number(e.args.boundary) === boundary);
-  const boundaries = [];
+  const boundaries = [], usd = price => price === undefined ? 'none' : (Number(price / 10n ** 14n) / 1e4).toFixed(2);
+  // The keeper's own account of a publication: when it signed it (the status line of that tick) and why it waited before.
+  const signing = (feed, b) => { const id = `publish:${feed}:${b}`, waits = new Map(), line = lines.find(s => s.sent.some(x => x.action === id));
+    for (const s of lines) { if (s === line) break; for (const w of s.waiting ?? []) if (w.action === id) waits.set(w.wait, (waits.get(w.wait) ?? 0) + 1); }
+    return { signed: line ? `+${(Date.parse(line.at) / 1000 - b).toFixed(1)}s` : 'none', waits: Object.fromEntries(waits), sources: line?.reports?.[feedName(feed)]?.sources }; };
   // From the first boundary the keeper can have rounds for: it creates a round only more than 20 s before its start.
-  for (let b = Math.ceil((t0 + 21) / 300) * 300; b <= end - 210; b += 300) {
+  for (let b = Math.ceil((t0 + 21) / STEP) * STEP; b <= end - 210; b += STEP) {
     const opening = [...rounds.values()].filter(r => r.start === b), closing = [...rounds.values()].filter(r => r.end === b && r.openedAt);
     const per = (list, f) => list.map(r => `${r.market} ${f(r)}`).join(', ');
     const rel = (t, by) => t === undefined ? 'none' : `+${t - b}s${by === 'other' ? ' (other)' : ''}`;
     boundaries.push({ boundary_utc: iso(b * 1000), boundary: b, aligned_900: b % 900 === 0,
-      publications_mined_s: [BTC, ETH].map(f => `${feedName(f)} ${rel(first(baseEvents, 'BoundaryPublished', f, b)?.time, first(baseEvents, 'BoundaryPublished', f, b)?.from)}`).join(', '),
-      bridge_messages: [BTC, ETH].map(f => `${feedName(f)} ${baseEvents.filter(e => e.eventName === 'BoundarySent' && e.args.feedId === f && Number(e.args.boundary) === b).length}`).join(', '),
-      delivered_s: [BTC, ETH].map(f => `${feedName(f)} ${rel(first(cacheEvents, 'ObservationReceived', f, b)?.time)}`).join(', '),
-      openings_recorded_s: per(opening, r => rel(r.openedAt, r.openedBy)),
-      all_markets_opened_in_window: opening.length === (b % 900 === 0 ? 4 : 2) && opening.every(r => r.openedAt !== undefined && r.openedAt - b <= 210),
-      resolutions_s: per(closing, r => rel(r.resolvedAt, r.resolvedBy)), voids: per(opening.filter(r => r.voidedAt), r => rel(r.voidedAt, r.voidedBy)) });
+      publications_signed: Object.fromEntries(FEEDS.map(f => [feedName(f), signing(f, b)])),
+      publications_mined_s: FEEDS.map(f => `${feedName(f)} ${rel(first(baseEvents, 'BoundaryPublished', f, b)?.time, first(baseEvents, 'BoundaryPublished', f, b)?.from)}`).join(', '),
+      bridge_messages: FEEDS.map(f => `${feedName(f)} ${baseEvents.filter(e => e.eventName === 'BoundarySent' && e.args.feedId === f && Number(e.args.boundary) === b).length}`).join(', '),
+      delivered_s: FEEDS.map(f => `${feedName(f)} ${rel(first(cacheEvents, 'ObservationReceived', f, b)?.time)}`).join(', '),
+      rounds_created_s: per(opening, r => `${r.createdAt - b}s${r.createdBy === 'other' ? ' (other)' : ''}`),
+      openings_recorded_s: per(opening, r => rel(r.openedAt, r.openedBy)), opening_prices_usd: per(opening, r => usd(r.openingPrice)),
+      all_markets_opened_in_window: opening.length === MARKETS.filter(m => b % m.duration === 0).length && opening.every(r => r.openedAt !== undefined && r.openedAt - b <= 210),
+      resolutions_s: per(closing, r => rel(r.resolvedAt, r.resolvedBy)), closing_prices_usd: per(closing, r => `${usd(r.closingPrice)}${r.outcome ? ` ${['', 'Up', 'Down'][r.outcome] ?? r.outcome}` : ''}`),
+      voids: per(opening.filter(r => r.voidedAt), r => rel(r.voidedAt, r.voidedBy)) });
   }
   // Spend: what the keeper booked (its last status line, fork fees) and what the same gas costs at the live fees now.
   const history = (await readFile(join(OUT, 'state/history.jsonl'), 'utf8').catch(() => '')).split('\n').filter(Boolean).map(l => JSON.parse(l)).filter(t => t.receipt);
@@ -334,14 +362,20 @@ try {
   // Whole quarter hours from the first boundary (each holds the same work), or whole five minutes in a shorter run.
   const from = boundaries[0]?.boundary ?? t0, span = end - from, window = { from, to: from + Math.max(300, Math.floor(span / (span >= 900 ? 900 : 300)) * (span >= 900 ? 900 : 300)) };
   const cost = { base: { txs: 0, reverted: 0, gas: 0n, liveWei: 0n, windowLiveWei: 0n }, horizen: { txs: 0, reverted: 0, gas: 0n, liveWei: 0n, windowLiveWei: 0n } };
+  const transactions = [];
   for (const t of history) {
     const receipt = await rpc(t.chain, 'eth_getTransactionReceipt', [t.hash]), gas = BigInt(receipt.gasUsed);
     const size = (((await rpc(t.chain, 'eth_getRawTransactionByHash', [t.hash])) ?? '0x').length - 2) / 2;
     const extra = (await view(t.chain, GAS_ORACLE, 'getL1FeeUpperBound', [BigInt(size)])) + (await view(t.chain, GAS_ORACLE, 'getOperatorFee', [gas]));
     const c = cost[t.chain], wei = gas * live[t.chain] + extra, time = Number(t.receipt.timestamp);
     c.txs++; if (t.status === 'reverted') c.reverted++; c.gas += gas; c.liveWei += wei; if (time >= window.from && time < window.to) c.windowLiveWei += wei;
+    transactions.push({ key: t.key, chain: t.chain, status: t.status, gasUsed: Number(gas), minedAt: iso(time * 1000) });
   }
   for (const c of Object.values(cost)) c.impliedDailyLiveWei = c.windowLiveWei * 86400n / BigInt(window.to - window.from);
+  // Gas per boundary and chain: its publications and relays on Base; on Horizen, the openings at it, the resolutions of
+  // rounds ending at it and voids of rounds starting at it (creations are made ahead and listed in transactions).
+  const boundaryOf = key => { const [kind, , b, c] = key.split(':'); return ['publish', 'resend'].includes(kind) ? Number(b) : kind === 'resolve' ? Number(c) + Number(b) : kind === 'create' ? null : Number(c); };
+  for (const b of boundaries) b.gas_used = Object.fromEntries(['base', 'horizen'].map(chain => [chain, transactions.filter(t => t.chain === chain && boundaryOf(t.key) === b.boundary).reduce((n, t) => n + t.gasUsed, 0)]));
   const last = lines.at(-1) ?? {};
   const codes = new Set();
   for (const s of lines) { for (const w of s.waiting ?? []) codes.add(w.wait); for (const w of Object.values(s.chains ?? {})) codes.add(w.wait);
@@ -366,18 +400,19 @@ try {
     statusLines: lines.length, stderrLines: stderr,
     rounds: { created: all.length, opened: all.filter(r => r.openedAt).length, resolved: all.filter(r => r.resolvedAt).length,
       voidedUnopened: all.filter(r => r.voidedAt && !r.openedAt).length, openedVoided: all.filter(r => r.voidedAt && r.openedAt).length,
+      markets: [...new Set(all.map(r => r.market))], publishedFeeds: [...new Set(baseEvents.map(e => feedName(e.args.feedId)))],
       resolutionDelays_s: all.filter(r => r.resolvedAt).map(r => `${r.market}@${r.start}: +${r.resolvedAt - r.end}`) },
     boundaries, reasonCodes: [...codes].sort(), revertedKeeperTransactions: lines.flatMap(s => s.settled.filter(x => x.status !== 'confirmed').map(x => `${x.key} ${x.status}`)),
-    spend: { keeperBookedWei: last.spentWei, livePricePerGasWei: live, costAtLiveFees: cost, dailyWindow: { from: iso(window.from * 1000), to: iso(window.to * 1000) } },
+    spend: { keeperBookedWei: last.spentWei, livePricePerGasWei: live, costAtLiveFees: cost, dailyWindow: { from: iso(window.from * 1000), to: iso(window.to * 1000) } }, transactions,
     rpcLoad: { base: perMinute('base'), horizen: { ...perMinute('horizen'), limited429: calls.horizen.filter(c => c.limited).length },
       boundaryMinutes: boundaries.map(b => ({ boundary: b.boundary_utc, base: boundaryMinute('base', b.boundary), horizen: boundaryMinute('horizen', b.boundary) })) },
-    faults: windows, frontRuns, relays: relays.map(({ args: _args, ...r }) => r), streamsRequests: sim.streams.requests.length,
+    faults: windows, frontRuns, relays: relays.map(({ args: _args, ...r }) => r), streamsRequests: sim?.streams.requests.length ?? null,
     load: (await readFile(join(OUT, 'load.log'), 'utf8')).trim().split('\n') };
   await writeFile(join(OUT, 'chain.json'), json({ rounds: Object.fromEntries(rounds), publications: baseEvents.map(e => ({ event: e.eventName, ...e.args, time: e.time, from: e.from, tx: e.log.transactionHash })),
     deliveries: cacheEvents.map(e => ({ ...e.args, time: e.time })) }));
-  await writeFile(join(OUT, 'streams.json'), json(sim.streams.requests));
+  if (sim) await writeFile(join(OUT, 'streams.json'), json(sim.streams.requests));
   await writeFile(join(OUT, 'summary.json'), json(summary));
   say(`summary: ${join(OUT, 'summary.json')}`);
-  for (const b of boundaries) say(`${b.boundary_utc} pub ${b.publications_mined_s} | delivered ${b.delivered_s} | opened ${b.openings_recorded_s} | in window ${b.all_markets_opened_in_window} | resolved ${b.resolutions_s}${b.voids ? ` | voided ${b.voids}` : ''}`);
+  for (const b of boundaries) say(`${b.boundary_utc} signed ${Object.entries(b.publications_signed).map(([f, x]) => `${f} ${x.signed}`).join(', ')} | pub ${b.publications_mined_s} | delivered ${b.delivered_s} | opened ${b.openings_recorded_s} at ${b.opening_prices_usd} | in window ${b.all_markets_opened_in_window} | resolved ${b.resolutions_s} at ${b.closing_prices_usd}${b.voids ? ` | voided ${b.voids}` : ''} | gas base ${b.gas_used.base} horizen ${b.gas_used.horizen}`);
 } catch (error) { say(`harness failed: ${error.stack ?? error.message}`); process.exitCode = 1; }
 finally { await cleanup(); harnessLog.end(); }

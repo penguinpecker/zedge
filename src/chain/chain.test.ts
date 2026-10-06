@@ -136,3 +136,10 @@ test("oracle display uses integer arithmetic and never treats missing prices as 
   assert.throws(() => observationPrice(-1n, -8));
   assert.throws(() => observationPrice(1n, -19));
 });
+
+test("chain mode offers only the BTC 15-minute market, selected by default", async () => {
+  const source = await readFile(new URL("./ChainApp.tsx", import.meta.url), "utf8");
+  const markets = source.match(/const MARKETS = \[([\s\S]*?)\] as const;/)?.[1] ?? "";
+  assert.deepEqual([...markets.matchAll(/\{[^}]*\}/g)].map(([entry]) => entry), ['{ id: "btc-15m", asset: "BTC", name: "Bitcoin", duration: 900, assetId: 0 }']);
+  assert.match(source, /const \[marketIndex, setMarketIndex\] = useState\(0\);/);
+});

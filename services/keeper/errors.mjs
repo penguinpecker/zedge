@@ -22,7 +22,7 @@ const retry = new Set(['KEEPER_CHAIN_CLOCK', 'KEEPER_CLOCK', 'KEEPER_INTEGER', '
 const skip = new Set(['KEEPER_ATTEMPTS_EXHAUSTED', 'KEEPER_RESENDS_EXHAUSTED', 'KEEPER_STREAMS_AUTHENTICATION', 'STREAMS_BOUNDARY_WINDOW', 'STREAMS_FEED', 'STREAMS_BOUNDARY', 'STREAMS_WINDOW']);
 const stop = new Set(['STREAMS_PATH', 'STREAMS_USERNAME', 'STREAMS_SECRET', 'STREAMS_CLOCK', 'STREAMS_ORIGIN']);
 
-function retryAfter(headers) {
+export function retryAfter(headers) {
   const value = headers?.get?.('retry-after'); if (!value) return undefined;
   const wait = /^[0-9]+$/.test(value) ? Number(value) * 1000 : Date.parse(value) - Date.now();
   return Number.isFinite(wait) && wait > 0 ? wait : undefined;

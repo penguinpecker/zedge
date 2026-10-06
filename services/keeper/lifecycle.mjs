@@ -1,10 +1,15 @@
 import { requireCondition } from './streams.mjs';
 
+// The markets this keeper creates, opens, resolves and voids rounds of: BTC/USD (asset 0) 15-minute rounds only
+// (owner decision of 2026-10-06). The registry knows four (asset 0 BTC or 1 ETH, 300 or 900 seconds); rounds of the
+// others are left alone. Read wherever the keeper enumerates rounds (here, main.mjs and sim.mjs).
+export const MARKETS = [{ asset: 0, duration: 900 }];
+
 export function schedules(timestamp, lookBack = 4800) {
   requireCondition(Number.isSafeInteger(timestamp) && timestamp > 0 && timestamp < 0xffffffff - 10000, 'KEEPER_CLOCK');
   const rounds = [];
   // A restarted keeper also reconciles its persisted active-round set, irrespective of this window.
-  for (const duration of [300, 900]) for (const asset of [0, 1]) {
+  for (const { asset, duration } of MARKETS) {
     const aligned = Math.floor(timestamp / duration) * duration;
     for (let start = aligned - Math.ceil(lookBack / duration) * duration; start <= aligned + 2 * duration; start += duration) {
       if (start > 0) rounds.push({ asset, duration, start });
