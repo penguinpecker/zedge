@@ -11,14 +11,14 @@ import (
 	"encoding/json"
 	"errors"
 	"strconv"
+	"strings"
 
 	"github.com/penguinpecker/zedge/engine"
 )
 
 const (
-	StateVersion    = 1
-	MaxParamsBytes  = 16 << 10
-	MaxPayloadBytes = 16_384 // MAX_PAYLOAD_BYTES in adapters/vela/crypto/session.ts
+	StateVersion   = 2
+	MaxParamsBytes = 16 << 10
 	// MaxStateBytes is the largest state the guest serves, and the largest
 	// buffer the wasm layer hands the host. It is a measured bound, not the
 	// engine's 8 MiB: TinyGo's collector keeps dead buffers that a constant in
@@ -29,6 +29,24 @@ const (
 	// round can start beyond it, and a wrong unit (milliseconds) is above it.
 	MaxClock    = 1<<32 - 1
 	maxEvidence = 4096 // the engine's external-evidence capacity
+
+	// The adapter's own caps (README section 9). The engine allows far more, but
+	// a state with every one of these reached still fits MaxStateBytes
+	// (TestStateAtEveryCapFitsTheBound), and a state past the bound could never
+	// be shrunk again.
+	MaxSliceAccounts = 32
+	MaxSliceRounds   = 8
+	MaxSliceMarkets  = 1
+	MaxAccountOrders = 4  // active orders per account
+	MaxFills         = 4  // fills per activated command
+	MaxActivations   = 16 // staged commands applied per tick
+	MaxSweeps        = 16 // settlement redeems per tick
+	MaxArchives      = 4  // rounds archived per tick
+	MaxRecords       = 16 // registry records in one trusted payload
+	// MaxStagedBytes bounds a staged command's canonical JSON. Every book
+	// command the engine could accept is at most 519 bytes; without the bound
+	// 32 accounts could each park an 8 KiB command in the state until its tick.
+	MaxStagedBytes = 576
 )
 
 // DeployParams are the constructor parameters. Engine.Domain.ApplicationID
@@ -39,14 +57,30 @@ type DeployParams struct {
 	ApplicationFingerprint string        `json:"applicationFingerprint"`
 	Origin                 string        `json:"origin"`
 	Epoch                  string        `json:"epoch"`
+	Markets                []Market      `json:"markets"`
+}
+
+// Market is one registry schedule the deployment mirrors (README section 10).
+type Market struct {
+	Asset    string `json:"asset"`    // BTC or ETH
+	Duration uint64 `json:"duration"` // 300 or 900 seconds
 }
 
 // Staged is a book command (place_order, cancel_order, cancel_all) waiting for
-// the tick that carries its commit timestamp. Designed, not built: this build
-// never stages and refuses a state that holds one.
+// the tick that carries its commit timestamp (README section 9).
 type Staged struct {
-	Tick    uint64         `json:"tick"`
+	Tick    uint64         `json:"tick"` // the tick its staging request asked for
 	Command engine.Command `json:"command"`
+}
+
+// Outcome is what activation did with an account's staged command. The account
+// collects it with its next accepted request.
+type Outcome struct {
+	Account   string `json:"account"`
+	CommandID string `json:"commandId"`
+	Tick      uint64 `json:"tick"`
+	Status    string `json:"status"`           // applied or rejected
+	Reason    string `json:"reason,omitempty"` // rejected only
 }
 
 // Notice counts the receipts an account was sent that carry no command ID: in
@@ -63,16 +97,20 @@ type State struct {
 	ApplicationFingerprint string        `json:"applicationFingerprint"`
 	Origin                 string        `json:"origin"`
 	Epoch                  string        `json:"epoch"`
+	Markets                []Market      `json:"markets"`
 	Salt                   string        `json:"salt"`        // 32 random bytes drawn at deploy; keeps the public state root unguessable
 	Clock                  uint64        `json:"clock"`       // block.timestamp of the last accepted tick, 0 before the first
 	Block                  uint64        `json:"block"`       // block.number that tick reported; recorded, never compared
 	TickSeq                uint64        `json:"tickSeq"`     // ticks requested so far
 	LastTick               uint64        `json:"lastTick"`    // highest tick applied
-	Staged                 []Staged      `json:"staged"`      // always empty in this build
+	Staged                 []Staged      `json:"staged"`      // ascending tick, at most one per account
+	Outcomes               []Outcome     `json:"outcomes"`    // sorted by account, at most one per account
 	Deposits               uint64        `json:"deposits"`    // credited deposits; the next one's ordinal is +1
 	Withdrawals            uint64        `json:"withdrawals"` // withdrawals handed to the endpoint
 	Notices                []Notice      `json:"notices"`     // sorted by account
 	Engine                 *engine.State `json:"engine"`
+
+	taken *outcomeReceipt // the outcome this request's receipt hands back; never stored
 }
 
 func isHex(s string, n int) bool {
@@ -95,6 +133,45 @@ func isAddress(s string) bool {
 
 // The networks session.ts accepts: local Anvil, Horizen testnet, Base Sepolia.
 func evaluationChain(id uint64) bool { return id == 31337 || id == 2651420 || id == 84532 }
+
+func marketValid(m Market) bool {
+	return (m.Asset == "BTC" || m.Asset == "ETH") && (m.Duration == 300 || m.Duration == 900)
+}
+
+func bookOp(op engine.Operation) bool {
+	return op == engine.PlaceOrder || op == engine.CancelOrder || op == engine.CancelAll
+}
+
+func account(e *engine.State, id string) *engine.Account {
+	for i := range e.Accounts {
+		if e.Accounts[i].ID == id {
+			return &e.Accounts[i]
+		}
+	}
+	return nil
+}
+
+func activeOrders(e *engine.State, id string) int {
+	n := 0
+	for _, o := range e.Orders {
+		if o.Account == id {
+			n++
+		}
+	}
+	return n
+}
+
+func marshalCommand(c engine.Command) []byte { b, _ := json.Marshal(c); return b }
+
+// stagedBy is the index of the account's staged command, or -1.
+func (s *State) stagedBy(id string) int {
+	for i, x := range s.Staged {
+		if x.Command.Account == id {
+			return i
+		}
+	}
+	return -1
+}
 
 func applicationID(s string) bool {
 	n, err := strconv.ParseUint(s, 10, 64)
@@ -151,8 +228,13 @@ func canonical(b []byte, v any) bool {
 
 func (s *State) validate() error {
 	if s == nil || s.Version != StateVersion || !isHex(s.ApplicationFingerprint, 64) || !originValid(s.Origin) || !epochValid(s.Epoch) ||
-		!isHex(s.Salt, 64) || s.Salt == zeroSalt {
+		!isHex(s.Salt, 64) || s.Salt == zeroSalt || len(s.Markets) < 1 || len(s.Markets) > MaxSliceMarkets {
 		return errors.New("invalid adapter identity")
+	}
+	for _, m := range s.Markets {
+		if !marketValid(m) {
+			return errors.New("invalid market")
+		}
 	}
 	if err := engine.Validate(s.Engine); err != nil {
 		return err
@@ -167,8 +249,31 @@ func (s *State) validate() error {
 		(s.LastTick == 0) != (s.Clock == 0) || e.Time > s.Clock {
 		return errors.New("invalid clock")
 	}
-	if s.Staged == nil || len(s.Staged) != 0 {
-		return errors.New("staged commands are not supported by this build")
+	if len(e.Accounts) > MaxSliceAccounts || len(e.Rounds) > MaxSliceRounds {
+		return errors.New("slice capacity")
+	}
+	for _, a := range e.Accounts {
+		if activeOrders(e, a.ID) > MaxAccountOrders {
+			return errors.New("slice capacity")
+		}
+	}
+	// A staged command is its account's next one, so nothing else of that
+	// account can have been accepted since; one per account, in tick order.
+	if s.Staged == nil || s.Outcomes == nil {
+		return errors.New("invalid staged commands or outcomes")
+	}
+	for i, x := range s.Staged {
+		a := account(e, x.Command.Account)
+		if !bookOp(x.Command.Op) || a == nil || x.Command.Nonce != a.Nonce+1 || len(marshalCommand(x.Command)) > MaxStagedBytes || x.Tick == 0 || x.Tick > s.TickSeq ||
+			i > 0 && s.Staged[i-1].Tick >= x.Tick || s.stagedBy(a.ID) != i {
+			return errors.New("invalid staged command")
+		}
+	}
+	for i, o := range s.Outcomes {
+		if account(e, o.Account) == nil || !strings.HasPrefix(o.CommandID, o.Account+":") || o.Tick == 0 || o.Tick > s.LastTick ||
+			o.Status != "applied" && o.Status != "rejected" || (o.Status == "applied") != (o.Reason == "") || i > 0 && s.Outcomes[i-1].Account >= o.Account {
+			return errors.New("invalid outcome")
+		}
 	}
 	// Every evidence ID in the engine is one this adapter derived: one per
 	// deposit, two per withdrawal. No withdrawal outlives its transition.
@@ -176,7 +281,7 @@ func (s *State) validate() error {
 		e.Claimable != 0 || len(e.Withdrawals) != 0 {
 		return errors.New("custody bookkeeping mismatch")
 	}
-	if s.Notices == nil || len(s.Notices) > engine.MaxAccounts {
+	if s.Notices == nil || len(s.Notices) > MaxSliceAccounts {
 		return errors.New("invalid notices")
 	}
 	for i, n := range s.Notices {

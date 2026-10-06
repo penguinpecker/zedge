@@ -1,3 +1,7 @@
+// EVALUATION ONLY: software TEE, no attestation, test token, fixture oracle; sender,
+// amount and time are trusted from the manager. Not private, not secure, not
+// production-ready.
+//
 // Repeats a fixture of host calls on ONE guest instance, the way the executor
 // reuses its cached instance, and fails if linear memory keeps growing.
 // TinyGo's collector takes constants in the wasm data section for pointers, so
@@ -73,17 +77,17 @@ guest.deallocate(largest, fixture.bound);
 assert.equal(guest.allocate(fixture.bound + 1), 0);
 
 const calls = fixture.calls.map((c) => ({ ...c, sender: bytes(c.sender), token: bytes(c.token), value: bytes(c.value), payload: bytes(c.payload), state: bytes(c.state), expect: bytes(c.expect) }));
-const size = [], started = Date.now();
-let slowest = 0;
+const size = [], slowest = {}, started = Date.now();
 for (let round = 0; round < rounds; round++) {
   for (const c of calls) {
     const began = Date.now();
     assert.ok(call(c).equals(c.expect), `round ${round}: "${c.name}" differs from the native adapter`);
-    slowest = Math.max(slowest, Date.now() - began);
+    slowest[c.name] = Math.max(slowest[c.name] ?? 0, Date.now() - began);
   }
   size.push(memory.buffer.byteLength / 2 ** 20);
 }
 const settled = size[Math.floor(rounds / 4)], last = size[rounds - 1];
-console.log(`${rounds} rounds of ${calls.length} calls, states up to ${Math.max(...calls.map((c) => c.state.length))} bytes: linear memory ${[...new Set(size)].join(' -> ')} MiB; slowest call ${slowest} ms; ${Date.now() - started} ms`);
+const top = Object.entries(slowest).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([name, ms]) => `${name} ${ms} ms`).join('; ');
+console.log(`${rounds} rounds of ${calls.length} calls, states up to ${Math.max(...calls.map((c) => c.state.length))} bytes: linear memory ${[...new Set(size)].join(' -> ')} MiB; slowest calls: ${top}; ${Date.now() - started} ms`);
 assert.equal(last, settled, `linear memory grew from ${settled} to ${last} MiB after the first quarter of the run`);
 assert.ok(last <= fixture.ceilingMiB, `linear memory is ${last} MiB, above the ${fixture.ceilingMiB} MiB this bound was measured at`);

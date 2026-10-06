@@ -1,3 +1,7 @@
+// EVALUATION ONLY: software TEE, no attestation, test token, fixture oracle; sender,
+// amount and time are trusted from the manager. Not private, not secure, not
+// production-ready.
+//
 // This file is ZEDGE code, but it only compiles inside the upstream Vela module:
 // TestUpstreamConformance copies it to build/upstream/vela-*/app/zedgeconformance
 // and runs it there. It drives the built guest through upstream's own host
@@ -111,11 +115,18 @@ func TestGuestMatchesNativeAdapter(t *testing.T) {
 			_ = rt.Close()
 			rt = vela_wasm.NewWasmtimeRuntime(log, 0)
 			continue
+		case "load":
+			// A state built natively (the state at every cap): the host stores it as it is.
+			state = s.Payload
+			continue
 		default:
 			t.Fatalf("%s: unknown call %q", s.Name, s.Call)
 		}
 		if d := time.Since(began); d > slowest && s.Call != "deploy" {
 			slowest, slowestName = d, s.Name
+		}
+		if d := time.Since(began); d > 100*time.Millisecond && s.Call != "deploy" {
+			t.Logf("%s: %s", s.Name, d.Round(time.Millisecond))
 		}
 
 		if s.Error != "" {

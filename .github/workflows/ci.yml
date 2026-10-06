@@ -125,6 +125,8 @@ jobs:
         with:
           version: v1.7.1
       # forge-std and OpenZeppelin come from contracts/, by relative path (adapters/vela/stack/contracts/foundry.toml).
+      # The trigger's tests also compile contracts/src/StreamsRoundRegistry.sol (it needs contracts-upgradeable)
+      # and the fixture oracle in contracts/test/mocks, read-only, so the trigger is tested against the real registry.
       - run: bash contracts/scripts/install-deps.sh
         working-directory: .
       - run: forge fmt --check && forge test

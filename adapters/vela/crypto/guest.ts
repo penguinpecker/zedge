@@ -55,29 +55,49 @@ export interface EngineCommand {
   observation?: EngineObservation;
 }
 
-/** What the guest puts in a receipt envelope's body. `receipt` is the engine's
- * projection for this account only: it never names a counterparty. Every
- * receipt answers a request of the account it goes to, and every plaintext is
- * padded to a multiple of RECEIPT_BYTES. */
-export const RECEIPT_BYTES = 2048;
+/** The engine's projection of one command's receipt for this account only: it
+ * never names a counterparty. */
+export interface EngineReceipt {
+  sequence: number;
+  commandId?: string;
+  status: string;
+  roundId?: string;
+  orderId?: string;
+  withdrawalId?: string;
+  amount?: number;
+  fills?: { orderId: string; role: string; side: string; roundId: string; outcome: string; price: number; quantity: number; fee: number }[];
+  releasedOrders?: string[];
+}
+/** What the guest puts in a receipt envelope's body. Every receipt answers a
+ * request of the account it goes to, and every plaintext is padded to a
+ * multiple of RECEIPT_BYTES. */
+export const RECEIPT_BYTES = 8192;
 export interface ReceiptBody {
   type: "command" | "deposit" | "sync";
-  status: "applied" | "retry" | "rejected" | "credited" | "requested";
+  /** "staged": a book command waits for the tick that applies it; its result
+   * comes back as `outcome` with the account's next request. */
+  status: "applied" | "retry" | "rejected" | "staged" | "credited" | "requested";
   reason?: string;
-  receipt?: {
-    sequence: number;
-    commandId?: string;
-    status: string;
-    roundId?: string;
-    orderId?: string;
-    withdrawalId?: string;
-    amount?: number;
-    fills?: { orderId: string; role: string; side: string; roundId: string; outcome: string; price: number; quantity: number; fee: number }[];
-    releasedOrders?: string[];
-  };
+  receipt?: EngineReceipt;
   deposit?: number;
   registered?: boolean;
   withdrawal?: number;
+  /** What a tick did with this account's staged book command, returned once,
+   * by the account's next accepted request of any kind. An applied outcome
+   * carries that command's receipt (its fills) while it is still the account's
+   * stored last receipt. */
+  outcome?: { account: string; commandId: string; tick: number; status: "applied" | "rejected"; reason?: string; receipt?: EngineReceipt };
+  /** The account after this request (engine.AccountView); absent if it is not
+   * registered. A maker learns of its fills here. Take the next nonce from
+   * here, never from a local count: a settlement sweep redeems in the
+   * account's own name and uses a nonce. */
+  view?: {
+    account: string; sequence: number; nonce: number; cash: number; reservedCash: number;
+    holdings: { roundId: string; up: number; down: number; reservedUp: number; reservedDown: number }[];
+    orders: { id: string; roundId: string; outcome: string; side: string; price: number; original: number; remaining: number; filled: number;
+      filledNotional: number; feePaid: number; maxFee: number; reservedCash: number; sequence: number; expiry: number }[];
+    withdrawals: unknown[];
+  };
   /** The trusted clock the request was judged at: the last tick applied before
    * it. Compare `timestamp` with the block that carried the request; a large
    * gap means the clock was stale or held back. All zero before the first tick. */
@@ -170,12 +190,13 @@ export function noticeRequestId(account: string, count: number): string {
   return `${account}:notice:${atoms("count", count)}`;
 }
 
-/** Envelope body for a command: `session.encryptCommand(command.id, commandBody(command))`. */
+/** Envelope body for a command. The guest accepts only padded requests (pad.ts):
+ * `session.encryptCommand(command.id, padBody(session, command.id, commandBody(command)))`. */
 export function commandBody(value: EngineCommand): { type: "command"; command: string } {
   return { type: "command", command: encodeCommand(value) };
 }
-/** Envelope body that asks the trigger for a clock tick:
- * `session.encryptCommand(syncRequestId(account), syncBody())`. */
+/** Envelope body that asks the trigger for a clock tick, padded like every request (pad.ts):
+ * `session.encryptCommand(syncRequestId(account), padBody(session, syncRequestId(account), syncBody()))`. */
 export function syncBody(): { type: "sync" } {
   return { type: "sync" };
 }

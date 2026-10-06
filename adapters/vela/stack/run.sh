@@ -10,7 +10,7 @@
 #   VELA_STARTERKIT=/path ./run.sh  # take the starter kit from a local clone
 #
 # Needs Docker (about 3 GB free for the stack's volumes), Foundry, Node 22 and the
-# guest wasm (../guest/build.sh). Evidence goes to evidence/vela-slice-2026-10-05/.
+# guest wasm (../guest/build.sh). Evidence goes to evidence/vela-slice-2026-10-06/.
 set -u
 cd "$(dirname "$0")"
 . ./lib.sh
@@ -61,6 +61,6 @@ echo "EVALUATION ONLY. Software TEE, no attestation, test token, fixture oracle;
 grep -E '^(PASS|FAIL)  ' "$log" | awk '{print $1}' | sort | uniq -c | awk '{printf "checks: %s %s\n", $1, $2}'
 grep -E '^FAIL  ' "$log" || true
 echo "$summary"
-echo "evidence: $(cd ../../.. && pwd)/evidence/vela-slice-2026-10-05/"
+echo "evidence: $(cd ../../.. && pwd)/evidence/vela-slice-2026-10-06/"
 [ "$failed" = 0 ] && echo "RESULT: PASS" || echo "RESULT: FAIL"
 exit "$failed"

@@ -15,8 +15,10 @@ var update = flag.Bool("update", false, "rewrite testdata/vectors.json")
 
 // testdata/vectors.json is the contract with adapters/vela/crypto: guest.test.ts
 // requires its encoder to produce every "canonical" string, session.ts to
-// produce every request "plaintext", and every receipt "plaintext" to pass the
-// session's context checks. This test requires the same file to be exactly
+// produce every request "plaintext" from guest.ts's body, and every receipt
+// "plaintext" to pass the session's context checks; pad.test.ts requires
+// pad.ts to turn that body into the request "padded", the only form the guest
+// accepts (README section 4). This test requires the same file to be exactly
 // what the engine and this adapter produce and accept.
 //
 //	go test -run TestVectors -update .
@@ -26,11 +28,27 @@ type commandVector struct {
 	Canonical string          `json:"canonical"`
 }
 type requestVector struct {
-	Name      string      `json:"name"`
-	Account   string      `json:"account"`
-	RequestID string      `json:"requestId"`
-	Body      requestBody `json:"body"`
-	Plaintext string      `json:"plaintext"`
+	Name      string   `json:"name"`
+	Account   string   `json:"account"`
+	RequestID string   `json:"requestId"`
+	Body      bareBody `json:"body"`      // guest.ts's body, before padding
+	Plaintext string   `json:"plaintext"` // what session.ts encrypts for that body, which the guest refuses
+	Padded    string   `json:"padded"`    // the same request padded by pad.ts, which the guest accepts
+}
+
+// bareBody and bareEnvelope are a request before ../crypto/pad.ts pads it.
+type bareBody struct {
+	Type    string `json:"type"`
+	Command string `json:"command,omitempty"`
+}
+type bareEnvelope struct {
+	Version   uint32         `json:"version"`
+	Domain    envelopeDomain `json:"domain"`
+	Account   string         `json:"account"`
+	Epoch     string         `json:"epoch"`
+	RequestID string         `json:"requestId"`
+	Kind      string         `json:"kind"`
+	Body      bareBody       `json:"body"`
 }
 type receiptVector struct {
 	Name      string `json:"name"`
@@ -109,16 +127,18 @@ func TestVectors(t *testing.T) {
 		v.Commands = append(v.Commands, commandVector{c.name, marshal(loose), string(text)})
 	}
 
-	steps := run(t, script()[:30])
+	steps := run(t, script())
 	for name, title := range map[string]string{"register": "explicit register after a deposit is a retry", "withdraw": "alice withdraws", "sync": "sync asks for tick 10"} {
 		s := find(t, steps, title)
 		var e requestEnvelope
-		if s.Error != "" || !canonical(s.Payload, &e) {
+		if s.Error != "" || !canonical(s.Payload, &e) || len(s.Payload) != RequestBytes {
 			t.Fatalf("%s: the script's own request is not canonical", title)
 		}
-		v.Requests = append(v.Requests, requestVector{name, e.Account, e.RequestID, e.Body, string(s.Payload)})
+		b := bareBody{e.Body.Type, e.Body.Command}
+		v.Requests = append(v.Requests, requestVector{name, e.Account, e.RequestID, b, string(marshal(bareEnvelope{e.Version, e.Domain, e.Account, e.Epoch, e.RequestID, e.Kind, b})), string(s.Payload)})
 	}
-	for _, title := range []string{"first deposit registers and credits alice", "explicit register after a deposit is a retry", "bob registers", "alice withdraws", "overdraft is rejected in private", "sync asks for tick 10", "bob deposits"} {
+	for _, title := range []string{"first deposit registers and credits alice", "explicit register after a deposit is a retry", "bob registers", "alice withdraws", "overdraft is rejected in private", "sync asks for tick 10", "bob deposits",
+		"order for an unknown round is staged", "alice collects her order's outcome and stages a cancel", "bob collects his fill"} {
 		for _, e := range find(t, steps, title).Events {
 			r := body(t, e)
 			v.Receipts = append(v.Receipts, receiptVector{title, r.Account, r.RequestID, r.Body.Type, r.Body.Status, string(e.Data)})

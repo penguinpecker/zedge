@@ -126,11 +126,13 @@ func TestGuestShim(t *testing.T) {
 	}
 }
 
-// TestGuestSoak repeats requests on states at the size bound in one guest
-// instance, as the executor does, and fails if linear memory keeps growing or
-// any result differs from the native adapter's. MaxStateBytes stands on this
-// test: TinyGo's collector does not free large dead buffers reliably, and above
-// about 0.7 MB a state makes memory double without limit.
+// TestGuestSoak repeats requests on states at the size bound, and on a state
+// with every adapter cap reached (README section 9), in one guest instance, as
+// the executor does, and fails if linear memory keeps growing or any result
+// differs from the native adapter's. MaxStateBytes stands on this test:
+// TinyGo's collector does not free large dead buffers reliably, and above
+// about 0.7 MB a state makes memory double without limit. Its slowest calls
+// are the measurement behind MaxActivations and MaxSweeps.
 //
 //	ZEDGE_SOAK_ROUNDS=400 go test -run TestGuestSoak -v .   # the long run
 func TestGuestSoak(t *testing.T) {
@@ -156,11 +158,11 @@ func TestGuestSoak(t *testing.T) {
 	process := func(name, who string, payload, st []byte) {
 		calls = append(calls, soakCall{name, "process", raw(who), nil, nil, payload, st, ProcessRequest(testApp, raw(who), requestTypeProcess, payload, st)})
 	}
-	withdrawal := func(amount uint64) []byte { // alice's next command on the script's final state
+	withdrawal := func(amount uint64) []byte { // alice's next command at the end of the time-free steps
 		return commandPayload(alice, 3, engine.Command{Op: engine.RequestWithdrawal, Amount: amount, Destination: outside})
 	}
 	steps := run(t, script())
-	end := steps[len(steps)-1].after // 256 accounts, 255 of them funded
+	end := find(t, steps, "tick with an earlier block number is accepted").after // 32 accounts, 31 of them funded
 
 	// A state as large as the guest takes, less the most one request adds.
 	full := inflate(t, end, MaxStateBytes-2048)
@@ -177,15 +179,36 @@ func TestGuestSoak(t *testing.T) {
 
 	// The exit reserve through the wasm: two evidence IDs left per funded account.
 	s := state(t, end)
-	spend(s, 2*(engine.MaxAccounts-1))
+	spend(s, 2*(MaxSliceAccounts-1))
 	closing := marshal(s)
 	process("partial withdrawal into the exit reserve", alice, withdrawal(1), closing)
 	process("full withdrawal from the exit reserve", alice, withdrawal(150_000_000), closing)
 
+	// The state with every cap reached.
+	placing, cancelling, idle, at := capped(t)
+	nonce := account(state(t, idle).Engine, alice).Nonce + 1
+	trusted := func(name string, st []byte) {
+		calls = append(calls, soakCall{name, "trusted", nil, nil, nil, at, st, TrustedRequest(testApp, at, st)})
+	}
+	deposit := func(name string, st []byte) {
+		calls = append(calls, soakCall{name, "deposit", raw(alice), raw(collateral), five, nil, st, Deposit(testApp, raw(alice), raw(collateral), five, st)})
+	}
+	process("sync at every cap", bob, syncPayload(bob), placing)
+	process("refusal at every cap", alice, commandPayload(alice, nonce, engine.Command{Op: engine.RequestWithdrawal, Amount: 1, Destination: outside}), placing)
+	deposit("deposit refused at every cap", placing)
+	trusted("16 activations refused at every cap", placing)
+	trusted("16 cancel_all activations at every cap", cancelling)
+	process("withdrawal at every cap", alice, commandPayload(alice, nonce, engine.Command{Op: engine.RequestWithdrawal, Amount: 1, Destination: outside}), idle)
+	deposit("deposit at every cap", idle)
+	trusted("16 sweeps at every cap", idle)
+	heavy, heavyTick := heaviest(t)
+	calls = append(calls, soakCall{"7 resolutions, 16 cancel_all and 16 sweeps at the caps", "trusted", nil, nil, nil, heavyTick, heavy, TrustedRequest(testApp, heavyTick, heavy)})
+
 	for _, c := range calls {
 		r := result(t, c.Expect)
 		paid := len(r.Withdrawals) == 1
-		if (r.Error != "") != (c.Name == "largest payload") || paid != (c.Name == "withdrawal at the size bound" || c.Name == "full withdrawal from the exit reserve") || len(r.State) > MaxStateBytes {
+		failed := c.Name == "largest payload" || c.Name == "deposit refused at every cap"
+		if (r.Error != "") != failed || paid != (c.Name == "withdrawal at the size bound" || c.Name == "full withdrawal from the exit reserve" || c.Name == "withdrawal at every cap") || len(r.State) > MaxStateBytes {
 			t.Fatalf("%s: error %q, %d withdrawals, %d-byte state", c.Name, r.Error, len(r.Withdrawals), len(r.State))
 		}
 	}
@@ -206,13 +229,30 @@ func TestGuestSoak(t *testing.T) {
 	t.Log(strings.TrimSpace(string(out)))
 }
 
+// busiest loads the states at the caps and applies the heaviest ticks: seven
+// resolutions, sixteen cancel_all activations and sixteen sweeps on the full
+// book; sixteen cancel_all activations and sixteen sweeps; sixteen sweeps.
+func busiest(t testing.TB) []step {
+	_, cancelling, idle, tick := capped(t)
+	heavy, heavyTick := heaviest(t)
+	return []step{
+		{Name: "load the full book before seven rounds resolve, every account cancelling all", Call: "load", Payload: heavy},
+		{Name: "7 resolutions, 16 cancel_all activations and 16 sweeps at the caps", Call: "trusted", Payload: heavyTick},
+		{Name: "load the state at every cap, every account cancelling all", Call: "load", Payload: cancelling},
+		{Name: "16 cancel_all activations at every cap", Call: "trusted", Payload: tick},
+		{Name: "load the state at every cap, nothing staged", Call: "load", Payload: idle},
+		{Name: "16 sweeps at every cap", Call: "trusted", Payload: tick},
+	}
+}
+
 // soakCeilingMiB is twice the linear memory the bound was measured at.
 const soakCeilingMiB = 192
 
 // TestUpstreamConformance runs the built guest through upstream Vela's own
 // host runtime at both pinned commits and requires every step of the script to
 // return exactly what the native adapter returned: same state bytes, same
-// engine state hash, same events and withdrawals, same error text.
+// engine state hash, same events and withdrawals, same error text. It ends
+// with the two busiest ticks the caps allow, timed in each runtime.
 func TestUpstreamConformance(t *testing.T) {
 	wasm := builtGuest(t)
 	sum := sha256.Sum256(wasm)
@@ -225,7 +265,7 @@ func TestUpstreamConformance(t *testing.T) {
 		Application uint64 `json:"application"`
 		Salt        string `json:"salt"`
 		Steps       []step `json:"steps"`
-	}{testApp, hex.EncodeToString(testSalt), run(t, script())}), 0o644); err != nil {
+	}{testApp, hex.EncodeToString(testSalt), run(t, append(script(), busiest(t)...))}), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	host, err := os.ReadFile("testdata/host/conformance_test.go")

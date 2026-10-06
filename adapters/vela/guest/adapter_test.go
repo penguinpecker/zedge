@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -65,7 +66,7 @@ func TestTimeFreePaths(t *testing.T) {
 	}
 
 	sync := find(t, steps, "sync asks for tick 1")
-	if len(sync.AppEvents) != 1 || sync.AppEvents[0].EventSubType != TickSubType || !bytes.Equal(sync.AppEvents[0].Data, words(1)) || len(sync.Events) != 1 || sync.Withdrawals != nil {
+	if len(sync.AppEvents) != 1 || sync.AppEvents[0].EventSubType != TickSubType || !bytes.Equal(sync.AppEvents[0].Data, words(1, 0, 0)) || len(sync.Events) != 1 || sync.Withdrawals != nil {
 		t.Fatalf("sync: %+v", sync)
 	}
 	if r := body(t, sync.Events[0]); r.Account != keeper || r.RequestID != keeper+":sync" || r.Body.Type != "sync" || r.Body.Status != "requested" || r.Body.Tick != 1 || r.Body.At != (receiptAt{}) || !sameButTick(t, sync.before, sync.after) {
@@ -76,7 +77,7 @@ func TestTimeFreePaths(t *testing.T) {
 		t.Fatalf("tick 1: %+v", s)
 	}
 	// The tick publishes what it applied, and never asks for another tick.
-	if tick.Events != nil || tick.Withdrawals != nil || len(tick.AppEvents) != 1 || tick.AppEvents[0].EventSubType != ClockSubType || !bytes.Equal(tick.AppEvents[0].Data, words(1, block0, t0)) {
+	if tick.Events != nil || tick.Withdrawals != nil || len(tick.AppEvents) != 1 || tick.AppEvents[0].EventSubType != ClockSubType || !bytes.Equal(tick.AppEvents[0].Data, clockRecord(tick.Payload, 1, block0, t0, 0, 0)) {
 		t.Fatalf("tick 1 effects: %+v", tick)
 	}
 
@@ -119,7 +120,6 @@ func TestTimeFreePaths(t *testing.T) {
 	for name, reason := range map[string]string{
 		"overdraft is rejected in private":                     "insufficient available cash",
 		"withdrawal to the endpoint is rejected in private":    "withdrawal destination not allowed",
-		"order is rejected in private":                         "order book commands are not enabled in this build",
 		"authority command from a user is rejected in private": "wrong authorization class",
 	} {
 		s := find(t, steps, name)
@@ -131,8 +131,18 @@ func TestTimeFreePaths(t *testing.T) {
 		}
 	}
 
-	if s := state(t, find(t, steps, "tick 10 checkpoints the engine and skips eight").after); s.Clock != t1 || s.Block != block1 || s.LastTick != 10 || s.TickSeq != 10 || s.Engine.Time != t1 {
-		t.Fatalf("tick 10: %+v", s)
+	// A book command is staged, not applied: the ledger is untouched and the
+	// tick that passes it applies it, here to a round the engine never held.
+	staged := find(t, steps, "order for an unknown round is staged")
+	if s := state(t, staged.after); len(s.Staged) != 1 || s.Staged[0].Tick != 8 || !bytes.Equal(marshal(s.Engine), marshal(state(t, staged.before).Engine)) {
+		t.Fatalf("staging: %+v", s.Staged)
+	}
+	if r := body(t, staged.Events[0]); r.Body.Type != "command" || r.Body.Status != "staged" || r.Body.Tick != 8 || r.Body.Receipt != nil {
+		t.Fatalf("staged receipt: %+v", r.Body)
+	}
+	if s := state(t, find(t, steps, "tick 10 checkpoints the engine and skips eight").after); s.Clock != t1 || s.Block != block1 || s.LastTick != 10 || s.TickSeq != 10 || s.Engine.Time != t1 ||
+		len(s.Staged) != 0 || len(s.Outcomes) != 1 || s.Outcomes[0] != (Outcome{alice, alice + ":3", 8, "rejected", "unknown round"}) {
+		t.Fatalf("tick 10: %+v %+v", s.Staged, s.Outcomes)
 	}
 	if r := body(t, find(t, steps, "bob deposits").Events[0]); r.RequestID != bob+":notice:1" || r.Body.Registered || r.Body.Deposit != 2 {
 		t.Fatalf("bob deposit receipt: %+v", r)
@@ -141,9 +151,9 @@ func TestTimeFreePaths(t *testing.T) {
 		t.Fatalf("bob withdrawal: %+v", w)
 	}
 
-	extra := uint64(engine.MaxAccounts - 2)
-	end := state(t, steps[len(steps)-1].after)
-	if e := end.Engine; len(e.Accounts) != engine.MaxAccounts || e.Deposited != 275_000_000+extra || e.Custody != 150_000_000+extra || e.PaidOut != 125_000_000 ||
+	extra := uint64(MaxSliceAccounts - 2)
+	end := state(t, find(t, steps, "tick with an earlier block number is accepted").after)
+	if e := end.Engine; len(e.Accounts) != MaxSliceAccounts || e.Deposited != 275_000_000+extra || e.Custody != 150_000_000+extra || e.PaidOut != 125_000_000 ||
 		e.Claimable != 0 || len(e.Withdrawals) != 0 || uint64(len(e.ExternalEvidence)) != 2+extra+4 || end.Deposits != 2+extra || end.Withdrawals != 2 {
 		t.Fatalf("final ledger: deposited=%d custody=%d paidOut=%d accounts=%d", e.Deposited, e.Custody, e.PaidOut, len(e.Accounts))
 	}
@@ -153,31 +163,22 @@ func TestTimeFreePaths(t *testing.T) {
 	}
 }
 
-// words is its arguments as 32-byte big-endian words, as app events carry them.
-func words(v ...uint64) []byte {
-	b := make([]byte, 32*len(v))
-	for i, x := range v {
-		binary.BigEndian.PutUint64(b[32*i+24:], x)
-	}
-	return b
-}
-
 // A request's public shape must not say what it was. Every accepted
-// process_request, whether it applied, was refused, was a retry or was a sync,
-// gives one receipt of one size to its sender and asks for one tick; a deposit
-// gives one receipt; a tick gives none and publishes the clock it applied.
+// process_request, whether it applied, was staged, was refused, was a retry or
+// was a sync, gives one receipt of one size to its sender and asks for one
+// tick; a deposit gives one receipt; a tick gives none, publishes the clock it
+// applied, then any archive records, and asks for a tick only to carry on.
 func TestEveryReplyHasOneShape(t *testing.T) {
-	asked := uint64(0)
+	asked, archived := uint64(0), 0
 	for _, s := range run(t, script()) {
 		if s.Error != "" || s.Call == "deploy" || s.Call == "restart" {
 			continue
 		}
-		after := state(t, s.after)
+		before, after := state(t, s.before), state(t, s.after)
 		switch s.Call {
 		case "process":
 			asked++
-			if len(s.Events) != 1 || s.Events[0].UserID != s.Sender || len(s.AppEvents) != 1 || s.AppEvents[0].EventSubType != TickSubType ||
-				!bytes.Equal(s.AppEvents[0].Data, words(asked)) || after.TickSeq != asked || len(s.Withdrawals) > 1 {
+			if len(s.Events) != 1 || s.Events[0].UserID != s.Sender || len(s.AppEvents) != 1 || !asks(t, after, s.AppEvents[0]) || after.TickSeq != asked || len(s.Withdrawals) > 1 {
 				t.Fatalf("%s: %d receipts, %d app events, %d withdrawals", s.Name, len(s.Events), len(s.AppEvents), len(s.Withdrawals))
 			}
 			if r := body(t, s.Events[0]); r.Body.Tick != asked || (len(s.Withdrawals) == 1) != (r.Body.Withdrawal != 0) {
@@ -188,47 +189,141 @@ func TestEveryReplyHasOneShape(t *testing.T) {
 				t.Fatalf("%s: %d receipts, %d app events", s.Name, len(s.Events), len(s.AppEvents))
 			}
 		case "trusted":
-			if s.Events != nil || s.Withdrawals != nil || len(s.AppEvents) != 1 || s.AppEvents[0].EventSubType != ClockSubType ||
-				!bytes.Equal(s.AppEvents[0].Data, words(after.LastTick, after.Block, after.Clock)) {
+			if s.Events != nil || s.Withdrawals != nil || len(s.AppEvents) == 0 || s.AppEvents[0].EventSubType != ClockSubType || len(s.AppEvents[0].Data) != 192 ||
+				!bytes.Equal(s.AppEvents[0].Data[:96], words(after.LastTick, after.Block, after.Clock)) || !bytes.Equal(s.AppEvents[0].Data[160:], keccak(s.Payload)) || after.TickSeq != before.TickSeq {
 				t.Fatalf("%s: %d receipts, %d app events", s.Name, len(s.Events), len(s.AppEvents))
+			}
+			for _, e := range s.AppEvents[1:] {
+				var record engine.RoundArchive
+				if e.EventSubType != ArchiveSubType || !canonical(e.Data, &record) {
+					t.Fatalf("%s: app event %x", s.Name, e.EventSubType)
+				}
+				archived++
 			}
 		}
 	}
-	if asked != 11 {
-		t.Fatalf("%d requests asked for a tick, want 11", asked)
+	if asked != 24 || archived != 1 {
+		t.Fatalf("%d requests asked for a tick, want 24; %d rounds archived, want 1", asked, archived)
 	}
 }
 
+// asks reports whether e is the request for st's latest tick: the tick
+// number, the counts of scheduled and open rounds, then their registry IDs.
+func asks(t testing.TB, st *State, e AppEvent) bool {
+	t.Helper()
+	var scheduled, open []byte
+	for _, m := range st.rounds() {
+		if m.Status == "scheduled" {
+			scheduled = append(scheduled, raw(m.Spec.RegistryRoundID)...)
+		} else if m.Status == "open" {
+			open = append(open, raw(m.Spec.RegistryRoundID)...)
+		}
+	}
+	want := append(append(words(st.TickSeq, uint64(len(scheduled)/32), uint64(len(open)/32)), scheduled...), open...)
+	return e.EventSubType == TickSubType && bytes.Equal(e.Data, want)
+}
+
 // The largest receipt this build can produce still fits one size class, so
-// length never separates one outcome from another: the longest origin and
-// application ID, every number at its cap, every optional field present.
+// length never separates one outcome from another. Every kind of receipt body,
+// with either kind of collected outcome, a view at every cap, the longest
+// origin and application ID and every number at its cap. A receipt's engine
+// receipt holds fills (an order) or released orders (cancel_all), not both.
 func TestReceiptsAreOneSize(t *testing.T) {
 	s := state(t, run(t, script()[:12])[11].after)
 	s.Origin = "https://" + strings.Repeat("a", 253)
 	s.Engine.Config.Domain.ApplicationID = "18446744073709551615"
 	s.LastTick, s.Block, s.Clock = engine.MaxAtoms, engine.MaxAtoms, MaxClock
-	top := uint64(engine.MaxAtoms)
+	top, round := uint64(engine.MaxAtoms), strings.Repeat("ab", 32)
 	id := engine.CommandID(alice, top)
-	full := engine.PrivateReceipt{Sequence: top, CommandID: id, Status: "self_trade_cancelled", RoundID: strings.Repeat("ab", 32), OrderID: id, WithdrawalID: id, Amount: top, ReleasedOrders: []string{id, id}}
+	fill := engine.PrivateFill{OrderID: id, Role: "maker", Side: engine.Sell, RoundID: round, Outcome: engine.Down, Price: 99, Quantity: top, Fee: top}
+	full := engine.PrivateReceipt{Sequence: top, CommandID: id, Status: "self_trade_cancelled", RoundID: round, OrderID: id, Amount: top, Fills: slices.Repeat([]engine.PrivateFill{fill}, MaxFills)}
+	released := engine.PrivateReceipt{Sequence: top, CommandID: id, Status: "cancelled", RoundID: round, ReleasedOrders: slices.Repeat([]string{id}, MaxAccountOrders)}
+	withdrawn := engine.PrivateReceipt{Sequence: top, CommandID: id, Status: "accepted", WithdrawalID: id, Amount: top}
+	order := engine.Order{ID: id, Account: alice, RoundID: round, Outcome: engine.Down, Side: engine.Sell, Price: 99, Original: top, Remaining: top, Filled: top,
+		FilledNotional: top, FeePaid: top, MaxFee: top, ReservedCash: top, Sequence: top, Expiry: top}
+	view := engine.AccountSnapshot{Account: alice, Sequence: top, Nonce: top, Cash: top, ReservedCash: top, Withdrawals: []engine.Withdrawal{},
+		Orders: slices.Repeat([]engine.Order{order}, MaxAccountOrders), Holdings: slices.Repeat([]engine.Holding{{RoundID: round, Up: top, Down: top, ReservedUp: top, ReservedDown: top}}, MaxSliceRounds)}
+	reason := strings.Repeat("r", 128) // the longest reason is 73 bytes
+	bodies := map[string]receiptBody{
+		"applied":  {Type: "command", Status: "applied", Receipt: &full},
+		"retry":    {Type: "command", Status: "retry", Receipt: &full},
+		"released": {Type: "command", Status: "applied", Receipt: &released},
+		"withdraw": {Type: "command", Status: "applied", Receipt: &withdrawn, Withdrawal: top},
+		"rejected": {Type: "command", Status: "rejected", Reason: reason},
+		"staged":   {Type: "command", Status: "staged"},
+		"deposit":  {Type: "deposit", Status: "credited", Receipt: &withdrawn, Deposit: top, Registered: true},
+		"sync":     {Type: "sync", Status: "requested"},
+	}
 	longest := 0
-	for name, b := range map[string]receiptBody{
-		"applied":  {Type: "command", Status: "applied", Receipt: &full, Withdrawal: top, Tick: top},
-		"retry":    {Type: "command", Status: "retry", Receipt: &full, Tick: top},
-		"rejected": {Type: "command", Status: "rejected", Reason: strings.Repeat("r", 128), Tick: top}, // the longest reason is 73 bytes
-		"deposit":  {Type: "deposit", Status: "credited", Receipt: &full, Deposit: top, Registered: true},
-		"sync":     {Type: "sync", Status: "requested", Tick: top},
-	} {
-		data := s.receipt(alice, alice+":notice:"+fmt.Sprint(top), b).Data
-		var e receiptEnvelope
-		if len(data) != ReceiptBytes || !canonical(data, &e) || strings.Trim(e.Body.Pad, "0") != "" {
-			t.Errorf("%s: %d bytes, want %d", name, len(data), ReceiptBytes)
+	for name, b := range bodies {
+		for _, o := range []outcomeReceipt{{Outcome{alice, id, top, "applied", ""}, &full}, {Outcome{alice, id, top, "rejected", reason}, nil}} {
+			s.taken = &o
+			data := s.receipt(alice, alice+":notice:"+fmt.Sprint(top), b).Data
+			var e receiptEnvelope
+			if len(data) != ReceiptBytes || !canonical(data, &e) || strings.Trim(e.Body.Pad, "0") != "" || e.Body.Outcome == nil || e.Body.View == nil {
+				t.Errorf("%s with an %s outcome: %d bytes, want %d", name, o.Status, len(data), ReceiptBytes)
+			}
+			e.Body.View, e.Body.Pad, e.Body.At, e.Body.Tick = &view, "", receiptAt{top, top, MaxClock}, top
+			longest = max(longest, len(marshal(e)))
 		}
-		longest = max(longest, ReceiptBytes-len(e.Body.Pad))
 	}
 	t.Logf("largest receipt before padding: %d of %d bytes", longest, ReceiptBytes)
+	if longest > ReceiptBytes {
+		t.Fatalf("a receipt can reach %d bytes; the size class is %d", longest, ReceiptBytes)
+	}
 	// A receipt that could not fit moves up a whole class; nothing is cut.
 	if n := len(s.receipt(alice, id, receiptBody{Type: "command", Status: "rejected", Reason: strings.Repeat("r", ReceiptBytes)}).Data); n != 2*ReceiptBytes {
 		t.Errorf("oversized receipt is %d bytes, want %d", n, 2*ReceiptBytes)
+	}
+}
+
+// Every request has one length on chain, whatever it is, and every request
+// that could be accepted fits it: each kind of command at its widest, with
+// the longest origin, application ID, epoch and nonce (README section 4).
+func TestRequestsAreOneSize(t *testing.T) {
+	h := newHarness(t, alice, bob)
+	n := h.next(alice)
+	place := func(o engine.Outcome, side engine.Side) []byte {
+		c := order(side, 60, 1_000_000, engine.GTC)
+		c.Outcome = o
+		return commandPayload(alice, n, c)
+	}
+	for name, p := range map[string][]byte{
+		"sync":            syncPayload(alice),
+		"mint":            commandPayload(alice, n, engine.Command{Op: engine.Mint, RoundID: id1, Quantity: 1_000_000}),
+		"merge":           commandPayload(alice, n, engine.Command{Op: engine.Merge, RoundID: id1, Quantity: 1_000_000}),
+		"redeem":          commandPayload(alice, n, engine.Command{Op: engine.Redeem, RoundID: id1}),
+		"withdraw":        commandPayload(alice, n, engine.Command{Op: engine.RequestWithdrawal, Amount: 1_000_000, Destination: outside}),
+		"cancel_all":      commandPayload(alice, n, engine.Command{Op: engine.CancelAll}),
+		"cancel_order":    commandPayload(alice, n, engine.Command{Op: engine.CancelOrder, OrderID: engine.CommandID(alice, 3)}),
+		"place up buy":    place(engine.Up, engine.Buy),
+		"place up sell":   place(engine.Up, engine.Sell),
+		"place down buy":  place(engine.Down, engine.Buy),
+		"place down sell": place(engine.Down, engine.Sell),
+	} {
+		if r := result(t, ProcessRequest(testApp, raw(alice), requestTypeProcess, p, h.st)); len(p) != RequestBytes || r.Error != "" {
+			t.Errorf("%s: %d bytes, error %q", name, len(p), r.Error)
+		}
+	}
+	d := testDomain()
+	d.ChainID, d.ApplicationID, d.Origin = 2651420, "18446744073709551615", "https://"+strings.Repeat("a", 253)
+	top, round := uint64(engine.MaxAtoms), strings.Repeat("ab", 32)
+	id := engine.CommandID(alice, top)
+	longest := 0
+	for _, c := range []engine.Command{{Op: engine.Register}, {Op: engine.Mint, RoundID: round, Quantity: top}, {Op: engine.Merge, RoundID: round, Quantity: top},
+		{Op: engine.Redeem, RoundID: round}, {Op: engine.RequestWithdrawal, Amount: top, Destination: outside}, {Op: engine.CancelWithdrawal, WithdrawalID: id},
+		{Op: engine.CancelOrder, OrderID: id}, {Op: engine.CancelAll, RoundID: round},
+		{Op: engine.PlaceOrder, RoundID: round, Outcome: engine.Down, Side: engine.Sell, Price: 99, Quantity: top, TIF: engine.GTC, Expiry: MaxClock, MaxFee: top}} {
+		c.Domain, c.ID, c.Nonce, c.Account = engine.Domain{ChainID: d.ChainID, Endpoint: endpoint, ApplicationID: d.ApplicationID, RulesVersion: engine.Version}, id, top, alice
+		if c.Op == engine.PlaceOrder {
+			// As long as staging takes, which is longer than any order the engine accepts.
+			c.RoundID += strings.Repeat("a", MaxStagedBytes-len(marshal(c)))
+		}
+		longest = max(longest, len(marshal(requestEnvelope{1, d, alice, "9999999999", id, "command", requestBody{Type: "command", Command: string(marshal(c))}})))
+	}
+	t.Logf("longest request before padding: %d of %d bytes", longest, RequestBytes)
+	if longest > RequestBytes {
+		t.Fatalf("a request can reach %d bytes; the size class is %d", longest, RequestBytes)
 	}
 }
 
@@ -317,25 +412,6 @@ func TestExitReserve(t *testing.T) {
 	}
 }
 
-// This build cannot grow a state past the bound: with every account slot and
-// every evidence ID used, there is room left for the widest numbers.
-func TestBuiltStateFitsTheBound(t *testing.T) {
-	steps := run(t, script())
-	s := state(t, steps[len(steps)-1].after)
-	spend(s, 0)
-	b, err := s.encode()
-	if err != nil || len(s.Engine.Accounts) != engine.MaxAccounts || len(s.Engine.ExternalEvidence) != maxEvidence {
-		t.Fatalf("%v: %d accounts, %d evidence IDs", err, len(s.Engine.Accounts), len(s.Engine.ExternalEvidence))
-	}
-	// The widest account this build writes (16-digit cash, nonce, sequence,
-	// amount and notice count, a withdrawal as its last receipt) is under 400
-	// bytes more than the ones measured here.
-	if worst := len(b) + 400*engine.MaxAccounts; worst > MaxStateBytes {
-		t.Fatalf("a full state is %d bytes and could reach %d; the bound is %d", len(b), worst, MaxStateBytes)
-	}
-	t.Logf("full state: %d of %d bytes", len(b), MaxStateBytes)
-}
-
 // The adapter must add nothing to the ledger: the same commands and times
 // applied straight to the engine give the same engine state hash. The evidence
 // strings are spelled out here on purpose.
@@ -412,49 +488,65 @@ func TestEnvelopeRejected(t *testing.T) {
 	steps := run(t, script()[:6])
 	before := steps[5].after
 	good := requestEnvelope{1, testDomain(), bob, epoch, bob + ":1", "command", requestBody{Type: "command", Command: string(marshal(engine.Command{Domain: deployed().Domain, ID: bob + ":1", Nonce: 1, Op: engine.Register, Account: bob}))}}
-	edit := func(f func(*requestEnvelope)) []byte { e := good; f(&e); return marshal(e) }
-	text := string(marshal(good))
-	if r := result(t, ProcessRequest(testApp, raw(bob), requestTypeProcess, []byte(text), before)); r.Error != "" || body(t, r.Events[0]).Body.Status != "applied" {
+	edit := func(f func(*requestEnvelope)) []byte { e := good; f(&e); return padded(e) }
+	text := string(padded(good))
+	if r := result(t, ProcessRequest(testApp, raw(bob), requestTypeProcess, []byte(text), before)); r.Error != "" || len(text) != RequestBytes || body(t, r.Events[0]).Body.Status != "applied" {
 		t.Fatalf("the unedited envelope must be accepted: %+v", r)
 	}
-	// Canonical in every respect and inside the command limit, yet over the
-	// payload limit: each quote in the command costs four bytes in the envelope.
-	long := commandPayload(bob, 1, engine.Command{Op: engine.Register, RoundID: strings.Repeat(`"`, 4000)})
-	if len(long) <= MaxPayloadBytes || len(long) > MaxPayloadBytes+1000 {
-		t.Fatalf("the oversized envelope is %d bytes", len(long))
+	// fit takes zeros out of the pad, or adds some, so that an edited envelope
+	// is still RequestBytes long and only the edit can be what is refused.
+	fit := func(s string) []byte {
+		j := strings.LastIndex(s, `"pad":"`) + len(`"pad":"`)
+		j += strings.IndexByte(s[j:], '"') // the pad's closing quote
+		if d := RequestBytes - len(s); d < 0 {
+			return []byte(s[:j+d] + s[j:])
+		}
+		return []byte(s[:j] + strings.Repeat("0", RequestBytes-len(s)) + s[j:])
 	}
+	// What session.ts encrypts for guest.ts's body without ../crypto/pad.ts:
+	// canonical in every respect but its length.
+	bare := marshal(bareEnvelope{1, good.Domain, bob, epoch, bob + ":1", "command", bareBody{"command", good.Body.Command}})
 	for name, c := range map[string]struct {
 		payload []byte
 		want    string
 	}{
-		"other chain":            {edit(func(e *requestEnvelope) { e.Domain.ChainID = 84532 }), ErrContext},
-		"other endpoint":         {edit(func(e *requestEnvelope) { e.Domain.Endpoint = outside }), ErrContext},
-		"other application":      {edit(func(e *requestEnvelope) { e.Domain.ApplicationID = "8" }), ErrContext},
-		"other wasm":             {edit(func(e *requestEnvelope) { e.Domain.ApplicationFingerprint = strings.Repeat("cd", 32) }), ErrContext},
-		"other rules":            {edit(func(e *requestEnvelope) { e.Domain.RulesHash = strings.Repeat("cd", 32) }), ErrContext},
-		"other origin":           {edit(func(e *requestEnvelope) { e.Domain.Origin = "https://zedge.example" }), ErrContext},
-		"other epoch":            {edit(func(e *requestEnvelope) { e.Epoch = "2" }), ErrContext},
-		"a receipt":              {edit(func(e *requestEnvelope) { e.Kind = "receipt" }), ErrContext},
-		"version 2":              {edit(func(e *requestEnvelope) { e.Version = 2 }), ErrContext},
-		"other account":          {edit(func(e *requestEnvelope) { e.Account = alice }), ErrMismatch},
-		"unknown body type":      {edit(func(e *requestEnvelope) { e.Body.Type = "view" }), ErrEnvelope},
-		"sync with a command":    {edit(func(e *requestEnvelope) { e.Body.Type, e.RequestID = "sync", bob+":sync" }), ErrEnvelope},
-		"sync under another ID":  {edit(func(e *requestEnvelope) { e.Body, e.RequestID = requestBody{Type: "sync"}, bob+":1" }), ErrEnvelope},
-		"empty command":          {edit(func(e *requestEnvelope) { e.Body.Command = "" }), ErrCommand},
-		"command with a space":   {edit(func(e *requestEnvelope) { e.Body.Command += " " }), ErrCommand},
-		"command keys reordered": {edit(func(e *requestEnvelope) { e.Body.Command = `{"id":"x",` + e.Body.Command[1:] }), ErrCommand},
-		"command over 8192":      {commandPayload(bob, 1, engine.Command{Op: engine.Register, RoundID: strings.Repeat("a", 8192)}), ErrCommand},
-		"empty":                  {nil, ErrEnvelope},
-		"canonical but too long": {long, ErrEnvelope},
-		"trailing byte":          {[]byte(text + " "), ErrEnvelope},
-		"leading space":          {[]byte(" " + text), ErrEnvelope},
-		"unknown field":          {[]byte(strings.Replace(text, `"kind"`, `"extra":1,"kind"`, 1)), ErrEnvelope},
-		"duplicate field":        {[]byte(strings.Replace(text, `"kind"`, `"epoch":"1","kind"`, 1)), ErrEnvelope},
-		"keys reordered":         {[]byte(strings.Replace(text, `{"version":1,`, `{`, 1)[:len(text)-13] + `,"version":1}`), ErrEnvelope},
-		"body as a string":       {[]byte(strings.Replace(text, `"body":{`, `"body":"x","b":{`, 1)), ErrEnvelope},
-		"number as a string":     {[]byte(strings.Replace(text, `"version":1`, `"version":"1"`, 1)), ErrEnvelope},
-		"not JSON":               {[]byte{0xff, 0x00, 0x7b}, ErrEnvelope},
+		"other chain":                 {edit(func(e *requestEnvelope) { e.Domain.ChainID = 84532 }), ErrContext},
+		"other endpoint":              {edit(func(e *requestEnvelope) { e.Domain.Endpoint = outside }), ErrContext},
+		"other application":           {edit(func(e *requestEnvelope) { e.Domain.ApplicationID = "8" }), ErrContext},
+		"other wasm":                  {edit(func(e *requestEnvelope) { e.Domain.ApplicationFingerprint = strings.Repeat("cd", 32) }), ErrContext},
+		"other rules":                 {edit(func(e *requestEnvelope) { e.Domain.RulesHash = strings.Repeat("cd", 32) }), ErrContext},
+		"other origin":                {edit(func(e *requestEnvelope) { e.Domain.Origin = "https://zedge.example" }), ErrContext},
+		"other epoch":                 {edit(func(e *requestEnvelope) { e.Epoch = "2" }), ErrContext},
+		"a receipt":                   {edit(func(e *requestEnvelope) { e.Kind = "receipt" }), ErrContext},
+		"version 2":                   {edit(func(e *requestEnvelope) { e.Version = 2 }), ErrContext},
+		"other account":               {edit(func(e *requestEnvelope) { e.Account = alice }), ErrMismatch},
+		"unknown body type":           {edit(func(e *requestEnvelope) { e.Body.Type = "view" }), ErrEnvelope},
+		"sync with a command":         {edit(func(e *requestEnvelope) { e.Body.Type, e.RequestID = "sync", bob+":sync" }), ErrEnvelope},
+		"sync under another ID":       {edit(func(e *requestEnvelope) { e.Body, e.RequestID = requestBody{Type: "sync"}, bob+":1" }), ErrEnvelope},
+		"empty command":               {edit(func(e *requestEnvelope) { e.Body.Command = "" }), ErrCommand},
+		"command with a space":        {edit(func(e *requestEnvelope) { e.Body.Command += " " }), ErrCommand},
+		"command keys reordered":      {edit(func(e *requestEnvelope) { e.Body.Command = `{"id":"x",` + e.Body.Command[1:] }), ErrCommand},
+		"command over the size":       {commandPayload(bob, 1, engine.Command{Op: engine.Register, RoundID: strings.Repeat("a", RequestBytes)}), ErrEnvelope},
+		"empty":                       {nil, ErrEnvelope},
+		"not padded":                  {bare, ErrEnvelope},
+		"padded with something else":  {fit(strings.Replace(text, `"pad":"0`, `"pad":"1`, 1)), ErrEnvelope},
+		"padded with escaped zeros":   {fit(strings.Replace(text, `"pad":"0`, `"pad":"\u0030`, 1)), ErrEnvelope},
+		"one byte short":              {[]byte(strings.Replace(text, `"pad":"0`, `"pad":"`, 1)), ErrEnvelope},
+		"one byte long":               {[]byte(strings.Replace(text, `"pad":"`, `"pad":"0`, 1)), ErrEnvelope},
+		"trailing byte":               {fit(text + " "), ErrEnvelope},
+		"leading space":               {fit(" " + text), ErrEnvelope},
+		"unknown field":               {fit(strings.Replace(text, `"kind"`, `"extra":1,"kind"`, 1)), ErrEnvelope},
+		"duplicate field":             {fit(strings.Replace(text, `"kind"`, `"epoch":"1","kind"`, 1)), ErrEnvelope},
+		"keys reordered":              {fit(strings.Replace(text, `{"version":1,`, `{`, 1)[:len(text)-13] + `,"version":1}`), ErrEnvelope},
+		"pad outside the body":        {fit(strings.Replace(text, `"body":{`, `"pad":"","body":{`, 1)), ErrEnvelope},
+		"body as a string":            {fit(strings.Replace(text, `"body":{`, `"body":"x","b":{`, 1)), ErrEnvelope},
+		"number as a string":          {fit(strings.Replace(text, `"version":1`, `"version":"1"`, 1)), ErrEnvelope},
+		"not JSON":                    {[]byte{0xff, 0x00, 0x7b}, ErrEnvelope},
+		"not JSON, of the right size": {bytes.Repeat([]byte{'{'}, RequestBytes), ErrEnvelope},
 	} {
+		if c.payload != nil && len(c.payload) != RequestBytes && c.want != ErrEnvelope {
+			t.Fatalf("%s: %d bytes would be refused for its length", name, len(c.payload))
+		}
 		if got := result(t, ProcessRequest(testApp, raw(bob), requestTypeProcess, c.payload, before)).Error; got != c.want {
 			t.Errorf("%s: error %q, want %q", name, got, c.want)
 		}
@@ -574,6 +666,9 @@ func TestDeployRejected(t *testing.T) {
 		state(t, r.State).Salt != strings.Repeat("5a", 32) {
 		t.Fatalf("deploy: %+v", r.Error)
 	}
+	if r := result(t, Deploy(testApp, edit(func(p *DeployParams) { p.Markets = []Market{{"ETH", 300}} }), testSalt)); r.Error != "" || state(t, r.State).Markets[0] != (Market{"ETH", 300}) {
+		t.Fatalf("deploy of another market: %+v", r.Error)
+	}
 	if got := result(t, Deploy(0, good, testSalt)).Error; got != ErrApplication {
 		t.Errorf("application 0: error %q", got)
 	}
@@ -608,6 +703,12 @@ func TestDeployRejected(t *testing.T) {
 		"epoch 0":                {edit(func(p *DeployParams) { p.Epoch = "0" }), ErrConfig},
 		"epoch with a sign":      {edit(func(p *DeployParams) { p.Epoch = "+1" }), ErrConfig},
 		"epoch of eleven digits": {edit(func(p *DeployParams) { p.Epoch = "12345678901" }), ErrConfig},
+		"markets missing":        {[]byte(strings.Replace(string(good), `,"markets":[{"asset":"BTC","duration":900}]`, "", 1)), ErrParams},
+		"markets null":           {edit(func(p *DeployParams) { p.Markets = nil }), ErrConfig},
+		"no market":              {edit(func(p *DeployParams) { p.Markets = []Market{} }), ErrConfig},
+		"two markets":            {edit(func(p *DeployParams) { p.Markets = []Market{{"BTC", 900}, {"ETH", 900}} }), ErrConfig},
+		"unknown asset":          {edit(func(p *DeployParams) { p.Markets = []Market{{"SOL", 900}} }), ErrConfig},
+		"unknown duration":       {edit(func(p *DeployParams) { p.Markets = []Market{{"BTC", 60}} }), ErrConfig},
 	} {
 		if got := result(t, Deploy(testApp, c.params, testSalt)).Error; got != c.want {
 			t.Errorf("%s: error %q, want %q", name, got, c.want)
@@ -630,9 +731,35 @@ func TestStateRejected(t *testing.T) {
 		"null":                     []byte("null"),
 		"leading space":            []byte(" " + text),
 		"unknown field":            []byte(`{"owner":"x",` + text[1:]),
-		"version 2":                edit(func(s *State) { s.Version = 2 }),
-		"staged command":           edit(func(s *State) { s.Staged = []Staged{{Tick: 1}} }),
-		"staged null":              edit(func(s *State) { s.Staged = nil }),
+		"version 1":                edit(func(s *State) { s.Version = 1 }), // the time-free build, which had no markets or outcomes
+		"no market":                edit(func(s *State) { s.Markets = []Market{} }),
+		"two markets":              edit(func(s *State) { s.Markets = append(s.Markets, Market{"ETH", 300}) }),
+		"market of another length": edit(func(s *State) { s.Markets[0].Duration = 600 }),
+		"staged without a command": edit(func(s *State) { s.Staged = []Staged{{Tick: 1}} }),
+		"staged withdrawal":        edit(func(s *State) { s.Staged = []Staged{{1, staged(alice, 3, engine.RequestWithdrawal)}} }),
+		"staged past nonce":        edit(func(s *State) { s.Staged = []Staged{{1, staged(alice, 2, engine.CancelAll)}} }),
+		"staged for nobody":        edit(func(s *State) { s.Staged = []Staged{{1, staged(keeper, 1, engine.CancelAll)}} }),
+		"staged tick not asked":    edit(func(s *State) { s.Staged = []Staged{{s.TickSeq + 1, staged(alice, 3, engine.CancelAll)}} }),
+		"staged twice": edit(func(s *State) {
+			s.Staged = []Staged{{1, staged(alice, 3, engine.CancelAll)}, {2, staged(alice, 3, engine.CancelAll)}}
+		}),
+		"staged out of tick order": edit(func(s *State) {
+			s.Staged = []Staged{{2, staged(alice, 3, engine.CancelAll)}, {1, staged(bob, 2, engine.CancelAll)}}
+		}),
+		"staged command too large": edit(func(s *State) {
+			c := staged(alice, 3, engine.CancelAll)
+			c.RoundID = strings.Repeat("ab", 300)
+			s.Staged = []Staged{{1, c}}
+		}),
+		"staged null":   edit(func(s *State) { s.Staged = nil }),
+		"outcomes null": edit(func(s *State) { s.Outcomes = nil }),
+		"outcome unsorted": edit(func(s *State) {
+			s.Outcomes = []Outcome{{alice, alice + ":3", 1, "applied", ""}, {bob, bob + ":2", 1, "applied", ""}}
+		}),
+		"outcome tick not applied": edit(func(s *State) { s.Outcomes = []Outcome{{alice, alice + ":3", s.LastTick + 1, "applied", ""}} }),
+		"outcome of another":       edit(func(s *State) { s.Outcomes = []Outcome{{alice, bob + ":3", 1, "applied", ""}} }),
+		"applied with a reason":    edit(func(s *State) { s.Outcomes = []Outcome{{alice, alice + ":3", 1, "applied", "x"}} }),
+		"rejected without reason":  edit(func(s *State) { s.Outcomes = []Outcome{{alice, alice + ":3", 1, "rejected", ""}} }),
 		"notices null":             edit(func(s *State) { s.Notices = nil }),
 		"notices unsorted":         edit(func(s *State) { s.Notices = []Notice{{alice, 1}, {bob, 1}} }),
 		"notice count 0":           edit(func(s *State) { s.Notices[0].Count = 0 }),
@@ -668,4 +795,16 @@ func TestStateRejected(t *testing.T) {
 	if _, err := DecodeState(inflate(t, good, MaxStateBytes)); err != nil {
 		t.Errorf("a state of exactly the bound must be accepted: %v", err)
 	}
+	if _, err := DecodeState(edit(func(s *State) {
+		s.Staged = []Staged{{1, staged(bob, 2, engine.CancelAll)}, {2, staged(alice, 3, engine.CancelAll)}}
+		s.Outcomes = []Outcome{{bob, bob + ":2", 1, "applied", ""}, {alice, alice + ":3", 1, "rejected", "x"}}
+	})); err != nil {
+		t.Errorf("staged commands and outcomes in order must be accepted: %v", err)
+	}
+}
+
+// staged is a canonical book command (or, for the refusal cases, not one).
+func staged(who string, nonce uint64, op engine.Operation) engine.Command {
+	c, _ := command(who, nonce, engine.Command{Op: op})
+	return c
 }

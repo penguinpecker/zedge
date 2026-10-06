@@ -91,7 +91,7 @@ test("session.ts produces exactly the plaintext the guest accepts", async () => 
 test("guest receipts pass the session's context checks", async () => {
   const alice = await open("alice");
   const bob = await open("bob");
-  assert.ok(vectors.receipts.length >= 7);
+  assert.ok(vectors.receipts.length >= 10);
   assert.ok(vectors.receipts.some(vector => vector.type === "sync" && vector.requestId === syncRequestId(vector.account)));
   assert.equal(vectors.receipts[0]!.requestId, noticeRequestId(alice.session.account, 1));
   for (const vector of vectors.receipts) {
@@ -113,4 +113,31 @@ test("guest receipts pass the session's context checks", async () => {
     assert.equal((await other.session.decryptReceipt(await other.seal(vector.plaintext), vector.requestId)).status, "context-mismatch");
     assert.equal((await other.session.decryptReceipt(await owner.seal(vector.plaintext), vector.requestId)).status, "unreadable");
   }
+});
+
+test("book receipts: staged, then the outcome and the view with the next request", async () => {
+  const alice = await open("alice");
+  const bob = await open("bob");
+  const read = async (name: string) => {
+    const vector = vectors.receipts.find(v => v.name === name)!;
+    const owner = vector.account === alice.session.account ? alice : bob;
+    const result = await owner.session.decryptReceipt(await owner.seal(vector.plaintext), vector.requestId);
+    assert.equal(result.status, "readable", name);
+    return { vector, body: (result as { envelope: { body: ReceiptBody } }).envelope.body };
+  };
+  const staged = await read("order for an unknown round is staged");
+  assert.equal(staged.body.status, "staged");
+  assert.equal(staged.body.receipt, undefined);
+  assert.equal(staged.body.view?.orders.length, 0);
+  const resting = await read("alice collects her order's outcome and stages a cancel");
+  assert.equal(resting.body.status, "staged");
+  assert.equal(resting.body.outcome?.status, "applied");
+  assert.equal(resting.body.outcome?.commandId, commandId(alice.session.account, 4));
+  assert.equal(resting.body.outcome?.receipt?.status, "resting");
+  assert.equal(resting.body.view?.orders[0]?.filled, 400_000); // the maker learns of its fill from its view
+  const fill = await read("bob collects his fill");
+  assert.equal(fill.body.type, "sync");
+  assert.deepEqual(fill.body.outcome?.receipt?.fills?.map(f => [f.role, f.side, f.price, f.quantity]), [["taker", "buy", 60, 400_000]]);
+  // Neither side's receipt names the other.
+  assert.ok(!fill.vector.plaintext.includes(alice.session.account) && !resting.vector.plaintext.includes(bob.session.account));
 });

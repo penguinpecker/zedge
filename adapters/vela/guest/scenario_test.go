@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/penguinpecker/zedge/engine"
+	"golang.org/x/crypto/sha3"
 )
 
 // One script drives everything: the native unit tests, the cross-language
@@ -50,7 +51,7 @@ func testConfig() engine.Config {
 }
 
 func testParams() DeployParams {
-	return DeployParams{Engine: testConfig(), ApplicationFingerprint: fingerprint, Origin: origin, Epoch: epoch}
+	return DeployParams{Engine: testConfig(), ApplicationFingerprint: fingerprint, Origin: origin, Epoch: epoch, Markets: []Market{{"BTC", 900}}}
 }
 
 func deployed() engine.Config {
@@ -74,11 +75,26 @@ func marshal(v any) []byte {
 
 func sha(s string) string { h := sha256.Sum256([]byte(s)); return hex.EncodeToString(h[:]) }
 
+func keccak(b []byte) []byte { k := sha3.NewLegacyKeccak256(); k.Write(b); return k.Sum(nil) }
+
+// clockRecord is the clock record a tick with this payload publishes.
+func clockRecord(payload []byte, v ...uint64) []byte { return append(words(v...), keccak(payload)...) }
+
 func raw(a string) []byte { b, _ := hex.DecodeString(a[2:]); return b }
 
-// envelope is the plaintext session.ts encryptCommand produces for this body.
+// envelope is the plaintext session.ts encryptCommand produces for this body
+// once ../crypto/pad.ts has padded it to RequestBytes. One that cannot fit is
+// left unpadded, and longer.
 func envelope(account, requestID string, body requestBody) []byte {
-	return marshal(requestEnvelope{1, testDomain(), account, epoch, requestID, "command", body})
+	return padded(requestEnvelope{1, testDomain(), account, epoch, requestID, "command", body})
+}
+
+func padded(e requestEnvelope) []byte {
+	e.Body.Pad = ""
+	if short := RequestBytes - len(marshal(e)); short > 0 {
+		e.Body.Pad = strings.Repeat("0", short)
+	}
+	return marshal(e)
 }
 
 // command fills in the domain and ID and wraps the canonical command.
@@ -108,9 +124,65 @@ func tickPayload(number, block, timestamp uint64) []byte {
 	return p
 }
 
+// rec is a registry round as the trigger reports it in a version-2 payload
+// (README section 10). The zero value is a BTC 900-second round that has not
+// opened yet.
+type rec struct {
+	asset, duration                      uint64 // 0 BTC, 1 ETH; 0 means 900
+	start, openedAt, resolvedAt, outcome uint64
+	opening, closing                     *engine.StreamsObservation
+}
+
+func (r rec) id() string {
+	asset, duration := "BTC", r.duration
+	if r.asset == 1 {
+		asset = "ETH"
+	}
+	if duration == 0 {
+		duration = 900
+	}
+	id, err := engine.RegistryRoundID(deployed(), asset, duration, r.start)
+	if err != nil {
+		panic(err)
+	}
+	return id
+}
+
+// observed is a valid registry observation for a boundary, recorded at "at".
+func observed(boundary, at uint64, price string) *engine.StreamsObservation {
+	return &engine.StreamsObservation{FeedID: engine.BTCStreamsFeed, Price: price, ValidFromTimestamp: uint32(boundary - 1), ObservationsTimestamp: uint32(min(boundary+1, at)),
+		ExpiresAt: uint32(boundary + 86400), ReportHash: "0x" + sha(fmt.Sprint("report:", boundary, ":", price)), Decimals: 18}
+}
+
+// tick2 is the trigger's version-2 answer: the version-1 words with version 2,
+// then the record count and 19 words per record.
+func tick2(number, block, timestamp uint64, records ...rec) []byte {
+	p := words(2, 31337, 0, block, timestamp, number, uint64(len(records)))
+	copy(p[76:96], raw(endpoint))
+	for _, r := range records {
+		duration := r.duration
+		if duration == 0 {
+			duration = 900
+		}
+		w := append(raw(r.id()), words(r.asset, duration, r.start, r.openedAt, r.resolvedAt, r.outcome)...)
+		for _, o := range []*engine.StreamsObservation{r.opening, r.closing} {
+			if o == nil {
+				o = &engine.StreamsObservation{Price: "0", ReportHash: "0x" + strings.Repeat("0", 64)}
+			}
+			price, _ := new(big.Int).SetString(o.Price, 10)
+			w = append(w, price.FillBytes(make([]byte, 32))...)
+			w = append(w, words(uint64(o.ValidFromTimestamp), uint64(o.ObservationsTimestamp), uint64(o.ExpiresAt))...)
+			w = append(w, raw(o.ReportHash)...)
+			w = append(w, words(uint64(o.Decimals))...)
+		}
+		p = append(p, w...)
+	}
+	return p
+}
+
 type step struct {
 	Name    string `json:"name"`
-	Call    string `json:"call"` // deploy, deposit, process, trusted, restart
+	Call    string `json:"call"` // deploy, deposit, process, trusted, restart, load (Payload is the state)
 	Sender  string `json:"sender,omitempty"`
 	Token   string `json:"token,omitempty"`
 	Amount  uint64 `json:"amount,omitempty"`
@@ -135,7 +207,7 @@ func script() []step {
 	withdraw := commandPayload(alice, 2, engine.Command{Op: engine.RequestWithdrawal, Amount: 50_000_000, Destination: outside})
 	register := commandPayload(alice, 1, engine.Command{Op: engine.Register})
 	order := engine.Command{Op: engine.PlaceOrder, RoundID: strings.Repeat("ab", 32), Outcome: engine.Up, Side: engine.Buy, Price: 55, Quantity: 1_000_000, TIF: engine.IOC, Expiry: t0 + 100, MaxFee: 10_000}
-	trailer := envelope(alice, engine.CommandID(alice, 3), requestBody{Type: "command", Command: string(marshal(engine.Command{Domain: deployed().Domain, ID: engine.CommandID(alice, 3), Nonce: 3, Op: engine.Register, Account: alice})) + nested(1000)})
+	trailer := envelope(alice, engine.CommandID(alice, 3), requestBody{Type: "command", Command: string(marshal(engine.Command{Domain: deployed().Domain, ID: engine.CommandID(alice, 3), Nonce: 3, Op: engine.Register, Account: alice})) + nested(600)})
 	steps := []step{
 		{Name: "deploy", Call: "deploy", Payload: marshal(testParams())},
 		{Name: "deposit before the first tick fails", Call: "deposit", Sender: alice, Token: collateral, Amount: 200_000_000},
@@ -152,12 +224,12 @@ func script() []step {
 		{Name: "alice's command from bob fails", Call: "process", Sender: bob, Payload: withdraw},
 		{Name: "overdraft is rejected in private", Call: "process", Sender: alice, Payload: commandPayload(alice, 3, engine.Command{Op: engine.RequestWithdrawal, Amount: 1_000_000_000, Destination: outside})},
 		{Name: "withdrawal to the endpoint is rejected in private", Call: "process", Sender: alice, Payload: commandPayload(alice, 3, engine.Command{Op: engine.RequestWithdrawal, Amount: 1, Destination: endpoint})},
-		{Name: "order is rejected in private", Call: "process", Sender: alice, Payload: commandPayload(alice, 3, order)},
+		{Name: "order for an unknown round is staged", Call: "process", Sender: alice, Payload: commandPayload(alice, 3, order)},
 		{Name: "authority command from a user is rejected in private", Call: "process", Sender: bob, Payload: commandPayload(bob, 2, engine.Command{Op: engine.Deposit, Amount: 1_000_000, Evidence: strings.Repeat("cd", 32)})},
 		{Name: "truncated envelope fails", Call: "process", Sender: alice, Payload: []byte(`{"version":1`)},
 		{Name: "deeply nested payload fails", Call: "process", Sender: alice, Payload: []byte(nested(8000))},
 		{Name: "command with a nested trailer fails", Call: "process", Sender: alice, Payload: trailer},
-		{Name: "oversized payload fails", Call: "process", Sender: alice, Payload: []byte(strings.Repeat(" ", MaxPayloadBytes+1))},
+		{Name: "oversized payload fails", Call: "process", Sender: alice, Payload: []byte(strings.Repeat(" ", RequestBytes+1))},
 		{Name: "replayed tick fails", Call: "trusted", Payload: tickPayload(1, block0, t0)},
 		// Every accepted request asked for a tick: 2 to 9 are pending here.
 		{Name: "tick nobody asked for fails", Call: "trusted", Payload: tickPayload(10, block1, t1)},
@@ -169,22 +241,74 @@ func script() []step {
 		{Name: "bob deposits", Call: "deposit", Sender: bob, Token: collateral, Amount: 75_000_000},
 		{Name: "bob withdraws everything", Call: "process", Sender: bob, Payload: commandPayload(bob, 2, engine.Command{Op: engine.RequestWithdrawal, Amount: 75_000_000, Destination: bob})},
 	}
-	// Fill the engine's 256 account slots with one-atom deposits, then one more.
-	for i := 3; i <= engine.MaxAccounts+1; i++ {
+	// Fill the slice's 32 account slots with one-atom deposits, then one more.
+	for i := 3; i <= MaxSliceAccounts+1; i++ {
 		who := fmt.Sprintf("0x%040x", i)
-		name := fmt.Sprintf("account %d of %d", i, engine.MaxAccounts)
-		if i > engine.MaxAccounts {
+		name := fmt.Sprintf("account %d of %d", i, MaxSliceAccounts)
+		if i > MaxSliceAccounts {
 			name = "deposit past the account limit fails"
 		}
 		steps = append(steps, step{Name: name, Call: "deposit", Sender: who, Token: collateral, Amount: 1})
 	}
-	return append(steps,
+	steps = append(steps,
 		// One byte more than the guest will take: its allocate returns 0 and the
 		// host fails the request before any guest logic runs.
 		step{Name: "payload over the allocation cap fails", Call: "process", Sender: alice, Payload: bytes.Repeat([]byte{' '}, MaxStateBytes+1), HostError: "allocate returned null pointer"},
 		step{Name: "tick stamped in milliseconds fails", Call: "trusted", Payload: tickPayload(11, block1+1, (t1+1)*1000)},
 		step{Name: "tick with an earlier block number is accepted", Call: "trusted", Payload: tickPayload(11, block0, t1+1)},
 	)
+	return append(steps, round()...)
+}
+
+// The first BTC 900-second round after t0, and the price it opens at.
+const (
+	s1, p0 = t0 + 900, "97000000000000000000000"
+	cut1   = s1 + 900 - 5 // its cutoff
+)
+
+// round is one full round through the mirror and the book: create, open,
+// mint, rest, partial fill, cancel, resolve, the sweep's redeem, archive,
+// withdraw. Times are the registry's and the trigger's, chosen by hand.
+func round() []step {
+	r1, r2, r3, r4 := rec{start: s1}, rec{start: s1 + 900}, rec{start: s1 + 1800}, rec{start: s1 + 2700}
+	opened := r1
+	opened.openedAt, opened.opening = s1+3, observed(s1, s1+3, p0)
+	resolved := opened
+	resolved.resolvedAt, resolved.outcome, resolved.closing = s1+902, 1, observed(s1+900, s1+902, "97000000000000000000001")
+	r2open := r2
+	r2open.openedAt, r2open.opening = s1+903, observed(s1+900, s1+903, p0)
+	id := engine.RoundID(deployed(), mustSpec(s1))
+	sell := commandPayload(alice, 4, engine.Command{Op: engine.PlaceOrder, RoundID: id, Outcome: engine.Up, Side: engine.Sell, Price: 60, Quantity: 1_000_000, TIF: engine.GTC, Expiry: cut1, MaxFee: 6_000})
+	return []step{
+		{Name: "keeper syncs for the round mirror", Call: "process", Sender: keeper, Payload: syncPayload(keeper)},
+		{Name: "tick 12 creates the next two rounds", Call: "trusted", Payload: tick2(12, 110, t0+100, r1, r2)},
+		{Name: "alice collects the outcome of her order for an unknown round", Call: "process", Sender: alice, Payload: syncPayload(alice)},
+		{Name: "tick 13 opens round 1 and creates round 3", Call: "trusted", Payload: tick2(13, 111, s1+5, r3, opened)},
+		{Name: "alice mints two shares", Call: "process", Sender: alice, Payload: commandPayload(alice, 3, engine.Command{Op: engine.Mint, RoundID: id, Quantity: 2_000_000})},
+		{Name: "alice stages a resting sell", Call: "process", Sender: alice, Payload: sell},
+		{Name: "alice's resend while staged is staged again", Call: "process", Sender: alice, Payload: sell},
+		{Name: "alice's withdrawal while staged is rejected in private", Call: "process", Sender: alice, Payload: commandPayload(alice, 5, engine.Command{Op: engine.RequestWithdrawal, Amount: 1, Destination: alice})},
+		{Name: "tick 15 rests alice's order", Call: "trusted", Payload: tick2(15, 112, s1+10)},
+		{Name: "bob deposits ten tokens", Call: "deposit", Sender: bob, Token: collateral, Amount: 10_000_000},
+		{Name: "bob stages a buy", Call: "process", Sender: bob, Payload: commandPayload(bob, 3, engine.Command{Op: engine.PlaceOrder, RoundID: id, Outcome: engine.Up, Side: engine.Buy, Price: 60, Quantity: 400_000, TIF: engine.IOC, Expiry: cut1, MaxFee: 2_400})},
+		{Name: "tick 18 fills bob against part of alice's order", Call: "trusted", Payload: tick2(18, 113, s1+20)},
+		{Name: "alice collects her order's outcome and stages a cancel", Call: "process", Sender: alice, Payload: commandPayload(alice, 5, engine.Command{Op: engine.CancelOrder, OrderID: alice + ":4"})},
+		{Name: "bob collects his fill", Call: "process", Sender: bob, Payload: syncPayload(bob)},
+		{Name: "tick 20 cancels the rest of alice's order", Call: "trusted", Payload: tick2(20, 114, s1+30)},
+		{Name: "keeper syncs before the close", Call: "process", Sender: keeper, Payload: syncPayload(keeper)},
+		{Name: "tick 21 resolves round 1, sweeps and archives it, opens round 2 and creates round 4", Call: "trusted", Payload: tick2(21, 120, s1+905, r4, resolved, r2open)},
+		{Name: "alice collects her cancel, whose receipt the sweep replaced", Call: "process", Sender: alice, Payload: syncPayload(alice)},
+		{Name: "alice withdraws everything", Call: "process", Sender: alice, Payload: commandPayload(alice, 7, engine.Command{Op: engine.RequestWithdrawal, Amount: 149_837_600, Destination: alice})},
+		{Name: "bob withdraws everything again", Call: "process", Sender: bob, Payload: commandPayload(bob, 5, engine.Command{Op: engine.RequestWithdrawal, Amount: 10_157_600, Destination: bob})},
+	}
+}
+
+func mustSpec(start uint64) engine.RoundSpec {
+	spec, err := engine.NewRoundSpec(deployed(), "BTC", 900, start)
+	if err != nil {
+		panic(err)
+	}
+	return spec
 }
 
 // inflate returns base grown to exactly target bytes by adding fills to the
@@ -240,6 +364,8 @@ func run(t testing.TB, steps []step) []step {
 		case "trusted":
 			out = TrustedRequest(testApp, s.Payload, state)
 		case "restart":
+		case "load":
+			state = s.Payload
 		default:
 			t.Fatalf("unknown call %q", s.Call)
 		}
