@@ -986,3 +986,24 @@ the ~30-day expiry rule above.
   its way until it was dropped (review fix, 2026-10-06).
 - The broadcaster's fork rehearsals and the keeper dress rehearsal ran with
   the seven-day profile and build and have not been repeated.
+
+
+Registry replacement deployed — 2026-10-06
+------------------------------------------
+With the owner's approval the replacement round registry was deployed on
+Horizen at its planned addresses: implementation
+0xA8abACbD25c9795C3Ef0701184B18Aad6F98C006 (block 27871487) and the
+ERC1967Proxy that is the registry, 0x4DD4aacDb7E8D2e6D06c5af38238F3dEAB836744
+(block 27871502), owner the deployment account. Cost 0.0000031 ETH, as
+simulated. The live checker verified it against the release, Horizen's
+explorer accepted both sources, and the keeper's read-only public check
+accepts the deployed release. The registry holds no rounds: the keeper has
+not been started (it needs report access and its own wallet).
+
+- The broadcaster rehearsal was repeated with the five-minute build on a
+  fresh fork just before the real run. A rehearsal of the exact build to be
+  broadcast is cheap; one of an earlier build is not evidence for this one.
+- The deployer's Horizen nonce is now 4. Any future registry deployment from
+  that account lands at new addresses.
+- The production website still runs the 2026-10-04 build that reads the
+  retired registry until the new build is published.

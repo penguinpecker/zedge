@@ -1,7 +1,7 @@
 {
   "schemaVersion": 3,
   "chainId": 26514,
-  "status": "planned",
+  "status": "configured",
   "release": "streams-mainnet-2026-10-05",
   "rolePolicy": "registry-owner-upgradeable-route-immutable",
   "sourceChainId": 8453,

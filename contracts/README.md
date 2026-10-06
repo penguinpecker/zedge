@@ -1,6 +1,6 @@
 # ZEDGE public round contracts
 
-Original Solidity foundations for BTC/ETH binary rounds. **Three noncustodial oracle contracts are live on Base and Horizen. The round registry deployed with them on 2026-10-04 is retired (it never held a round); its upgradeable replacement in this source tree is planned and not deployed. See the [mainnet deployment record](deployment/MAINNET.md).** The separate [public outcome vault](OUTCOME-VAULT.md) is implemented and tested but remains undeployed at this review. It holds collateral for public ERC1155 claims; it does not implement confidential custody, private matching or TEE admission. `test/mocks/` contains deliberately insecure test fixtures.
+Original Solidity foundations for BTC/ETH binary rounds. **Three noncustodial oracle contracts are live on Base and Horizen. The round registry deployed with them on 2026-10-04 is retired (it never held a round); its upgradeable replacement in this source tree was deployed on Horizen on 2026-10-06 (registry `0x4DD4aacDb7E8D2e6D06c5af38238F3dEAB836744`). See the [mainnet deployment record](deployment/MAINNET.md).** The separate [public outcome vault](OUTCOME-VAULT.md) is implemented and tested but remains undeployed at this review. It holds collateral for public ERC1155 claims; it does not implement confidential custody, private matching or TEE admission. `test/mocks/` contains deliberately insecure test fixtures.
 
 ## Implemented contracts
 

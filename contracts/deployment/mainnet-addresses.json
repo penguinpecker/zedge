@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "release": "streams-mainnet-2026-10-05",
-  "status": "planned",
+  "status": "deployed",
   "configHash": "0xfebe8908e5a7b70fdeeb3ab5b4601ffe5a4e615b41a4c21ccda0f1fc50b5b324",
   "routeHash": "0xdd0243acfe5c168f4189af435f907cd3dd4a26085faf228e721ddee4e87ac36b",
   "rulesHash": "0x65e485f8468fda2de9d8681ee9fbbff779acabf1451e29a3d2cb2248b2a30ba6",
@@ -54,13 +54,13 @@
       "chainId": 26514,
       "address": "0x4DD4aacDb7E8D2e6D06c5af38238F3dEAB836744",
       "runtimeCodeHash": "0x11e207b629c698e2df1db36c1a5400f670db529ea0461174531deb02e9ad5d56",
-      "creationTransaction": null,
-      "creationBlock": null,
+      "creationTransaction": "0x28663ea069e03c53f4cd13ea6d2fa6277dbaf97ffe00e3366836e6eb304f7307",
+      "creationBlock": "27871502",
       "proxy": {
         "implementation": "0xA8abACbD25c9795C3Ef0701184B18Aad6F98C006",
         "implementationCodeHash": "0x5642fc3d45228605d5e0d432ade8910a54a0efe77073a4716b3e65ae5054b3d6",
-        "implementationCreationTransaction": null,
-        "implementationCreationBlock": null,
+        "implementationCreationTransaction": "0x82bb9aeed5ad8fe68bf1293b55e429f423efeb7e777b1217ccbf36084fac98ac",
+        "implementationCreationBlock": "27871487",
         "owner": "0x279173ac297aD146bc92f877552C8C2B78334d07"
       }
     }

@@ -1,6 +1,8 @@
 # ZEDGE hybrid mainnet deployment
 
-Status on 2026-10-05: the three route contracts (Base verifier adapter, Base publisher, Horizen price cache) are live and unchanged. The `StreamsRoundRegistry` deployed on 2026-10-04 at Horizen `0xdD3bEAA92E5819333A5D5ccD185704427fAB0e91` is **retired**. Its replacement is **planned and not deployed**; see [Planned registry replacement](#planned-registry-replacement). The machine-readable record is [`mainnet-addresses.json`](./mainnet-addresses.json) (schema 2, `status: "planned"`).
+Status on 2026-10-06: the replacement round registry is **deployed** on Horizen with the owner's approval: proxy (the registry address) `0x4DD4aacDb7E8D2e6D06c5af38238F3dEAB836744`, implementation `0xA8abACbD25c9795C3Ef0701184B18Aad6F98C006`, owner the deployment account. The live checker verified it against the release, Horizen's explorer accepted both sources, and it holds no rounds yet. [`mainnet-addresses.json`](./mainnet-addresses.json) now has `status: "deployed"`. See [Registry replacement](#registry-replacement).
+
+Status on 2026-10-05: the three route contracts (Base verifier adapter, Base publisher, Horizen price cache) are live and unchanged. The `StreamsRoundRegistry` deployed on 2026-10-04 at Horizen `0xdD3bEAA92E5819333A5D5ccD185704427fAB0e91` is **retired**. Its replacement is **planned and not deployed**; see [Registry replacement](#registry-replacement). The machine-readable record is [`mainnet-addresses.json`](./mainnet-addresses.json) (schema 2, `status: "planned"`).
 
 Status on 2026-10-04 (kept as the record of that deployment): **all four contracts deployed, runtime and immutable configuration checked, and explorer source submissions accepted**. This record covers the public oracle/round infrastructure. A genuine historical BTC report was verified and published on Base, then delivered through the native messenger and authenticated in the Horizen cache.
 
@@ -10,13 +12,13 @@ Four noncustodial contracts form one public oracle route: Chainlink report verif
 
 The public [deployment profile](./hybrid-mainnet.json) pins the upstream code and proxy implementations. The [Base oracle preflight](../../research/chainlink-streams-base.md) and [native-route research](../../research/hybrid-chain-routing.md) contain the dependency evidence. The deployment account was `0x279173ac297aD146bc92f877552C8C2B78334d07`.
 
-## Planned registry replacement
+## Registry replacement
 
-Not deployed. Nothing in this section exists on Horizen mainnet until the owner approves the broadcast, and consumers must treat the release as unusable while its status is `planned`.
+Deployed on 2026-10-06 (06:39 UTC) after the owner's approval, at the planned addresses and with the planned code; the creations are listed under [Confirmed deployments](#confirmed-deployments). This section kept its planning record below.
 
 **Why.** The retired registry let anyone void an opened round 3,660 seconds after its end if no closing price had been recorded by then. Anyone can raise Horizen's deposit fee on Base high enough that no price message is relayed in that hour, so a losing side could force the 1/2 + 1/2 refund. The retired registry never held a round (zero rounds were created) and holds no funds; it stays on chain and must not be used.
 
-| Planned contract | Horizen 26514 address | Created by |
+| Contract | Horizen 26514 address | Created by |
 | --- | --- | --- |
 | StreamsRoundRegistry implementation (UUPS) | `0xA8abACbD25c9795C3Ef0701184B18Aad6F98C006` | deployer nonce 2 |
 | StreamsRoundRegistry proxy (OpenZeppelin 5.6.1 `ERC1967Proxy`), the registry address | `0x4DD4aacDb7E8D2e6D06c5af38238F3dEAB836744` | deployer nonce 3 |
@@ -53,7 +55,9 @@ No round was created in these runs. The round lifecycle on a Horizen fork was ru
 
 The profile's hard ceiling for Horizen is 0.00012 ETH; the deployer held 0.000458 ETH there. The maximum counts execution at the fee cap (2,000,504 wei per gas) plus twice the quoted L1 data fee bound.
 
-**Procedure once approved.** Run from the repository root with dependencies installed and `forge build` output present:
+On 2026-10-06, just before the broadcast, the broadcaster's fork rehearsal was repeated with the five-minute profile and build (Horizen fork at block 27871005): the planner, the broadcaster, the release writer, the live checker and the verification packets all passed, and the fork's registry reported the release's rules hash and a 300-second void grace.
+
+**Procedure once approved** (run on 2026-10-06; see below). Run from the repository root with dependencies installed and `forge build` output present:
 
 ```sh
 node contracts/scripts/plan-registry.mjs && node contracts/scripts/broadcast-registry.mjs --broadcast-mainnet
@@ -89,6 +93,8 @@ The same flow can be rehearsed against a local fork without any key: start `anvi
 | ChainlinkStreamsBoundaryOracle | Base 8453 | [0xdD3bEAA92E5819333A5D5ccD185704427fAB0e91](https://basescan.org/address/0xdD3bEAA92E5819333A5D5ccD185704427fAB0e91#code) | [0x8d2fbf2d87150233914cd0dc30927ce3c3c26db2d799193b9887ada3bf8f53ac](https://basescan.org/tx/0x8d2fbf2d87150233914cd0dc30927ce3c3c26db2d799193b9887ada3bf8f53ac) | 52157229 |
 | BaseStreamsPublisher | Base 8453 | [0xA8abACbD25c9795C3Ef0701184B18Aad6F98C006](https://basescan.org/address/0xA8abACbD25c9795C3Ef0701184B18Aad6F98C006#code) | [0x203f72b2900bbf586923708a4dd94eba37864e2ac0a4c3a47c19cfdd76be6b1b](https://basescan.org/tx/0x203f72b2900bbf586923708a4dd94eba37864e2ac0a4c3a47c19cfdd76be6b1b) | 52157512 |
 | HorizenStreamsOracle | Horizen 26514 | [0xc800C3F18D35D492aE6b07655D7f31bFE98A4B6B](https://explorer.horizen.io/address/0xc800C3F18D35D492aE6b07655D7f31bFE98A4B6B?tab=contract) | [0x4c2c4d101fcf8cb871a30dc3a867f5f54b7ee6ba0de941af36b54b10cd09f6c4](https://explorer.horizen.io/tx/0x4c2c4d101fcf8cb871a30dc3a867f5f54b7ee6ba0de941af36b54b10cd09f6c4) | 27707106 |
+| StreamsRoundRegistry implementation (UUPS) | Horizen 26514 | [0xA8abACbD25c9795C3Ef0701184B18Aad6F98C006](https://explorer.horizen.io/address/0xA8abACbD25c9795C3Ef0701184B18Aad6F98C006?tab=contract) | [0x82bb9aeed5ad8fe68bf1293b55e429f423efeb7e777b1217ccbf36084fac98ac](https://explorer.horizen.io/tx/0x82bb9aeed5ad8fe68bf1293b55e429f423efeb7e777b1217ccbf36084fac98ac) | 27871487 |
+| ERC1967Proxy = StreamsRoundRegistry (2026-10-06) | Horizen 26514 | [0x4DD4aacDb7E8D2e6D06c5af38238F3dEAB836744](https://explorer.horizen.io/address/0x4DD4aacDb7E8D2e6D06c5af38238F3dEAB836744?tab=contract) | [0x28663ea069e03c53f4cd13ea6d2fa6277dbaf97ffe00e3366836e6eb304f7307](https://explorer.horizen.io/tx/0x28663ea069e03c53f4cd13ea6d2fa6277dbaf97ffe00e3366836e6eb304f7307) | 27871502 |
 | StreamsRoundRegistry (**retired 2026-10-05**) | Horizen 26514 | [0xdD3bEAA92E5819333A5D5ccD185704427fAB0e91](https://explorer.horizen.io/address/0xdD3bEAA92E5819333A5D5ccD185704427fAB0e91?tab=contract) | [0x189badafcdaf0e08053f819da006509616ad2621f78f69ffff4acaf6ce13cf8f](https://explorer.horizen.io/tx/0x189badafcdaf0e08053f819da006509616ad2621f78f69ffff4acaf6ce13cf8f) | 27707121 |
 
 The identical address on Base and Horizen is intentional: the same account used the same creation nonce on different chains. The two contracts have different bytecode and roles. Only the Horizen one (the registry) is retired; the Base contract at that address is the live verifier adapter.
@@ -103,6 +109,8 @@ Build settings: Solidity `0.8.30`, EVM `paris`, optimizer enabled with `200` run
 | BaseStreamsPublisher | `0x28d74cd48c995b7c396bb75642c3d82d8c3f6b20fe217e09bd2763c38b112d62` | `0xa0e69e00698d0cd587f327a20405ee6cd13bf8771f4533674035156f5fb2ab7b` |
 | HorizenStreamsOracle | `0x3996abf69236d59a30795bc2c4262771bf342cd47d76c99c15e4e48d4c50c459` | `0xd8ba088e5c9776e109286dd2df13239b73769f77b15461417a0f4df3627ec894` |
 | StreamsRoundRegistry (retired) | `0x901625cddce4c3945fed51c4ee2dd77289ebb69f8e401068f6c2bc9362660a66` | `0xc068b166421addc499312b3181e6812e6fd226a6a80709b689ace8030afd9454` |
+| StreamsRoundRegistry implementation (2026-10-06) | `0x5642fc3d45228605d5e0d432ade8910a54a0efe77073a4716b3e65ae5054b3d6` | `0x9acbce4472141225016f75eaf9a3e3be4e35ee9351f65863e5fd17bbdf6795f8` |
+| ERC1967Proxy (registry, 2026-10-06) | `0x11e207b629c698e2df1db36c1a5400f670db529ea0461174531deb02e9ad5d56` | `0x86fd244910cd8429838447058d1623a1934667a74d6309bba8c6eb4ab951542c` |
 
 - Route hash: `0xdd0243acfe5c168f4189af435f907cd3dd4a26085faf228e721ddee4e87ac36b`.
 - Rules hash of the retired registry: `0x591860792894f856c548d908b50aac9bbecd793794da13ac995bf9d248aa7d7c`.
@@ -124,13 +132,22 @@ These are observed creation costs, not the conservative signing ceilings. Values
 - Horizen creation total: **0.000002667605546715 ETH**.
 - Combined four-contract total: **0.000012831767586569 ETH**.
 
+Registry replacement, 2026-10-06, read from the canonical receipts after confirmation:
+
+| Contract | Gas used | Effective gas price (wei) | Execution fee (wei) | L1 data fee (wei) | Observed total (ETH) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| StreamsRoundRegistry implementation | 2765106 | 1000252 | 2765802806712 | 581043001 | 0.000002766383849713 |
+| ERC1967Proxy and `initialize` | 337007 | 1000252 | 337091925764 | 78549002 | 0.000000337170474766 |
+
+- Horizen total: **0.000003103554324479 ETH**, exactly the deployer's balance change (0.000458256213490358 to 0.000455152659165879 ETH). `getOperatorFee` returned zero. The simulated expectation was 0.000003104 ETH.
+
 The receipts did not expose explicit operator-fee fields. The public `GasPriceOracle.getOperatorFee(gasUsed)` call at each creation block returned zero for all four transactions, so no operator fee is added. No separate blob fee is added on top of `l1Fee`. These totals exclude bridging the account balance, subscriptions, keepers, and any future exchange/custody infrastructure.
 
 The separate Base smoke publication consumed `1,178,694` gas at `6,000,000` wei per gas plus `7,058,681,872` wei L1 data fee, for **0.000007079222681872 ETH**. Its receipt omitted operator-fee fields; the historical operator getter returned zero. Combined creation transactions plus this Base smoke cost **0.000019910990268441 ETH**. The native Horizen relay was a deposited transaction (`type 0x7e`) using `162,474` gas, with receipt `effectiveGasPrice=0` and `l1Fee=0`; it was not a separate transaction signed by the deployment account. No additional destination fee is added to the total.
 
 ## Market policy
 
-The route rows are fixed in immutable contracts. The round rows are those of the planned registry: they are set once at initialisation and can change only through an upgrade by its owner. The retired registry differed in two rows, as noted.
+The route rows are fixed in immutable contracts. The round rows are those of the replacement registry: they are set once at initialisation and can change only through an upgrade by its owner. The retired registry differed in two rows, as noted.
 
 | Rule | Value |
 | --- | --- |
@@ -143,7 +160,7 @@ The route rows are fixed in immutable contracts. The round rows are those of the
 | Trading cutoff | End − 30 seconds; this public clock does not admit or timestamp private orders |
 | Resolution | Any time at or after end, as soon as the closing price is in the Horizen cache; no deadline. (Retired registry: only until end + 3,660 seconds.) |
 | Winner | Closing price ≥ opening price resolves Up; otherwise Down |
-| Void | Permissionless and terminal. A round whose opening was never recorded: strictly after start + 210 seconds. An opened round: strictly after end + 60 + 300 seconds (six minutes after the end) and only while the cache holds no closing price; once that price is cached the round can only be resolved. Blocking delivery for those six minutes forces this void: an [accepted risk](#planned-registry-replacement). (Retired registry: any opened round strictly after end + 3,660 seconds.) |
+| Void | Permissionless and terminal. A round whose opening was never recorded: strictly after start + 210 seconds. An opened round: strictly after end + 60 + 300 seconds (six minutes after the end) and only while the cache holds no closing price; once that price is cached the round can only be resolved. Blocking delivery for those six minutes forces this void: an [accepted risk](#registry-replacement). (Retired registry: any opened round strictly after end + 3,660 seconds.) |
 | Payout numerators | Up `(2,0)/2`, Down `(0,2)/2`, Void `(1,1)/2`; ratios only, no asset transfer |
 | Native delivery gas | 600,000 minimum destination gas |
 | Registry collateral denomination | Horizen Stargate-bridged USDC.e, 6 decimals, `0xDF7108f8B10F9b9eC1aba01CCa057268cbf86B6c`; not Circle-native USDC |
@@ -153,10 +170,11 @@ Chainlink schema-v3 stream IDs (both 18 decimals):
 - BTC/USD: `0x00039d9e45394f473ab1f050a1b963e6b05351e52d71e507509ada0c95ed75b8`.
 - ETH/USD: `0x000362205e10b3a147d02792eccee483dca6c7b44ecce7012cb8c6e0b68b3ae9`.
 
-A delayed bridge message cannot replace a fixed boundary with a later price or override an already final outcome; under the planned rules a late closing price still resolves its round. No ZEDGE contract has an outcome setter. The planned registry's owner can, however, replace its implementation, which is a power over every rule and outcome of that registry; the three route contracts have no such power. Chainlink verification/access/fee configuration, native-bridge proxies, and the collateral proxy remain governed by their upstream owners; the deployment checks pin their current configuration, not future immutability.
+A delayed bridge message cannot replace a fixed boundary with a later price or override an already final outcome; under the replacement registry's rules a late closing price still resolves its round. No ZEDGE contract has an outcome setter. The planned registry's owner can, however, replace its implementation, which is a power over every rule and outcome of that registry; the three route contracts have no such power. Chainlink verification/access/fee configuration, native-bridge proxies, and the collateral proxy remain governed by their upstream owners; the deployment checks pin their current configuration, not future immutability.
 
 ## Verification and smoke status
 
+- Registry replacement (2026-10-06): the live checker reported the route and the registry verified (both creation transactions, runtime hashes, implementation slot, owner, no pending owner, every configuration getter, rules hash). Horizen's explorer returned `Pass - Verified` for the implementation and the proxy; as with the 2026-10-04 contracts it classifies both as partially verified (`bytecode_hash none`), and it recognises the proxy as EIP-1967 pointing at the implementation.
 - Explorer source verification: Base returned `Pass - Verified` for both contracts. Horizen returned `Pass - Verified` and publishes matching source/constructor inputs, but its v2 API classifies both as **partially verified**, not fully verified. Exact creation/runtime bytecode and complete published source inputs were checked separately; the metadata-related classification caveat is explained above.
 - Four-contract live receipt, runtime, immutable getter and route/rules check: **passed**.
 - Genuine public BTC smoke preparation: **passed**, using the real deployed verifier adapter and publisher in `eth_call`; unsigned intent generated.
