@@ -373,6 +373,14 @@ test('C1-1: verification is this release only, per chain; nothing upstream is re
   // An operator's private endpoint is used as given, and the same identity checks run against it.
   const seen = []; const custom = await createChainAccess({ files: fixture(), rpc: { horizen: 'https://private.example/v1/ACCESS-KEY' }, fetchFn: (url, init) => { seen.push(String(url)); return s.fetchFn('https://horizen.sim.invalid', init); } });
   await assert.rejects(custom.identify('horizen'), /KEEPER_REGISTRY_IMPLEMENTATION/); assert(seen.length > 0 && seen.every(url => url.startsWith('https://private.example/v1/ACCESS-KEY')));
+  // An endpoint that repeats the first entry of a batch answer (the default Base endpoint did) must not move one read's
+  // answer onto another: reads issued together still get their own answers.
+  const echo = await createChainAccess({ files: fixture(), fetchFn: async (url, init) => {
+    const response = await s.fetchFn(url, init), body = await response.json();
+    return new Response(JSON.stringify(Array.isArray(body) ? [body[0], ...body] : body), { status: response.status, headers: { 'content-type': 'application/json' } });
+  } });
+  const [head, chainId] = await Promise.all([echo.clients.base.getBlockNumber({ cacheTime: 0 }), echo.clients.base.getChainId()]);
+  assert.equal(typeof head, 'bigint'); assert.equal(chainId, 8453);
 });
 
 test('C2-1: a report newer than the Base head delays one publication by a block; it never switches off creation or the other feed', async t => {

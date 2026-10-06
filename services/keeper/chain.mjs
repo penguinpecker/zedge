@@ -27,7 +27,18 @@ const loopback = url => /^http:\/\/(?:127\.0\.0\.1|localhost)(?::[0-9]{1,5})?(?:
 
 // rpc: operator-supplied endpoints (e.g. private ones) replacing the public defaults. rehearsal: local forks only.
 // files/fetchFn: in-memory profile + release (and the runtime hash a simulated Multicall3 has) and a transport, for tests.
-export async function createChainAccess({ rpc = {}, rehearsal = false, fetchFn, files } = {}) {
+export async function createChainAccess({ rpc = {}, rehearsal = false, fetchFn = globalThis.fetch, files } = {}) {
+  // The default Base endpoint has answered a two-call batch with three entries (the first one repeated). viem sorts a
+  // batch answer by id and pairs it by position, so a block read came back as the transaction (seen 2026-10-06).
+  // Keep one answer per id.
+  const oneAnswerPerId = async (url, init) => {
+    const response = await fetchFn(url, init);
+    if (typeof init?.body !== 'string' || !init.body.startsWith('[')) return response;
+    const answers = await response.clone().json().catch(() => undefined);
+    if (!Array.isArray(answers)) return response;
+    const seen = new Set(), kept = answers.filter(a => !seen.has(a?.id) && seen.add(a?.id));
+    return kept.length === answers.length ? response : new Response(JSON.stringify(kept), { status: response.status, headers: response.headers });
+  };
   const text = files?.config ?? await readFile(new URL('contracts/deployment/hybrid-mainnet.json', ROOT), 'utf8'); const config = JSON.parse(text);
   const release = files?.release ?? await readJSON('contracts/deployment/mainnet-addresses.json');
   const hex = (v, bytes) => typeof v === 'string' && new RegExp(`^0x[0-9a-fA-F]{${bytes * 2}}$`).test(v);
@@ -50,7 +61,7 @@ export async function createChainAccess({ rpc = {}, rehearsal = false, fetchFn, 
       && (rehearsal ? rpc[key] !== undefined && loopback(u) : u.startsWith('https://'))), 'KEEPER_RPC_CONFIG');
     const chain = defineChain({ id: CHAIN_IDS[key], name: key, nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 }, rpcUrls: { default: { http: [url] } } });
     // No transport retries: the run loop owns backoff (and Retry-After) per chain. Reads issued together share one HTTP request.
-    const connect = to => createPublicClient({ chain, transport: http(to, { timeout: 12000, retryCount: 0, fetchFn, batch: { batchSize: 50, wait: 0 } }) });
+    const connect = to => createPublicClient({ chain, transport: http(to, { timeout: 12000, retryCount: 0, fetchFn: oneAnswerPerId, batch: { batchSize: 50, wait: 0 } }) });
     clients[key] = connect(url);
     receipts[key] = receiptUrl === url ? clients[key] : connect(receiptUrl);
   }
