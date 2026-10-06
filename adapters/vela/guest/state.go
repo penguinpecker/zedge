@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -17,7 +18,7 @@ import (
 )
 
 const (
-	StateVersion   = 2
+	StateVersion   = 3
 	MaxParamsBytes = 16 << 10
 	// MaxStateBytes is the largest state the guest serves, and the largest
 	// buffer the wasm layer hands the host. It is a measured bound, not the
@@ -47,6 +48,15 @@ const (
 	// command the engine could accept is at most 519 bytes; without the bound
 	// 32 accounts could each park an 8 KiB command in the state until its tick.
 	MaxStagedBytes = 576
+
+	// HorizenMainnet is the one production chain. Its deployment mirrors one
+	// market, BTC 900 (README section 2).
+	HorizenMainnet = 26514
+	// MinPublicCutoffBuffer is the least cutoff buffer, in seconds, a
+	// deployment on any chain but local Anvil may have: twice the worst
+	// measured sum of block-time lag and submission-to-commit wait (README
+	// section 9, Cutoff).
+	MinPublicCutoffBuffer = 30
 )
 
 // DeployParams are the constructor parameters. Engine.Domain.ApplicationID
@@ -58,6 +68,16 @@ type DeployParams struct {
 	Origin                 string        `json:"origin"`
 	Epoch                  string        `json:"epoch"`
 	Markets                []Market      `json:"markets"`
+	StakeLimits            StakeLimits   `json:"stakeLimits"`
+}
+
+// StakeLimits bound what can ride on round outcomes, in collateral atoms
+// (README section 9, Stake limits). They are fixed at deploy.
+type StakeLimits struct {
+	Account    uint64 `json:"account"`    // any account but the house, in one round
+	Boundary   uint64 `json:"boundary"`   // every account but the house together, in the rounds that end at one time
+	House      string `json:"house"`      // the market maker's account, exempt from the two above
+	HouseTotal uint64 `json:"houseTotal"` // the house, in every open round together
 }
 
 // Market is one registry schedule the deployment mirrors (README section 10).
@@ -98,6 +118,7 @@ type State struct {
 	Origin                 string        `json:"origin"`
 	Epoch                  string        `json:"epoch"`
 	Markets                []Market      `json:"markets"`
+	StakeLimits            StakeLimits   `json:"stakeLimits"`
 	Salt                   string        `json:"salt"`        // 32 random bytes drawn at deploy; keeps the public state root unguessable
 	Clock                  uint64        `json:"clock"`       // block.timestamp of the last accepted tick, 0 before the first
 	Block                  uint64        `json:"block"`       // block.number that tick reported; recorded, never compared
@@ -131,8 +152,11 @@ func isAddress(s string) bool {
 	return len(s) == 42 && s[:2] == "0x" && isHex(s[2:], 40) && s != "0x0000000000000000000000000000000000000000"
 }
 
-// The networks session.ts accepts: local Anvil, Horizen testnet, Base Sepolia.
-func evaluationChain(id uint64) bool { return id == 31337 || id == 2651420 || id == 84532 }
+// The networks session.ts accepts: local Anvil, Horizen mainnet, Horizen
+// testnet, Base Sepolia.
+func supportedChain(id uint64) bool {
+	return id == 31337 || id == HorizenMainnet || id == 2651420 || id == 84532
+}
 
 func marketValid(m Market) bool {
 	return (m.Asset == "BTC" || m.Asset == "ETH") && (m.Duration == 300 || m.Duration == 900)
@@ -159,6 +183,103 @@ func activeOrders(e *engine.State, id string) int {
 		}
 	}
 	return n
+}
+
+// stakes is, for every account and every round of e (in their orders), what
+// the account has riding on that round's outcome, in two measures. worst is
+// the most its payout if Up and its payout if Down can differ once its resting
+// orders have filled in whichever way widens that gap: shares count whether
+// free or reserved by a sell, and a resting buy counts as bought, so neither
+// minting and selling nor splitting into small orders hides any. held is that
+// gap for the shares it holds now, those offered for sale included, and
+// counts no resting buy. A complete set counts nothing in either. Only open
+// rounds count: a scheduled round holds nothing, a settled one risks nothing.
+// e must have passed engine.Validate.
+func stakes(e *engine.State) (worst, held [][]int64) {
+	at := func(round string) int {
+		return slices.IndexFunc(e.Rounds, func(m engine.Round) bool { return m.ID == round })
+	}
+	worst, held = make([][]int64, len(e.Accounts)), make([][]int64, len(e.Accounts))
+	for i, a := range e.Accounts {
+		up, down, gap := make([]int64, len(e.Rounds)), make([]int64, len(e.Rounds)), make([]int64, len(e.Rounds))
+		for _, h := range a.Holdings {
+			r := at(h.RoundID)
+			up[r] += int64(h.Up+h.ReservedUp) - int64(h.Down)
+			down[r] += int64(h.Down+h.ReservedDown) - int64(h.Up)
+			gap[r] += int64(h.Up+h.ReservedUp) - int64(h.Down+h.ReservedDown)
+		}
+		for _, o := range e.Orders {
+			if o.Account == a.ID && o.Side == engine.Buy {
+				if o.Outcome == engine.Up {
+					up[at(o.RoundID)] += int64(o.Remaining)
+				} else {
+					down[at(o.RoundID)] += int64(o.Remaining)
+				}
+			}
+		}
+		worst[i], held[i] = make([]int64, len(e.Rounds)), make([]int64, len(e.Rounds))
+		for r, m := range e.Rounds {
+			if m.Status == "open" {
+				worst[i][r], held[i][r] = max(up[r], down[r]), max(gap[r], -gap[r])
+			}
+		}
+	}
+	return worst, held
+}
+
+// exceeded names the first stake limit e breaks, or is empty. The per-account
+// and house limits are on worst stakes, the all-accounts limit on held ones: a
+// resting buy locks only its price, so counted at its size, a few one-cent
+// bids would fill the shared limit for everyone else at almost no cost. Only a
+// place_order can raise a stake: a fill never raises a maker's worst stake,
+// which already counted the order as filled, and it raises held stakes only
+// inside the place_order that makes it, which is checked here against the
+// whole ledger. So a ledger within the limits stays within them unless a
+// place_order is refused here.
+func (l StakeLimits) exceeded(e *engine.State) string {
+	worst, held := stakes(e)
+	var house int64
+	users := make([]int64, len(e.Rounds)) // every account but the house, per round
+	for i, a := range e.Accounts {
+		for r, v := range worst[i] {
+			switch {
+			case a.ID == l.House:
+				house += v
+			case v > int64(l.Account):
+				return "stake limit: account per round"
+			default:
+				users[r] += held[i][r]
+			}
+		}
+	}
+	if house > int64(l.HouseTotal) {
+		return "stake limit: house total"
+	}
+	for _, m := range e.Rounds {
+		var total int64
+		for r, n := range e.Rounds {
+			if n.Spec.End == m.Spec.End {
+				total += users[r]
+			}
+		}
+		if total > int64(l.Boundary) {
+			return "stake limit: all accounts at this closing time"
+		}
+	}
+	return ""
+}
+
+// valid checks the limits' shapes and, against the engine configuration c,
+// that they can work: a per-account limit above the all-accounts one could
+// never bind, and the house must be an account that can trade (the authority
+// never can) and not the endpoint or the token.
+func (l StakeLimits) valid(c engine.Config) bool {
+	for _, v := range []uint64{l.Account, l.Boundary, l.HouseTotal} {
+		if v == 0 || v > engine.MaxAtoms {
+			return false
+		}
+	}
+	return l.Account <= l.Boundary && isAddress(l.House) && l.House != c.Authority && l.House != c.Domain.Endpoint && l.House != c.Collateral
 }
 
 func marshalCommand(c engine.Command) []byte { b, _ := json.Marshal(c); return b }
@@ -240,10 +361,18 @@ func (s *State) validate() error {
 		return err
 	}
 	e := s.Engine
+	if !s.StakeLimits.valid(e.Config) {
+		return errors.New("invalid adapter identity")
+	}
 	// The trigger reads the registry in the block whose timestamp it reports,
-	// so the registry must be on the endpoint's own chain.
-	if d := e.Config.Domain; !evaluationChain(d.ChainID) || !applicationID(d.ApplicationID) || e.Config.Oracle.ChainID != d.ChainID {
-		return errors.New("not an evaluation deployment")
+	// so the registry must be on the endpoint's own chain. A public chain's
+	// clock runs on real time, so its cutoff buffer has a floor. On mainnet
+	// the trading fee is 0: no engine operation pays collected fees out, so
+	// they would stay in the endpoint's custody for good.
+	if d := e.Config.Domain; !supportedChain(d.ChainID) || !applicationID(d.ApplicationID) || e.Config.Oracle.ChainID != d.ChainID ||
+		d.ChainID != 31337 && e.Config.Oracle.CutoffBuffer < MinPublicCutoffBuffer ||
+		d.ChainID == HorizenMainnet && (!slices.Equal(s.Markets, []Market{{"BTC", 900}}) || e.Config.FeeBps != 0) {
+		return errors.New("not a supported deployment")
 	}
 	if s.Clock > MaxClock || s.Block > engine.MaxAtoms || s.TickSeq > engine.MaxAtoms || s.LastTick > s.TickSeq ||
 		(s.LastTick == 0) != (s.Clock == 0) || e.Time > s.Clock {
@@ -256,6 +385,9 @@ func (s *State) validate() error {
 		if activeOrders(e, a.ID) > MaxAccountOrders {
 			return errors.New("slice capacity")
 		}
+	}
+	if reason := s.StakeLimits.exceeded(e); reason != "" {
+		return errors.New(reason)
 	}
 	// A staged command is its account's next one, so nothing else of that
 	// account can have been accepted since; one per account, in tick order.

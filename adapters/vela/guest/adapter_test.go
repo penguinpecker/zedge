@@ -688,7 +688,7 @@ func TestDeployRejected(t *testing.T) {
 		"unknown field":          {[]byte(strings.Replace(string(good), `"origin"`, `"admin":"x","origin"`, 1)), ErrParams},
 		"canonical but too long": {edit(func(p *DeployParams) { p.Origin = "https://" + strings.Repeat("a", MaxParamsBytes) }), ErrParams},
 		"Ethereum mainnet":       {edit(func(p *DeployParams) { p.Engine.Domain.ChainID = 1 }), ErrConfig},
-		"Horizen mainnet":        {edit(func(p *DeployParams) { p.Engine.Domain.ChainID = 26514 }), ErrConfig},
+		"Base mainnet":           {edit(func(p *DeployParams) { p.Engine.Domain.ChainID = 8453 }), ErrConfig},
 		"registry elsewhere": {edit(func(p *DeployParams) {
 			p.Engine.Oracle.ChainID = 84532 // consistent in itself, but not the endpoint's chain
 			p.Engine.Oracle.RulesHash, _ = engine.RegistryRulesHash(p.Engine)
@@ -709,6 +709,19 @@ func TestDeployRejected(t *testing.T) {
 		"two markets":            {edit(func(p *DeployParams) { p.Markets = []Market{{"BTC", 900}, {"ETH", 900}} }), ErrConfig},
 		"unknown asset":          {edit(func(p *DeployParams) { p.Markets = []Market{{"SOL", 900}} }), ErrConfig},
 		"unknown duration":       {edit(func(p *DeployParams) { p.Markets = []Market{{"BTC", 60}} }), ErrConfig},
+		"stake limits missing":   {[]byte(strings.Replace(string(good), `,"stakeLimits":`+string(marshal(testLimits)), "", 1)), ErrParams},
+		"no stake limits":        {edit(func(p *DeployParams) { p.StakeLimits = StakeLimits{} }), ErrConfig},
+		"account limit 0":        {edit(func(p *DeployParams) { p.StakeLimits.Account = 0 }), ErrConfig},
+		"boundary limit 0":       {edit(func(p *DeployParams) { p.StakeLimits.Boundary = 0 }), ErrConfig},
+		"house limit 0":          {edit(func(p *DeployParams) { p.StakeLimits.HouseTotal = 0 }), ErrConfig},
+		"limit past the cap":     {edit(func(p *DeployParams) { p.StakeLimits.Boundary = engine.MaxAtoms + 1 }), ErrConfig},
+		"no house":               {edit(func(p *DeployParams) { p.StakeLimits.House = "" }), ErrConfig},
+		"uppercase house":        {edit(func(p *DeployParams) { p.StakeLimits.House = strings.ToUpper(house) }), ErrConfig},
+		"house of zeros":         {edit(func(p *DeployParams) { p.StakeLimits.House = "0x" + strings.Repeat("0", 40) }), ErrConfig},
+		"account above boundary": {edit(func(p *DeployParams) { p.StakeLimits.Account = p.StakeLimits.Boundary + 1 }), ErrConfig},
+		"house is the trigger":   {edit(func(p *DeployParams) { p.StakeLimits.House = trigger }), ErrConfig}, // the authority can never trade
+		"house is the endpoint":  {edit(func(p *DeployParams) { p.StakeLimits.House = endpoint }), ErrConfig},
+		"house is the token":     {edit(func(p *DeployParams) { p.StakeLimits.House = collateral }), ErrConfig},
 	} {
 		if got := result(t, Deploy(testApp, c.params, testSalt)).Error; got != c.want {
 			t.Errorf("%s: error %q, want %q", name, got, c.want)
@@ -771,7 +784,11 @@ func TestStateRejected(t *testing.T) {
 		"withdrawal count":         edit(func(s *State) { s.Withdrawals-- }),
 		"cash from nowhere":        edit(func(s *State) { s.Engine.Accounts[0].Cash++ }),
 		"claim left open":          edit(func(s *State) { s.Engine.Claimable, s.Engine.PaidOut = 1, s.Engine.PaidOut-1 }),
-		"production chain":         edit(func(s *State) { s.Engine.Config.Domain.ChainID = 26514 }),
+		"unsupported chain":        edit(func(s *State) { s.Engine.Config.Domain.ChainID = 1 }),
+		"no stake limits":          edit(func(s *State) { s.StakeLimits = StakeLimits{} }),
+		"uppercase house":          edit(func(s *State) { s.StakeLimits.House = strings.ToUpper(house) }),
+		"house is the trigger":     edit(func(s *State) { s.StakeLimits.House = trigger }),
+		"version 2":                edit(func(s *State) { s.Version = 2 }), // the build before stake limits
 		"application ID not a u64": edit(func(s *State) { s.Engine.Config.Domain.ApplicationID = "zedge" }),
 		"other fingerprint shape":  edit(func(s *State) { s.ApplicationFingerprint = "0x" + fingerprint[2:] }),
 		"no salt":                  edit(func(s *State) { s.Salt = "" }),

@@ -92,9 +92,12 @@ test("lock during wallet signature cannot reopen session after cancellation", as
   assert.equal(session.unlocked, false);
 });
 
-test("production chains, malformed domains and wrong wallet are rejected", async () => {
+test("unsupported chains, malformed domains and wrong wallet are rejected", async () => {
   const { session, epoch } = await setup();
-  assert.throws(() => new EvaluationSession({ ...domain, chainId: 26514 } as unknown as EvaluationDomain, session.account, epoch), /evaluation networks/);
+  assert.equal(new EvaluationSession({ ...domain, chainId: 26514 }, session.account, epoch).domain.chainId, 26514);
+  for (const chainId of [1, 8453, 26515]) {
+    assert.throws(() => new EvaluationSession({ ...domain, chainId } as unknown as EvaluationDomain, session.account, epoch), /supported networks/);
+  }
   assert.throws(() => new EvaluationSession({ ...domain, origin: "https://zedge.example/path" }, session.account, epoch), /canonical/);
   assert.throws(() => new EvaluationSession({ ...domain, applicationId: "18446744073709551616" }, session.account, epoch), /domain/);
   assert.throws(() => new EvaluationSession({ ...domain, applicationId: 1 } as unknown as EvaluationDomain, session.account, epoch), /domain/);

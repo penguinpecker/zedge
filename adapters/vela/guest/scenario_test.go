@@ -34,6 +34,7 @@ const (
 	alice  = "0xe5ec83f4b7c11debc83c32696238ace15468443e"
 	bob    = "0x327437aced75d158d4624e85aa00e1906f44cde7"
 	keeper = "0xeee7f8d404ca1acae6548f2bf3a530e4e6de08cd"
+	house  = "0x4040404040404040404040404040404040404040" // the market maker of the stake limits
 
 	t0, block0 = uint64(1_800_000_000), uint64(100)
 	t1, block1 = t0 + 60, uint64(105)
@@ -50,8 +51,12 @@ func testConfig() engine.Config {
 	return c
 }
 
+// The evaluation's stake limits: 50 tokens per account per round, 200 for
+// every account but the house at one closing time, 2,000 for the house.
+var testLimits = StakeLimits{Account: 50_000_000, Boundary: 200_000_000, House: house, HouseTotal: 2_000_000_000}
+
 func testParams() DeployParams {
-	return DeployParams{Engine: testConfig(), ApplicationFingerprint: fingerprint, Origin: origin, Epoch: epoch, Markets: []Market{{"BTC", 900}}}
+	return DeployParams{Engine: testConfig(), ApplicationFingerprint: fingerprint, Origin: origin, Epoch: epoch, Markets: []Market{{"BTC", 900}}, StakeLimits: testLimits}
 }
 
 func deployed() engine.Config {

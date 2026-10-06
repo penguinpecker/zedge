@@ -18,7 +18,7 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf-8", { fatal: true });
 
 export interface EvaluationDomain {
-  chainId: 31337 | 2651420 | 84532;
+  chainId: 31337 | 26514 | 2651420 | 84532;
   endpoint: string;
   applicationId: string;
   applicationFingerprint: string;
@@ -47,8 +47,8 @@ function validateDomain(value: EvaluationDomain): EvaluationDomain {
       Object.keys(value).sort().join(",") !== "applicationFingerprint,applicationId,chainId,endpoint,origin,rulesHash") {
     throw new Error("Invalid deployment domain fields.");
   }
-  if (![31337, 2651420, 84532].includes(value.chainId)) {
-    throw new Error("This adapter is limited to evaluation networks.");
+  if (![31337, 26514, 2651420, 84532].includes(value.chainId)) {
+    throw new Error("This adapter is limited to its supported networks.");
   }
   if (typeof value.endpoint !== "string" || !addressPattern.test(value.endpoint) || value.endpoint === zeroAddress ||
       typeof value.applicationId !== "string" || !/^[1-9][0-9]{0,19}$/.test(value.applicationId) ||

@@ -1,6 +1,6 @@
 # Vela encryption integration — evaluation only
 
-An isolated, tested wrapper around the actual `@horizen/vela-common-ts@0.2.0` crypto primitives. It is **not imported into the public frontend**, does not submit transactions, and cannot select a production chain. Upstream BSL production rights remain a separate release dependency.
+An isolated, tested wrapper around the actual `@horizen/vela-common-ts@0.2.0` crypto primitives. It is **not imported into the public frontend** and does not submit transactions. It accepts four chains only: local Anvil (31337), Horizen mainnet (26514), Horizen testnet (2651420) and Base Sepolia (84532), the same list as the guest. Upstream BSL production rights remain a separate release dependency.
 
 `npm ci && npm run check && npm test` runs real P-521/AES-GCM round trips, tampering, wallet/epoch/origin separation, relock and delayed-signature tests, and the guest's shared vectors (`guest.test.ts`, `pad.test.ts`). Generated test wallets exist only in process memory.
 

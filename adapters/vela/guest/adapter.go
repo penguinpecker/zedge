@@ -111,7 +111,7 @@ func Deploy(appID uint64, params, salt []byte) []byte {
 	if len(salt) != 32 || hex.EncodeToString(salt) == zeroSalt {
 		return failure(ErrInternal)
 	}
-	s := &State{Version: StateVersion, ApplicationFingerprint: p.ApplicationFingerprint, Origin: p.Origin, Epoch: p.Epoch, Markets: p.Markets,
+	s := &State{Version: StateVersion, ApplicationFingerprint: p.ApplicationFingerprint, Origin: p.Origin, Epoch: p.Epoch, Markets: p.Markets, StakeLimits: p.StakeLimits,
 		Salt: hex.EncodeToString(salt), Staged: []Staged{}, Outcomes: []Outcome{}, Notices: []Notice{}, Engine: e}
 	b, err := s.encode()
 	if err != nil {
@@ -617,6 +617,13 @@ func (s *State) activate(k uint64) {
 		// a GTC filled on arrival, never does.
 		if err == nil && activeOrders(next, c.Account) > MaxAccountOrders {
 			err = errors.New("order capacity")
+		}
+		// A5: an order that would take any stake past its limit is refused
+		// whole, fills and all (README section 9, Stake limits).
+		if err == nil && c.Op == engine.PlaceOrder {
+			if reason := s.StakeLimits.exceeded(next); reason != "" {
+				err = errors.New(reason)
+			}
 		}
 		if err != nil {
 			o.Status, o.Reason = "rejected", err.Error()
