@@ -86,21 +86,24 @@ export class StreamsClient {
       return { payload: report.fullReport, observation };
     });
   }
-  // Without a boundary: the latest report. With one: the report whose signed window covers it, or STREAMS_NO_COVERING_REPORT.
+  // Without a boundary: the latest report. With one: the report whose signed window covers it, or
+  // STREAMS_NO_COVERING_REPORT carrying, as `next`, the first report the page endpoint returned (if any).
   async report(feedId, boundary, window = 60) {
     requireCondition(/^0x0003[0-9a-f]{60}$/.test(feedId), 'STREAMS_FEED');
     requireCondition(boundary === undefined || Number.isSafeInteger(boundary) && boundary > 0 && boundary <= 0xffffffff, 'STREAMS_BOUNDARY');
     if (boundary === undefined) { const [latest] = await this.#get(`/api/v1/reports/latest?feedID=${feedId}`, feedId); requireCondition(latest, 'STREAMS_RESPONSE'); return latest; }
+    let next;
     const covering = async path => {
-      try { return (await this.#get(path, feedId)).find(report => covers(report.observation, boundary, window)); }
-      catch (error) { if (error.message !== 'STREAMS_HTTP_404') throw error; }
+      try { const reports = await this.#get(path, feedId); next = reports[0]; return reports.find(report => covers(report.observation, boundary, window)); }
+      catch (error) { if (error.message !== 'STREAMS_HTTP_404') throw error; next = undefined; }
     };
     // A second in which the DON produced no report is absorbed by the next report's window ("How Report Timestamps
     // Work"). What the exact-second lookup answers for such a second is undocumented, so on a miss ask the page
     // endpoint, which returns reports in sequence from the given timestamp: the covering report is the first one.
+    // When that first one does not cover the boundary it is what proves a skipped window (main.mjs, witness).
     const found = await covering(`/api/v1/reports?feedID=${feedId}&timestamp=${boundary}`)
       ?? await covering(`/api/v1/reports/page?feedID=${feedId}&startTimestamp=${boundary}&limit=2`);
-    requireCondition(found, 'STREAMS_NO_COVERING_REPORT');
+    if (!found) throw Object.assign(new Error('STREAMS_NO_COVERING_REPORT'), { next });
     return found;
   }
 }

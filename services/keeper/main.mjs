@@ -19,7 +19,10 @@ const RESEND_AFTER = 60; // seconds an observation may sit on Base undelivered b
 const LOOK = 2700, LOOK_EVERY = 15000; // a new state directory reads this many seconds of older boundaries (24 rounds) in one look, at most this often
 const OPENING_RETRY = 15000; // longest wait between tries of an action an opening depends on (its window is 210 s)
 const SETTLED = 180; // seconds a round's phase must have stood before reads of it are spared; until then a reorganisation could still undo it
-const GONE_TRIES = 3, GONE_AFTER = 600; // an overdue report is unobtainable after this many "no such report" answers spread over this many seconds, counted once it would have expired anyway
+const GIVE_UP = 120; // seconds after its void time, and of this process's own attempts, before the keeper voids an opened round (Voidable rounds)
+const IN_FLIGHT = 90; // seconds a publication or relay may still be on its way to Horizen: no void before it is this old
+const UNMINED = 600; // longest the keeper's own publications or relays of a price that are not yet settled hold its void, from the first signed
+const LOOK_END = 7 * 86400 + 960; // how far back a new state directory looks for opened rounds still pending (lookBack)
 // Publishing, relaying and recording an opening price race the opening window. Resolution and void have no deadline,
 // and a round is created minutes ahead of its start.
 const urgent = action => action.kind !== 'create' && action.deadline < Number.MAX_SAFE_INTEGER;
@@ -116,8 +119,8 @@ export async function discover(access, persisted = {}, lookBack = 4800) {
     if (phase !== m.phase) Object.assign(m, { phase, since: now, openedAt: undefined });
     m.until = phase === 1 ? s.start : phase === 3 || phase === 4 ? s.start + s.duration : 0;
   }
-  // Voidable says one of two things: nobody recorded the opening in time, or an opened round's closing price is a
-  // week overdue. Only the round itself says which (openedAt), and for as long as it stays Voidable that cannot change.
+  // Voidable says one of two things: nobody recorded the opening in time, or an opened round's closing price is past
+  // its void time. Only the round itself says which (openedAt), and for as long as it stays Voidable that cannot change.
   const unsure = due.filter(s => known(s).phase === 8 && known(s).openedAt === undefined);
   if (unsure.length) for (const [i, round] of (await look(access, 'horizen', unsure.map(s => [registry, 'getRound', [known(s).roundId]]))).results.entries()) known(unsure[i]).openedAt = number(round.openedAt);
   const cache = new Map(bounds.map((key, i) => [key, present(head.results[due.length + i])]));
@@ -128,24 +131,24 @@ export async function discover(access, persisted = {}, lookBack = 4800) {
   return { now, block: Number(head.number), cache, rounds };
 }
 
-// A new state directory knows only the rounds of the last 80 minutes. An opened round waits for its closing price
-// without a deadline until the registry calls it Voidable, so a new directory also walks back that far, newest
-// first, and tracks every round still awaiting resolution: those are the ones that can hold funds. That is about
-// 5,400 rounds, read 24 at a time and never more often than every 15 seconds (an hour or two in all), so a
-// rate-limited endpoint sees no burst on top of a boundary. The position, and where the walk ends (fixed by its
-// first look, so that the hours it takes do not move the end past rounds that were pending when it began), are kept
-// in the journal: a restart carries on where the walk was.
+// A new state directory knows only the rounds of the last 80 minutes. An opened round that was never resolved can
+// still hold funds however old it is: awaiting resolution with its closing price cached, or Voidable. So a new
+// directory also walks back seven days (LOOK_END, a fixed recovery depth; it was the void grace until 2026-10-06),
+// newest first, and tracks every such round. That is about 5,400 rounds, read 24 at a time and never more often than
+// every 15 seconds (an hour or two in all), so a rate-limited endpoint sees no burst on top of a boundary. The
+// position, and where the walk ends (fixed by its first look, so that the hours it takes do not move the end past
+// rounds that were pending when it began), are kept in the journal: a restart carries on where the walk was.
 async function lookBack(access, journal, world, now) {
-  const data = journal.data, rules = access.config.rules;
+  const data = journal.data;
   if (Date.now() - (world.looked ?? 0) < LOOK_EVERY || Object.keys(data.activeRounds).length >= 512) return;
   world.looked = Date.now();
-  data.catchUpEnd ??= now - (rules.voidGrace + rules.observationWindow + 900);
+  data.catchUpEnd ??= now - LOOK_END;
   const top = Math.min(data.catchUp, Math.ceil((now - 4800) / 900) * 900), specs = [];
   for (const duration of [300, 900]) for (const asset of [0, 1]) for (let start = top - duration; start >= top - LOOK && start > 0; start -= duration) specs.push({ asset, duration, start });
   const ids = (await look(access, 'horizen', specs.map(s => [registry, 'roundIdFor', [s.asset, s.duration, BigInt(s.start)]]))).results;
   const phases = (await look(access, 'horizen', ids.map(id => [registry, 'phase', [id]]))).results;
-  // The oldest of them turn Voidable while the walk is under way. An opened one is still worked (Voidable rounds);
-  // one nobody opened holds nothing and is left alone. Only the round itself says which.
+  // An opened Voidable one is still worked (Voidable rounds); one nobody opened holds nothing and is left alone.
+  // Only the round itself says which.
   const voidable = ids.filter((id, i) => phases[i] === 8);
   const opened = new Set(voidable.length ? (await look(access, 'horizen', voidable.map(id => [registry, 'getRound', [id]]))).results.flatMap((round, i) => number(round.openedAt) ? [voidable[i]] : []) : []);
   for (const [i, spec] of specs.entries()) if (phases[i] === 5 || opened.has(ids[i])) data.activeRounds[ids[i]] = spec;
@@ -155,7 +158,7 @@ async function lookBack(access, journal, world, now) {
 }
 
 // The boundary a round is waiting on: its start while the opening is pending, its end once it awaits resolution,
-// also when that is a week overdue and the registry calls the opened round Voidable.
+// also when that is past its void time and the registry calls the opened round Voidable.
 const boundaryOf = round => round.phase === 2 ? round.start : round.phase === 5 || round.phase === 8 && round.openedAt !== 0 ? round.end : 0;
 function wanted(view) {
   const list = new Map();
@@ -171,13 +174,12 @@ async function published(access, list) {
 // cache / source: which wanted observations Horizen / Base hold, or undefined when that chain could not be read.
 // Registry calls need a current view and, to open or resolve, the cache answer. Publishing needs only Base to say
 // that nobody has published; relaying also needs Horizen to say the observation is still missing there.
-// gone: boundaries whose report is established to be unobtainable (step, witness).
+// gone: closing boundaries of opened Voidable rounds the keeper gives up on this tick (step, Voidable rounds).
 export function plan(view, cache, source, gone) {
   const horizen = [], base = new Map();
   for (const round of view.rounds) {
     const key = `${round.feedId}:${boundaryOf(round)}`;
-    // An opened round is voided only while Base itself says, on this tick, that nobody has published its closing price.
-    const action = chooseAction(round, view.now, cache?.get(key) === true, source?.get(key) === true, gone?.has(key) === true && source?.get(key) === false);
+    const action = chooseAction(round, view.now, cache?.get(key) === true, source?.get(key) === true, gone?.has(key) === true);
     if (!action) continue;
     if (['publish', 'await-delivery'].includes(action.kind)) {
       // One action per boundary, however many rounds want it; it is as urgent as the most urgent of them.
@@ -199,14 +201,20 @@ export async function nextActions(access, snapshot) {
 export async function step(access, journal, auth, world = {}) {
   const chains = world.chains ??= { base: { until: 0, failures: 0 }, horizen: { until: 0, failures: 0 } };
   const defer = world.defer ??= new Map(), undelivered = world.undelivered ??= new Map(), reports = world.reports ??= new Map(), feeds = world.feeds ??= new Map();
-  const heads = world.heads ??= { base: null, horizen: null }, stored = world.stored ??= new Map(), misses = world.misses ??= new Map();
+  const heads = world.heads ??= { base: null, horizen: null }, stored = world.stored ??= new Map(), skipped = world.skipped ??= new Set(), working = world.working ??= new Map();
+  const dropped = world.dropped ??= new Map();
   const data = journal.data, out = { sent: [], settled: [], done: [], waiting: [], chains: {} }, seen = new Set();
   // What reconciliation closed on this tick: a transaction's final status and what it cost.
-  const settle = async chain => { for (const r of await reconcile(access, journal, chain)) {
-    out.settled.push({ key: r.key, chain, hash: r.hash, status: r.status, feeWei: r.receipt.feeWei });
-    // A confirmed publication or relay proves the observation is stored on Base (see the Base read below).
-    if (r.status === 'confirmed' && /^(publish|resend):/.test(r.key)) stored.set(r.key.split(':').slice(1, 3).join(':'), Date.now());
-  } };
+  const settle = async chain => {
+    const open = data.transactions.filter(t => !FINAL.includes(t.status) && /^(publish|resend):/.test(t.key));
+    for (const r of await reconcile(access, journal, chain)) {
+      out.settled.push({ key: r.key, chain, hash: r.hash, status: r.status, feeWei: r.receipt.feeWei });
+      // A confirmed publication or relay proves the observation is stored on Base (see the Base read below).
+      if (r.status === 'confirmed' && /^(publish|resend):/.test(r.key)) stored.set(r.key.split(':').slice(1, 3).join(':'), Date.now());
+    }
+    // One whose nonce another hash took (a newer boundary's publication, say) was on its way until now (lastSent, below).
+    for (const t of open) if (t.status === 'dropped') dropped.set(t.key.split(':').slice(1, 3).join(':'), Date.now());
+  };
   let fatal;
   // Run work for one chain. A provider failure backs off that chain only (honouring Retry-After); a must-stop is
   // carried out of the tick once both lanes have come to rest.
@@ -264,9 +272,36 @@ export async function step(access, journal, auth, world = {}) {
     fresh && data.catchUp !== undefined && on('horizen', () => lookBack(access, journal, world, fresh.now)),
   ]);
   if (fatal) throw fatal;
-  // Unobtainable: the Base adapter has rejected the covering report, or the report service has said GONE_TRIES
-  // times over GONE_AFTER seconds that there is none, when one would have expired by now anyway (witness, below).
-  const gone = new Set([...misses].filter(([, m]) => m.rejected || m.count >= GONE_TRIES && m.last - m.first >= GONE_AFTER * 1000).map(([key]) => key));
+  if (base) world.baseAt = Date.now();
+  // Given up (see Voidable rounds): an opened round the registry calls Voidable on this tick, with nothing cached for
+  // its closing boundary in the same read, once no publication or relay of that price can still be on its way (the
+  // keeper's own sent, settled or dropped less than IN_FLIGHT seconds ago or not yet settled (unmined, below), or one first
+  // seen on Base undelivered less than IN_FLIGHT seconds ago), and either a signed report proves the window was
+  // skipped (witness, below) while Base says, on this tick, that it does not hold the price, or it is GIVE_UP
+  // seconds past its void time and this process has worked its closing price for GIVE_UP seconds without a gap of
+  // that length between two ticks (a paused host does not count).
+  // That last needs Base's answer on this tick too, unless Base has not answered for GIVE_UP seconds: then nothing
+  // could be published or relayed for the whole period either. Kept in memory: a restart starts over.
+  const sends = key => data.transactions.filter(r => ['publish', 'resend'].some(kind => r.key.startsWith(`${kind}:${key}:`)));
+  const lastSent = key => Math.max(stored.get(key) ?? 0, dropped.get(key) ?? 0, ...['publish', 'resend'].map(kind => (data.attempts[`${kind}:${key}`]?.last ?? 0) * 1000),
+    ...sends(key).map(r => Date.parse(r.preparedAt)));
+  // Base may take minutes to include a transaction (congestion), and the IN_FLIGHT count starts at its settlement. An
+  // open one holds the void for at most UNMINED seconds after the first of them was signed, so a hash that is never
+  // mined cannot hold it for good.
+  const unmined = key => { const open = sends(key).filter(r => !FINAL.includes(r.status)).map(r => Date.parse(r.preparedAt));
+    return open.length > 0 && Date.now() - Math.min(...open) < UNMINED * 1000; };
+  const gone = new Set(), rules = access.config.rules;
+  for (const round of fresh?.rounds ?? []) {
+    const key = `${round.feedId}:${round.end}`;
+    if (!(round.phase === 5 || round.phase === 8 && round.openedAt) || fresh.cache.get(key) !== false) continue;
+    const work = working.get(key);
+    if (!work || Date.now() - work.seen > GIVE_UP * 1000) working.set(key, { since: Date.now(), seen: Date.now() }); else work.seen = Date.now();
+    if (round.phase !== 8) continue;
+    if (base?.source.get(key) && !undelivered.has(key)) undelivered.set(key, wall);
+    if (Date.now() - lastSent(key) < IN_FLIGHT * 1000 || unmined(key) || wall - (undelivered.get(key) ?? 0) < IN_FLIGHT) continue;
+    const late = fresh.now > round.end + rules.observationWindow + rules.voidGrace + GIVE_UP && Date.now() - working.get(key).since >= GIVE_UP * 1000;
+    if (skipped.has(key) && base?.source.get(key) === false || late && (base || !world.baseAt || Date.now() - world.baseAt >= GIVE_UP * 1000)) gone.add(key);
+  }
   const actions = view ? plan(view, fresh?.cache, base?.source, gone) : { horizen: [], base: [] };
   // Everything planned is still wanted, whether or not its lane gets as far as it on this tick (a lane stops at
   // its first send, and while a hash is pending). Only what has left the plan loses its backoff and relay timers.
@@ -284,24 +319,18 @@ export async function step(access, journal, auth, world = {}) {
       throw error;
     }
   };
-  // Evidence that the closing report of an overdue round (opened, and Voidable by the registry) cannot be had.
-  // Only two things count. The covering report is in hand, its validity has run out, and the Base adapter itself
-  // rejects it in a simulation. Or the report service says no report covers the boundary, straight afterwards serves
-  // this feed's latest report to this account (so not an outage, a refusal or a timeout), and a report covering the
-  // boundary would have expired by now, at the validity the latest report has. Before that, "no report" may be an
-  // outage of the historical lookup alone while the report still verifies on Base, so it is not counted. Anything
-  // else leaves the answer unknown, and unknown waits. Kept in memory: a restart starts over.
-  const witness = async ({ feedId, boundary }, error, report) => {
-    const key = `${feedId}:${boundary}`, prior = misses.get(key) ?? { count: 0, first: Date.now() };
-    if (error.message === 'STREAMS_NO_COVERING_REPORT') {
-      const { observation: latest } = await fetchReport(feedId);
-      if (boundary + window + latest.expiresAt - latest.observationsTimestamp < base.now) misses.set(key, { ...prior, count: prior.count + 1, last: Date.now() });
-    }
-    if (error.message !== 'STREAMS_BOUNDARY_WINDOW') return;
-    const { to, data } = access.call(source, 'publishBoundary', [feedId, BigInt(boundary), report.payload]);
+  // A signed proof that no report can ever cover this boundary: the first report the service has at or after it
+  // (STREAMS_NO_COVERING_REPORT, `next`) starts its window at or before the boundary and closes more than the
+  // observation window after it, so the DON produced none in between, and the Base adapter itself rejects it in a
+  // simulation (InvalidOracleResponse). Gathered on any failed publication, so that it is in hand when the round turns
+  // Voidable; acted on only then (gone, above). Kept in memory: a restart starts over.
+  const witness = async ({ feedId, boundary }, { next }) => {
+    const key = `${feedId}:${boundary}`;
+    if (skipped.has(key) || !(next?.observation.validFromTimestamp <= boundary && next.observation.observationsTimestamp > boundary + window)) return;
+    const { to, data } = access.call(source, 'publishBoundary', [feedId, BigInt(boundary), next.payload]);
     await access.clients.base.call({ account: auth.account.address, to, data }).then(() => {}, refusal => {
       if (classify(refusal).code !== 'REVERT_INVALID_ORACLE_RESPONSE') throw refusal;
-      misses.set(key, { ...prior, rejected: true });
+      skipped.add(key);
     });
   };
   // Per feed, and only for scheduling new rounds: is the report service answering for this feed right now?
@@ -329,7 +358,7 @@ export async function step(access, journal, auth, world = {}) {
         report = reports.get(key) ?? await fetchReport(feedId, boundary); reports.set(key, report);
         requireCondition(report.observation.observationsTimestamp <= base.now, 'STREAMS_REPORT_AHEAD_OF_BASE');
         validateBoundary(report.observation, boundary, base.now, window);
-      } catch (error) { if (action.overdue) await witness(action, error, report); throw error; }
+      } catch (error) { if (error.next) await witness(action, error); throw error; }
       return send(action.id, access.call(source, 'publishBoundary', [feedId, BigInt(boundary), report.payload]), report.observation.reportHash);
     }
     if (kind === 'await-delivery') {
@@ -379,7 +408,7 @@ export async function step(access, journal, auth, world = {}) {
   if (fatal) throw fatal;
 
   for (const chain of ['base', 'horizen']) if (!out.chains[chain]) chains[chain].failures = 0;
-  if (fresh && !Object.keys(out.chains).length) for (const map of [defer, undelivered, reports, stored, misses]) for (const key of map.keys()) if (!seen.has(key)) map.delete(key);
+  if (fresh && !Object.keys(out.chains).length) for (const map of [defer, undelivered, reports, stored, skipped, working, dropped]) for (const key of map.keys()) if (!seen.has(key)) map.delete(key);
   const flying = data.transactions.some(t => !FINAL.includes(t.status) && Date.now() - Date.parse(t.preparedAt) < 30000);
   const soonest = Math.min(...[...out.waiting, ...Object.values(out.chains)].map(w => w.retryAt ? Date.parse(w.retryAt) - Date.now() : 1000));
   // Poll fast while a transaction is in flight, and at the pace of whatever is being waited for otherwise. With

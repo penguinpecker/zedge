@@ -25,14 +25,14 @@ test('the committed profile yields the planned addresses, rules hash, initialize
   // Known answers computed independently with cast for deployer nonce 2 on Horizen.
   const creation = registryCreation(config, config.deployer, 2, abi);
   assert.deepEqual({ implementation: creation.implementation, proxy: creation.proxy }, PLANNED);
-  assert.equal(creation.rulesHash, '0x17258005a90dc55ca45ae167eb0310278363a2ca89d8204437e1d21cc79ac45d');
+  assert.equal(creation.rulesHash, '0x65e485f8468fda2de9d8681ee9fbbff779acabf1451e29a3d2cb2248b2a30ba6');
   assert.equal(creation.initData.slice(0, 10), '0xe63a558c');
   assert.equal(creation.owner, config.deployer);
   assert.deepEqual(creation.constructorArgs, [[], [creation.implementation, creation.initData]]);
   assert.equal(roundId(creation.proxy, creation.rulesHash, { asset: 0, duration: 300, start: 1791100800 }),
-    '0xd6ddd89dd7e2fa4749102c193d25b9ef2c50e0f2ed44769b64f56bd0c1f62e52');
+    '0xb4bcd96751ad786a84e0a2e4483daddd84a64109509e08578dd779ddbe5814d9');
   assert.equal(roundId(creation.proxy, creation.rulesHash, { asset: 1, duration: 900, start: 1791100800 }),
-    '0x7b8dc4d8b6de1dad0ad7cc9b63bb5d3b36746fae3da1a96114ead7e496b7c774');
+    '0x99240e32bf55fba5be2c1bf346c42ed3086e60c7991f6371101e958e05f725e3');
 });
 
 test('a changed rule, nonce or deployer changes what would be created', () => {

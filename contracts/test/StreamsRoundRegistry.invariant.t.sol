@@ -48,10 +48,10 @@ contract StreamsRegistryHandler is Test {
                 minimumGasLimit: 600_000
             })
         );
-        // The planned mainnet timing, with the shortest void grace so that timeouts are reachable.
+        // The planned mainnet timing (60 / 150 / 300 / 30).
         registry = StreamsRegistryProxy.deploy(
             StreamsRoundRegistry.Config(
-                address(cache), address(new MockCollateral()), BTC, ETH, 18, 18, 60, 150, 1 days, 30
+                address(cache), address(new MockCollateral()), BTC, ETH, 18, 18, 60, 150, 5 minutes, 30
             ),
             address(0xD00D)
         );

@@ -64,7 +64,7 @@ func registryFieldsValid(c Config) bool {
 	return o.ChainID > 0 && o.ChainID <= MaxAtoms && address(o.Registry) && address(o.Oracle) && address(c.Collateral) &&
 		streamFeed(o.BTCFeedID) && streamFeed(o.ETHFeedID) && o.BTCFeedID != o.ETHFeedID && o.Decimals == 18 &&
 		o.ObservationWindow <= 60 && o.OpeningGrace > 0 && o.OpeningGrace < 300 &&
-		o.VoidGrace >= 86400 && o.VoidGrace <= 21*86400 &&
+		o.VoidGrace >= 120 && o.VoidGrace <= 21*86400 &&
 		o.CutoffBuffer > 0 && o.CutoffBuffer < 300 && o.ObservationWindow+o.OpeningGrace < 300-o.CutoffBuffer
 }
 

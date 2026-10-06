@@ -131,7 +131,7 @@
         },
         "voidGrace": {
           "type": "integer",
-          "minimum": 86400,
+          "minimum": 120,
           "maximum": 1814400
         },
         "cutoffBuffer": {

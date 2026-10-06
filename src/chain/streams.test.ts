@@ -18,12 +18,18 @@ const configured = () => ({ ...clone(), status: "configured" });
 const zero: Address = `0x${"0".repeat(40)}`;
 const word = (value: Address) => `0x${value.slice(2).toLowerCase().padStart(64, "0")}` as Hex;
 
-test("actual schema3 manifest binds both chains, exact precision, canonical route and round rules", () => {
+test("actual schema3 manifest binds both chains, exact precision, canonical route and round rules", async () => {
   const m = parseStreamsManifest(publicManifest, 26514);
   assert.equal(parseManifest(publicManifest, 26514).schemaVersion, 3);
   assert.deepEqual(streamsHashes(m), { routeHash: m.parameters.routeHash, rulesHash: m.parameters.rulesHash });
   assert.equal(m.parameters.btcDecimals, 18);
-  assert.equal(m.parameters.voidGrace, "604800");
+  assert.equal(m.parameters.voidGrace, "300");
+  // The market-rules page states this timeout in words; change both together. Its accepted risk is stated without
+  // conditions on both legal pages and in the round panel (owner decision 2026-10-06, audit D4).
+  const legal = await repoFile("src/pages/legal-content.tsx");
+  assert.match(legal, /timeout of five minutes from the end of its closing observation window/);
+  assert.equal(legal.match(/[Aa]nyone can block price delivery/g)?.length, 2);
+  assert.match(await repoFile("src/chain/ChainApp.tsx"), /Anyone can block price delivery until that timeout/);
   // The retired registry is not pinned in any Horizen role. Its hex is also the kept Base oracle, a different contract.
   const retired = release.retired[0].address.toLowerCase();
   const horizen = [...Object.values(m.contracts), ...Object.values(m.dependencies)].filter((p) => p.chainId === 26514).map((p) => p.address.toLowerCase());
@@ -106,7 +112,7 @@ function mockReaders() {
   const c = m.contracts, d = m.dependencies, p = m.parameters;
   const feeds = { btcFeedId: p.btcFeedId, ethFeedId: p.ethFeedId, btcDecimals: 18, ethDecimals: 18 };
   add(c.sourceOracle, { ...feeds, version: "zedge-chainlink-streams-boundary-v1", verifierProxy: d.verifier.address });
-  add(c.registry, { ...feeds, version: "zedge-streams-round-registry-v2", oracle: c.oracle.address, collateral: d.collateral.address, deploymentChainId: 26514, rulesHash: p.rulesHash, PAYOUT_DENOMINATOR: 2, observationWindow: 60, openingGrace: 150, voidGrace: 604800, cutoffBuffer: 30, owner: c.registry.owner, pendingOwner: zero });
+  add(c.registry, { ...feeds, version: "zedge-streams-round-registry-v2", oracle: c.oracle.address, collateral: d.collateral.address, deploymentChainId: 26514, rulesHash: p.rulesHash, PAYOUT_DENOMINATOR: 2, observationWindow: 60, openingGrace: 150, voidGrace: 300, cutoffBuffer: 30, owner: c.registry.owner, pendingOwner: zero });
   const route = { ...feeds, routeHash: p.routeHash, sourceChainId: 8453, destinationChainId: 26514, sourceOracle: c.sourceOracle.address, observationWindow: 60, minimumGasLimit: 600000 };
   add(c.publisher, { ...route, version: "zedge-base-streams-publisher-v1", nativeMessenger: d.sourceMessenger.address, destinationMessenger: d.destinationMessenger.address, destinationOracle: c.oracle.address });
   add(c.oracle, { ...route, version: "zedge-horizen-streams-oracle-v1", nativeMessenger: d.destinationMessenger.address, sourceMessenger: d.sourceMessenger.address, publisher: c.publisher.address });
@@ -315,7 +321,7 @@ test("price boxes never promise an observation that a voided or void-only round 
   const observation = { price: 1n, decimals: 18, observedAt: 1n, validFrom: 1n, reportHash: null };
   const read = (phase: number, openedAt: bigint, outcome = 0, resolvedAt = 0n): RoundRead => ({
     roundId: `0x${"1".repeat(64)}`, phase, start: 300n,
-    round: { asset: 0, duration: 300, start: 300n, end: 600n, cutoff: 570n, openingDeadline: 510n, voidableAfter: 605_460n, resolutionDeadline: null, openedAt, resolvedAt, outcome, opening: observation, closing: observation },
+    round: { asset: 0, duration: 300, start: 300n, end: 600n, cutoff: 570n, openingDeadline: 510n, voidableAfter: 960n, resolutionDeadline: null, openedAt, resolvedAt, outcome, opening: observation, closing: observation },
   });
   const cases: [string, RoundRead, string, string][] = [
     ["never opened, can only be voided", read(8, 0n), "No opening price recorded", "Can only be voided"],

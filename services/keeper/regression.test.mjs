@@ -154,7 +154,7 @@ test('D3: one worst-case step of the deposit fee between estimate and inclusion 
   assert.deepEqual(k.journal.history.filter(r => r.chain === 'base').map(r => r.status), ['confirmed', 'confirmed']); assert(k.opened(T));
 });
 
-test('D3: a relay that keeps being lost is sent all four times, also while newer boundaries keep the Base lane busy', async t => {
+test('D3: a relay that keeps being lost is sent when due, also while newer boundaries keep the Base lane busy, until its rounds are given up', async t => {
   const k = await keeper(t, T + 3), { s } = k; s.schedule(T);
   // Somebody else publishes ETH at T and every relay of it is lost. The wait before the next relay (60 s, doubling)
   // must not start again each time a newer boundary's publication goes first or holds the lane.
@@ -164,8 +164,11 @@ test('D3: a relay that keeps being lost is sent all four times, also while newer
     k.log.push({ at: k.clock.now / 1000 - T, ...await step(s.access, k.journal, s.auth, k.world) });
   }
   const relays = k.log.filter(tick => tick.sent.some(x => x.action === `resend:${ETH}:${T}`)).map(tick => tick.at);
-  assert.equal(relays.length, 4, `relays at T+${relays}`); assert(relays[2] <= 460 && relays[3] <= 960, `relays at T+${relays}`);
-  assert(k.waits().has(`resend:${ETH}:${T}=KEEPER_RESENDS_EXHAUSTED`)); assert.equal(s.defect, undefined);
+  assert.equal(relays.length, 3, `relays at T+${relays}`); assert(relays[2] <= 460, `relays at T+${relays}`);
+  // The opened rounds that wanted the price are Voidable from T+361 and given up two minutes on, but never within 90 s
+  // of a relay: no fourth relay is needed. (The bound of four a rolling day is the D3 test above.)
+  const voids = k.log.filter(tick => tick.sent.some(x => x.action === `void:1:300:${T - 300}` || x.action === `void:1:900:${T - 900}`)).map(tick => tick.at);
+  assert.equal(voids.length, 2); assert(voids.every(at => at >= 481 && at >= relays[2] + 90), `voids at T+${voids}`); assert.equal(s.defect, undefined);
 });
 
 test('D5: a boundary Base has not reached, a verifier that rejects and a chain clock that disagrees are waits, never exits', async t => {
@@ -333,7 +336,7 @@ test('C1-1: verification is this release only, per chain; nothing upstream is re
   s.rpc = null; k.clock.now += 61000; await k.run(k.clock.now / 1000); // Base is back, and its backoff has run out
   // Every address the keeper ever read: its four contracts, the registry implementation, the fee-oracle predeploy, its
   // own account and the canonical Multicall3 its views of those contracts go through (used only while its code is
-  // exactly the canonical runtime; see the B5 test below for a chain where it is not). No verifier, fee manager,
+  // exactly the canonical runtime; see the Multicall3 test below for a chain where it is not). No verifier, fee manager,
   // messenger, portal or token: an upstream change has nothing to trip.
   const registry = s.files.release.contracts.find(c => c.name === REGISTRY);
   const own = [...s.files.release.contracts.map(c => c.address), registry.proxy.implementation, '0x420000000000000000000000000000000000000F', s.account.address, MULTICALL3].map(a => a.toLowerCase());
@@ -356,7 +359,7 @@ test('C1-1: verification is this release only, per chain; nothing upstream is re
   s.implementation = `0x${'be'.repeat(20)}`; k.clock.now += 61000;
   await assert.rejects(step(s.access, k.journal, s.auth, k.world), /KEEPER_REGISTRY_IMPLEMENTATION/);
 
-  // Release gate (SPEC 3) and endpoints. A planned release runs only against loopback forks in a rehearsal.
+  // Release gate and endpoints. A planned release runs only against loopback forks in a rehearsal.
   const never = async () => { throw new Error('no request expected'); };
   const loopback = { base: 'http://127.0.0.1:8545', horizen: 'http://localhost:8546' };
   await assert.rejects(createChainAccess({ files: fixture('planned'), fetchFn: never }), /KEEPER_RELEASE_NOT_DEPLOYED/);
@@ -509,11 +512,11 @@ test('review: a new state directory finds the opened rounds of the last seven da
   const directory = await mkdtemp(join(tmpdir(), 'zedge-keeper-fresh-'));
   try {
     const k = await keeper(t, T + 2, await Journal.acquire(directory, 'fresh')), { s } = k; s.schedule(T);
-    // The previous directory is gone (the documented recovery from several stops). Five rounds were trading when its
-    // keeper stopped, four two hours ago and one six days ago, and nobody has published their closing prices. An
-    // empty journal used to look back 80 minutes only, so they were never published or resolved.
-    // The last one is seven days less twenty minutes old: Voidable from T+1560, before the walk gets that far back.
-    // It is still owed its true result (its report verifies for 30 days), and used to be passed over as Voidable.
+    // The previous directory is gone (the documented recovery from several stops). Six rounds were trading when its
+    // keeper stopped, four two hours ago, one six days ago and one seven days less twenty minutes ago, and nobody has
+    // published their closing prices. An empty journal used to look back 80 minutes only, so they were never published
+    // or resolved. All six are Voidable by now (nothing cached six minutes after their end), and each is still owed its
+    // true result: the keeper works a Voidable round for its price before it gives it up.
     const old = [[0, 300, T - 7200], [1, 300, T - 7200], [0, 900, T - 7200], [1, 900, T - 7200], [1, 900, T - 6 * 86400], [0, 300, T - 603600]];
     for (const [asset, duration, start] of old) s.seed(asset, duration, start, start + 30);
     const unopened = s.seed(0, 300, T - 9000); // never opened: Voidable too, but it holds nothing and is not looked for
@@ -525,8 +528,8 @@ test('review: a new state directory finds the opened rounds of the last seven da
     // The position is in the journal: a restart carries on from it, and the walk ends by itself.
     const position = k.journal.data.catchUp; assert(position < T - 7200 && position > T - 6 * 86400);
     await k.journal.close(); k.journal = await Journal.acquire(directory, 'fresh'); k.world = {}; assert.equal(k.journal.data.catchUp, position);
-    // At the idle pace, one look per 30 s tick. The walk takes about two hours, and still ends where the rules said
-    // when it began: it used to end two hours short of that, and never even read the oldest rounds.
+    // At the idle pace, one look per 30 s tick. The walk takes about two hours, and still ends seven days back from
+    // where it began: it used to end two hours short of that, and never even read the oldest rounds.
     for (; k.journal.data.catchUp !== undefined; k.clock.now += 30000) { assert(k.clock.now < (T + 7200) * 1000); await step(s.access, k.journal, s.auth, k.world); }
     assert(k.round(0, 300, T - 603600).voidableAfter < k.clock.now / 1000 - 1500, 'Voidable well before the walk reached it');
     await k.run(k.clock.now / 1000 + 60);
@@ -534,8 +537,8 @@ test('review: a new state directory finds the opened rounds of the last seven da
     const state = JSON.parse(await readFile(join(directory, 'state.json'), 'utf8')); assert.equal(state.catchUp, undefined); assert.equal(state.catchUpEnd, undefined);
     await k.journal.close();
   } finally { await rm(directory, { recursive: true, force: true }); }
-  // The walk ends where the profile's rules say an opened round can no longer be pending; a profile without them is refused.
-  const incomplete = fixture(); incomplete.config = incomplete.config.replace('"voidGrace":604800,', ''); incomplete.release.configHash = keccak256(toHex(incomplete.config));
+  // A profile without the void grace is refused: the release gate needs every rule the registry was initialised with.
+  const incomplete = fixture(); incomplete.config = incomplete.config.replace('"voidGrace":300,', ''); incomplete.release.configHash = keccak256(toHex(incomplete.config));
   assert(!incomplete.config.includes('voidGrace')); await assert.rejects(createChainAccess({ files: incomplete, fetchFn: async () => { throw new Error('no request expected'); } }), /KEEPER_RELEASE/);
 });
 
@@ -742,24 +745,27 @@ test('operations: only identity, journal, signer and allow-list failures stop th
 
 // ---- Follow-ups of 2026-10-05. ----
 
-// A keeper that comes back on its old state directory `days` after an opened BTC five-minute round ended unresolved:
-// by the registry the round is Voidable (nothing cached a week after its end), and the keeper still tracks it.
-async function overdue(t, days = 8) {
-  const k = await keeper(t, T + 2), old = T - days * 86400, id = k.s.seed(0, 300, old, old + 30);
+// A keeper on its old state directory that still tracks an opened BTC five-minute round starting `ago` seconds
+// before T, with nothing cached for its end. The registry calls it Voidable from end + 360 (60 s + voidGrace 300).
+async function overdue(t, ago = 8 * 86400) {
+  const k = await keeper(t, T + 2), old = T - ago, id = k.s.seed(0, 300, old, old + 30);
   k.journal.data.activeRounds[id] = { asset: 0, duration: 300, start: old };
-  assert.equal(await k.s.access.read(REGISTRY, 'phase', [id]), 8);
   return Object.assign(k, { id, closing: old + 300, key: `${BTC}:${old + 300}`, old: k.s.rounds.get(id),
     voids: () => k.s.sent.filter(x => x.fn === 'voidRound' && x.args[0] === id).length,
+    voidedAt: () => k.s.sent.find(x => x.fn === 'voidRound' && x.args[0] === id && x.ok)?.ts,
+    // Base calls that simulate a publication of this round's closing boundary.
+    simulates: body => [].concat(body).some(q => q.method === 'eth_call' && q.params[0].data?.startsWith(`${toFunctionSelector('publishBoundary(bytes32,uint64,bytes)')}${BTC.slice(2)}${(old + 300).toString(16).padStart(64, '0')}`)),
     // A feed outage of more than the 60 s the contracts accept, right at the closing boundary: no report covers it.
     lose: () => { for (let i = 0; i <= 70; i++) k.s.streams.gaps.add(`${BTC}:${old + 300 + i}`); } });
 }
 
-test('B5: an opened round found Voidable after eight days is published for, relayed and resolved truthfully, not voided', async t => {
+test('an opened round found Voidable after eight days is published for, relayed and resolved truthfully, not voided', async t => {
   const k = await overdue(t), { s } = k; s.schedule(T);
+  assert.equal(await s.access.read(REGISTRY, 'phase', [k.id]), 8);
   const unopened = s.seed(1, 300, T - 8 * 86400); k.journal.data.activeRounds[unopened] = { asset: 1, duration: 300, start: T - 8 * 86400 };
   await k.run(T + 90);
-  // The report is still to be had (it verifies on Base for 30 days), so the round is owed its true result. The
-  // keeper used to void it at once, paying both sides a half.
+  // The report is still to be had, so the round is owed its true result: within the two minutes the keeper works a
+  // Voidable round before it gives it up, the price is published, delivered and the round resolved.
   assert.equal(k.old.outcome, 1, 'resolved, not voided'); assert.equal(k.voids(), 0);
   assert.deepEqual(s.sent.filter(x => x.args[0] === k.id || x.args[0] === BTC && Number(x.args[1]) === k.closing).map(x => `${x.fn}:${x.ok}`), ['publishBoundary:true', 'resolveRound:true']);
   assert.equal(s.cache.get(k.key).observation.observationsTimestamp, k.closing, 'from the report of its own closing second');
@@ -769,102 +775,140 @@ test('B5: an opened round found Voidable after eight days is published for, rela
 
   // "Never opened" is the registry's answer for as long as the round stays Voidable, not a note kept for good. A
   // round read as unopened and Voidable that turns out opened after all (a reorganisation brought in an opening
-  // somebody else had sent) is asked again when it is Voidable a second time, a week on: by then it is an overdue
-  // round to be published for, not one to void at once.
+  // somebody else had sent) is asked again when it is Voidable a second time: by then it is an opened round to be
+  // worked for its price first, not one to void at once.
   const again = await keeper(t, T + 2), start = T - 600, id = again.s.seed(1, 300, start), round = again.s.rounds.get(id);
   again.s.streams.reject = feed => feed === ETH ? 503 : null; // and the ETH report service is down throughout
   again.s.balance = 0n; await again.run(T + 4); // it would void, but cannot pay for it
   assert(again.waits().has(`void:1:300:${start}=KEEPER_BALANCE`)); assert.equal(again.world.view.rounds.find(r => r.roundId === id).openedAt, 0);
   round.openedAt = start + 30; again.s.balance = 10n ** 18n; await again.run(T + 6);
   assert.equal(again.world.view.rounds.find(r => r.roundId === id).phase, 5);
-  again.clock.now += 8 * 86400000; await again.run(again.clock.now / 1000 + 5);
+  // Eight days without a tick (a paused host): the attempts before the pause do not count towards the two minutes.
+  again.clock.now += 8 * 86400000; const back = again.clock.now / 1000; await again.run(back + 5);
   assert.deepEqual((({ phase, openedAt }) => [phase, openedAt])(again.world.view.rounds.find(r => r.roundId === id)), [8, start + 30]);
-  assert.equal(round.outcome, 0, 'not voided while its report is merely unavailable'); assert(again.waits().has(`publish:${ETH}:${start + 300}=STREAMS_HTTP_503`));
+  assert.equal(round.outcome, 0, 'not voided at once'); assert(again.waits().has(`publish:${ETH}:${start + 300}=STREAMS_HTTP_503`));
+  await again.run(back + 150); // two minutes on its price is still not to be had: given up
+  assert.equal(round.outcome, 3); assert(round.resolvedAt >= back + 120, `voided ${round.resolvedAt - back} s after it was found Voidable`);
 });
 
-test('B5: an overdue round is voided only when its report is established to be unobtainable; while that is unknown the keeper waits', async t => {
-  const closed = k => [k.old.outcome, k.voids()];
-  // Unknown: the report service fails for that boundary (an outage, not an answer). 25 minutes on, nothing is voided.
-  const a = await overdue(t); a.s.streams.reject = (feed, path) => path.includes(`imestamp=${a.closing}`) ? 503 : null;
-  await a.pace(T + 1500);
-  assert.deepEqual(closed(a), [0, 0]); assert(a.waits().has(`publish:${a.key}=STREAMS_HTTP_503`));
-  assert(a.s.streams.requests.filter(r => r.status === 503).length >= 6, 'it went on asking');
-  a.s.streams.reject = null; await a.pace(T + 1900); // the service is back: the round gets its true result
-  assert.deepEqual(closed(a), [1, 0]);
+test('void rule: a signed report proving the closing window was skipped voids the round as soon as the registry allows, on the Base adapter\'s word', async t => {
+  // The BTC feed produced no report for 71 s across the closing second of a round that ended at T-300 (Voidable from
+  // T+61). The first report after it starts its window at the boundary and closes 71 s after it, so no report can ever
+  // cover the boundary. The Base adapter rejects that report in a simulation; the keeper voids without the two-minute wait.
+  const k = await overdue(t, 600), { s } = k; k.lose(); let simulations = 0;
+  s.rpc = (chain, body) => { if (chain === 'base' && k.simulates(body)) simulations++; };
+  await k.pace(T + 300);
+  assert.deepEqual([k.old.outcome, k.voids()], [3, 1]); assert(simulations >= 1, 'the Base adapter was asked');
+  assert(k.voidedAt() > T + 60 && k.voidedAt() < T + 60 + 120, `voided at T+${k.voidedAt() - T}, before the two minutes ran out`);
+  assert.equal(s.sent.filter(x => x.fn === 'publishBoundary' && Number(x.args[1]) === k.closing).length, 0);
+  assert(k.waits().has(`publish:${k.key}=STREAMS_NO_COVERING_REPORT`));
 
-  // Definitive: 31 days on, a report covering the boundary would have expired, and the service answers, each time,
-  // that none covers it. That is acted on only after three such answers spread over ten minutes; until then it waits.
-  const b = await overdue(t, 31); b.lose();
-  await b.pace(T + 595);
-  const answers = () => b.s.streams.requests.filter(r => r.path.includes(`/page?feedID=${BTC}&startTimestamp=${b.closing}`) && r.status === 200).length;
-  assert.deepEqual(closed(b), [0, 0]); assert(answers() >= 3, 'three answers alone are not enough before ten minutes have passed');
-  assert(b.waits().has(`publish:${b.key}=STREAMS_NO_COVERING_REPORT`));
-  await b.pace(T + 960);
-  const [gone] = b.s.sent.filter(x => x.fn === 'voidRound' && x.args[0] === b.id);
-  assert.deepEqual(closed(b), [3, 1]); assert(gone.ok && gone.ts >= T + 2 + 600, `voided at T+${gone.ts - T}`);
-  assert.equal(b.s.sent.filter(x => x.fn === 'publishBoundary' && Number(x.args[1]) === b.closing).length, 0);
+  // No proof without the adapter's own answer: while that simulation cannot be made, only the two minutes void it.
+  const b = await overdue(t, 600); b.lose();
+  b.s.rpc = (chain, body) => chain === 'base' && b.simulates(body) ? new Response('down', { status: 503 }) : undefined;
+  await b.pace(T + 400);
+  assert.deepEqual([b.old.outcome, b.voids()], [3, 1]); assert(b.voidedAt() > T + 60 + 120, `voided at T+${b.voidedAt() - T}`);
 
-  // The same answers while the service is not even serving this feed's latest report prove nothing about the boundary.
-  const c = await overdue(t, 31); c.lose(); c.s.streams.reject = (feed, path) => feed === BTC && path.includes('/latest') ? 503 : null;
-  await c.pace(T + 1500);
-  assert.deepEqual(closed(c), [0, 0]); assert(c.waits().has(`publish:${c.key}=STREAMS_HTTP_503`));
-  // Eight days on the same answers are not counted at all: a report covering the boundary would still verify for
-  // 22 days, and "none" may be the historical lookup failing alone. If the report turns up, it is published.
-  const d = await overdue(t); d.lose();
-  await d.pace(T + 1500); assert.deepEqual(closed(d), [0, 0]); assert.equal(d.world.misses.has(d.key), false);
-  d.s.streams.gaps.clear(); await d.pace(T + 2000);
-  assert.deepEqual(closed(d), [1, 0]);
-
-  // Established, but Horizen cannot be reached to void, and meanwhile Base answers that it holds the price after
-  // all (published within its validity, its relay lost). Base's word on the tick decides: it is relayed and resolved.
-  const e = await overdue(t, 31); e.lose();
-  e.s.rpc = chain => chain === 'horizen' && Date.now() >= (T + 400) * 1000 && Date.now() < (T + 1200) * 1000 ? new Response('down', { status: 503 }) : undefined;
-  await e.pace(T + 1100);
-  const record = e.world.misses.get(e.key); assert(record.count >= 3 && record.last - record.first >= 600000, 'the report is established to be unobtainable');
-  assert.deepEqual(closed(e), [0, 0]);
-  e.s.relay = null; e.s.outsider(PUBLISHER, 'publishBoundary', [BTC, BigInt(e.closing), e.s.report(BTC, e.closing, e.closing).fullReport], e.closing + 100); e.s.relay = 24;
-  await e.pace(T + 1500);
-  assert.deepEqual(closed(e), [1, 0]); assert.equal(e.s.sent.filter(x => x.fn === 'resendBoundary' && Number(x.args[1]) === e.closing && x.ok).length, 1);
-
-  // The rule itself, on the keeper's own record of answers: three of them, and ten minutes from the first to the last.
-  const r = await overdue(t, 31); r.lose(); await r.run(T + 40); // the rounds ahead are created by now: the Horizen lane is free
-  r.world.defer.set(`publish:${r.key}`, { tries: 1, code: 'HELD_BY_THIS_TEST', until: r.clock.now + 3600000 }); // no further answer while the record is set by hand
-  for (const [count, minutes, voided] of [[2, 30, 0], [50, 9, 0], [3, 10, 1]]) {
-    r.world.misses.set(r.key, { count, first: r.clock.now - minutes * 60000, last: r.clock.now });
-    await r.run(r.clock.now / 1000 + 3);
-    assert.equal(r.voids(), voided, `${count} answers over ${minutes} minutes`);
+  // No proof either when the report the service calls the first one after the boundary starts its window after it
+  // (the DON may have produced a covering report this answer does not show), or closes before it.
+  for (const [validFrom, observed] of [[1, 71], [-5, -1]]) {
+    const c = await overdue(t, 600), real = c.s.auth.streams; let asked = 0;
+    c.s.auth.streams = { report: (feed, boundary, window) => feed === BTC && boundary === c.closing
+      ? Promise.reject(Object.assign(new Error('STREAMS_NO_COVERING_REPORT'), { next: { payload: '0x', observation: { validFromTimestamp: c.closing + validFrom, observationsTimestamp: c.closing + observed } } }))
+      : real.report(feed, boundary, window) };
+    c.s.rpc = (chain, body) => { if (chain === 'base' && c.simulates(body)) asked++; };
+    await c.pace(T + 400);
+    assert.equal(asked, 0); assert.deepEqual([c.old.outcome, c.voids()], [3, 1]); assert(c.voidedAt() > T + 60 + 120, `voided at T+${c.voidedAt() - T}`);
   }
 });
 
-test('B5: a price that is on Base is relayed, never given up; a report Base can no longer verify is given up at once, on the adapter\'s word', async t => {
-  // Somebody published the closing price on Base and its bridge message was lost. Whatever the report service says
-  // now, the price exists: relay it and resolve.
-  const k = await overdue(t), { s } = k;
-  s.relay = null; s.outsider(PUBLISHER, 'publishBoundary', [BTC, BigInt(k.closing), s.report(BTC, k.closing).fullReport], T + 1); s.relay = 24; k.lose();
-  await k.pace(T + 900);
-  assert.equal(k.old.outcome, 1); assert.equal(k.voids(), 0);
-  assert.deepEqual(s.sent.filter(x => x.chain === 'base' && Number(x.args[1]) === k.closing).map(x => `${x.fn}:${x.ok}`), ['resendBoundary:true']);
-  assert.equal(s.streams.requests.filter(r => r.path.includes(`imestamp=${k.closing}`)).length, 0, 'the report service was not even asked');
+test('void rule: an opened round whose closing price is still not cached two minutes after the registry calls it Voidable is voided, whatever kept it away', async t => {
+  // The report service fails for the closing boundary throughout. Voidable from T+61; not voided before T+181.
+  const a = await overdue(t, 600); a.s.streams.reject = (feed, path) => path.includes(`imestamp=${a.closing}`) ? 503 : null;
+  await a.pace(T + 178);
+  assert.equal(a.voids(), 0, 'not within the two minutes'); assert(a.waits().has(`publish:${a.key}=STREAMS_HTTP_503`));
+  await a.pace(T + 400);
+  assert.deepEqual([a.old.outcome, a.voids()], [3, 1]); assert(a.voidedAt() > T + 180 && a.voidedAt() <= T + 215, `voided at T+${a.voidedAt() - T}`);
 
-  // 31 days on, the report is still served but has expired: Base's verifier takes it for 30 days. The keeper's own
-  // check says so, and it has the Base adapter say so itself in a simulation before it gives the round up.
-  const late = await overdue(t, 31); let refuse = true;
-  const simulated = body => [].concat(body).some(q => q.method === 'eth_call' && q.params[0].data?.startsWith(`${toFunctionSelector('publishBoundary(bytes32,uint64,bytes)')}${BTC.slice(2)}${late.closing.toString(16).padStart(64, '0')}`));
-  late.s.rpc = (chain, body) => chain === 'base' && refuse && simulated(body) ? new Response('down', { status: 503 }) : undefined;
-  await late.pace(T + 700); // Base cannot be asked: unknown, so nothing is voided
-  assert.equal(late.old.outcome, 0); assert.equal(late.voids(), 0); assert(late.waits().has('base=RPC_HTTP_503'));
-  refuse = false; const from = late.s.sent.length;
-  await late.pace(T + 1100);
-  assert.equal(late.old.outcome, 3); assert.equal(late.voids(), 1);
-  assert(late.waits().has(`publish:${late.key}=STREAMS_BOUNDARY_WINDOW`)); assert.equal(late.s.sent.slice(from).filter(x => x.fn === 'publishBoundary' && Number(x.args[1]) === late.closing).length, 0);
-  // A verifier that rejects a report that has not expired (say a rotated DON configuration) establishes nothing.
-  const v = await overdue(t);
-  v.s.beforeEstimate = (name, fn, args) => { if (fn === 'publishBoundary' && Number(args[1]) === v.closing) throw Object.assign(new Error('execution reverted'), { code: 3, data: toFunctionSelector('InvalidOracleResponse()') }); };
-  await v.pace(T + 1500);
-  assert.equal(v.old.outcome, 0); assert.equal(v.voids(), 0); assert(v.waits().has(`publish:${v.key}=REVERT_INVALID_ORACLE_RESPONSE`));
+  // The price is on Base and its delivery never arrives (audit D4: a pumped deposit fee; or a lost message). The keeper
+  // relays it, never voids within 90 s of a relay, and gives the round up once the two minutes have passed.
+  const d = await overdue(t, 600), { s } = d;
+  s.relay = null; s.outsider(PUBLISHER, 'publishBoundary', [BTC, BigInt(d.closing), s.report(BTC, d.closing).fullReport], d.closing + 5);
+  await d.pace(T + 600);
+  const relays = s.sent.filter(x => x.fn === 'resendBoundary' && Number(x.args[1]) === d.closing && x.ok && x.ts < d.voidedAt());
+  assert.deepEqual([d.old.outcome, d.voids()], [3, 1]); assert(relays.length >= 1, 'relayed first');
+  assert(d.voidedAt() >= Math.max(...relays.map(x => x.ts)) + 90 && d.voidedAt() > T + 180, `voided at T+${d.voidedAt() - T}`);
+
+  // Base cannot be read from T+30 on, so nothing can be published or relayed either. The skipped-window proof was in
+  // hand before that, but it is not acted on without Base's answer on the tick. Once Base has been silent for the whole
+  // two minutes the round is given up all the same, on Horizen's own answer that nothing is cached.
+  const e = await overdue(t, 600); e.lose();
+  e.s.rpc = chain => chain === 'base' && Date.now() >= (T + 30) * 1000 ? new Response('down', { status: 503 }) : undefined;
+  await e.pace(T + 400);
+  assert.deepEqual([e.old.outcome, e.voids()], [3, 1]); assert(e.voidedAt() > T + 60 + 120, `voided at T+${e.voidedAt() - T}`);
+  // A shorter Base outage across the end of the two minutes only delays the void to Base's next answer.
+  const f = await overdue(t, 600); f.s.streams.reject = (feed, path) => path.includes(`imestamp=${f.closing}`) ? 503 : null;
+  f.s.rpc = chain => chain === 'base' && Date.now() >= (T + 150) * 1000 && Date.now() < (T + 250) * 1000 ? new Response('down', { status: 503 }) : undefined;
+  await f.pace(T + 400);
+  assert.deepEqual([f.old.outcome, f.voids()], [3, 1]); assert(f.voidedAt() >= T + 250, `voided at T+${f.voidedAt() - T}, once Base answered again`);
 });
 
-test('B5: a tick reads the registry and the cache in one call through Multicall3 and spares rounds that cannot change; without Multicall3 it asks one by one', async t => {
+test('void rule: a relay or publication the keeper sent is never pre-empted by a void while it is less than 90 s old or not yet in a block', async t => {
+  // Found Voidable an hour after its end: the price is on Base, its bridge message lost. The keeper relays it 60 s
+  // after first seeing it there, and that relay takes 80 s to arrive: the two minutes run out while it is on its way.
+  const k = await overdue(t, 3600), { s } = k;
+  s.relay = null; s.outsider(PUBLISHER, 'publishBoundary', [BTC, BigInt(k.closing), s.report(BTC, k.closing).fullReport], k.closing + 5); s.relay = 80;
+  await k.pace(T + 400);
+  const [relay] = s.sent.filter(x => x.fn === 'resendBoundary' && Number(x.args[1]) === k.closing);
+  assert(relay.ok && relay.ts + 80 > T + 2 + 120, `relayed at T+${relay.ts - T}: still on its way when the two minutes ran out`);
+  assert.deepEqual([k.old.outcome, k.voids()], [1, 0], 'resolved with its true result, not voided');
+
+  // Nor is somebody else's publication: one that turns up on Base 20 s before the two minutes run out, and takes 60 s
+  // to arrive, is counted as on its way for 90 s from when the keeper first sees it there.
+  const o = await overdue(t, 3600); o.s.streams.reject = (feed, path) => path.includes(`imestamp=${o.closing}`) ? 503 : null;
+  await o.run(T + 100); o.s.relay = 60; o.s.outsider(PUBLISHER, 'publishBoundary', [BTC, BigInt(o.closing), o.s.report(BTC, o.closing).fullReport], T + 101);
+  await o.run(T + 200);
+  assert.deepEqual([o.old.outcome, o.voids()], [1, 0], 'resolved with its true result, not voided');
+
+  // Nor is one of its own that Base has not included yet, however long ago it was signed (congestion): the 90 s
+  // count starts once it is settled. The relay above, signed at T+62, kept out of blocks for two minutes.
+  const c = await overdue(t, 3600); let first = true;
+  c.s.relay = null; c.s.outsider(PUBLISHER, 'publishBoundary', [BTC, BigInt(c.closing), c.s.report(BTC, c.closing).fullReport], c.closing + 5); c.s.relay = 24;
+  c.s.inclusion = (tx, name, fn) => fn === 'resendBoundary' && first ? (first = false, 120) : undefined;
+  await c.pace(T + 400);
+  const relays = c.s.sent.filter(x => x.fn === 'resendBoundary'), mined = relays.find(x => x.ok);
+  assert(mined.ts > relays[0].sentAt + 90, `a relay was mined ${mined.ts - relays[0].sentAt} s after the first was signed`);
+  assert.deepEqual([c.old.outcome, c.voids()], [1, 0], 'resolved with its true result, not voided');
+  // Base includes none of its transactions until T+400. The publication is signed again and again meanwhile, and at
+  // T+302 the next boundary's publication takes its nonce: dropped, it is published again once that one is settled.
+  const e = await overdue(t, 3600);
+  e.s.inclusion = (tx, name) => name === PUBLISHER ? Math.max(0, T + 400 - Date.now() / 1000) : undefined;
+  await e.pace(T + 600);
+  const pubs = e.s.sent.filter(x => x.fn === 'publishBoundary' && Number(x.args[1]) === e.closing);
+  assert(pubs.length > 2 && pubs.some(x => x.replaced) && pubs.at(-1).sentAt > T + 400, 'signed again while it waited, and after it was dropped');
+  assert.deepEqual([e.old.outcome, e.voids()], [1, 0], 'resolved with its true result, not voided');
+  // A publication that is never mined holds the void for ten minutes after it was first signed, not for good.
+  const g = await overdue(t, 3600); g.s.inclusion = (tx, name, fn) => fn === 'publishBoundary' ? 'drop' : undefined;
+  await g.pace(T + 800);
+  const signed = Math.min(...g.s.sent.filter(x => x.fn === 'publishBoundary').map(x => x.sentAt));
+  assert.deepEqual([g.old.outcome, g.voids()], [3, 1]); assert(g.voidedAt() >= signed + 600 && g.voidedAt() < signed + 700, `voided ${g.voidedAt() - signed} s after the first signature`);
+});
+
+test('void rule: a closing price cached after the keeper has given a round up is resolved, never voided', async t => {
+  // Given up from T+181, but the void cannot be paid for. Then somebody else's delivery lands.
+  const k = await overdue(t, 600), { s } = k; s.streams.reject = (feed, path) => path.includes(`imestamp=${k.closing}`) ? 503 : null;
+  await k.run(T + 150); s.balance = 0n; await k.run(T + 200);
+  assert(k.waits().has(`void:0:300:${k.closing - 300}=KEEPER_BALANCE`), 'the keeper had given it up');
+  s.deliver(BTC, k.closing, T + 201); s.balance = 10n ** 18n;
+  await k.run(T + 240);
+  assert.deepEqual([k.old.outcome, k.voids()], [1, 0]);
+  // The plan itself: a cached price is resolved, whatever was decided for that boundary on the tick.
+  const round = { ...k.world.view.rounds.find(r => r.roundId === k.id), phase: 8, resolvedAt: 0 }, view = { now: T + 300, rounds: [round] };
+  const yes = new Map([[k.key, true]]), no = new Map([[k.key, false]]), given = new Set([k.key]);
+  assert.deepEqual(plan(view, yes, no, given).horizen.map(a => a.kind), ['resolve']); assert.deepEqual(plan(view, no, no, given).horizen.map(a => a.kind), ['void']);
+});
+
+test('a tick reads the registry and the cache in one call through Multicall3 and spares rounds that cannot change; without Multicall3 it asks one by one', async t => {
   const k = await keeper(t, T + 2), { s } = k; s.schedule(T);
   const direct = { base: 0, horizen: 0 }, aggregates = { base: 0, horizen: 0 };
   // Views sent straight to a contract of the release (not the identity check's owner and rules, not a simulation) or through Multicall3.
@@ -901,7 +945,7 @@ test('B5: a tick reads the registry and the cache in one call through Multicall3
   }
 });
 
-test('B5: a reorganisation deeper than the rounds the keeper still re-reads makes it read every round again', async t => {
+test('a reorganisation deeper than the rounds the keeper still re-reads makes it read every round again', async t => {
   const k = await keeper(t, T + 2), { s } = k; s.schedule(T);
   await k.pace(T + 291);
   const resolved = s.sent.filter(x => x.fn === 'resolveRound' && x.done); assert.equal(resolved.length, 4);
@@ -929,7 +973,7 @@ test('B5: a reorganisation deeper than the rounds the keeper still re-reads make
   assert.deepEqual(line.waiting.map(w => `${w.action}=${w.wait}`), [`resolve:${round.asset}:${round.duration}:${round.start}=KEEPER_REORGANISED`]);
 });
 
-test('B5: the committed release and profile are consumed as written; while the release is planned only a rehearsal on loopback forks runs', async () => {
+test('the committed release and profile are consumed as written; while the release is planned only a rehearsal on loopback forks runs', async () => {
   const never = async () => { throw new Error('no request expected'); }, loopback = { base: 'http://127.0.0.1:8545', horizen: 'http://127.0.0.1:8546' };
   const read = async name => readFile(new URL(`../../contracts/deployment/${name}`, import.meta.url), 'utf8');
   const release = JSON.parse(await read('mainnet-addresses.json')), profile = await read('hybrid-mainnet.json');
@@ -939,24 +983,13 @@ test('B5: the committed release and profile are consumed as written; while the r
   const registry = release.contracts.find(c => c.name === REGISTRY);
   assert.deepEqual(access.call(REGISTRY, 'voidRound', [`0x${'00'.repeat(32)}`]).to, registry.address);
   assert.deepEqual(access.config, JSON.parse(profile));
+  // The planned registry voids an opened round with no closing price five minutes after its observation window (owner decision 2026-10-06).
+  assert.equal(access.config.rules.voidGrace, 300); assert.equal(access.config.rules.observationWindow, 60);
   if (release.status === 'planned') await assert.rejects(createChainAccess({ fetchFn: never }), error => error.message === 'KEEPER_RELEASE_NOT_DEPLOYED' && classify(error).class === 'stop');
   else { assert.equal(release.status, 'deployed'); await createChainAccess({ fetchFn: never }); }
 });
 
-// ---- Review of the B5 follow-ups (2026-10-05). ----
-
-test('review: "no report" for a boundary whose report would still verify is never final; an outage of the historical lookup alone does not void', async t => {
-  // Eight days on, the covering report verifies on Base for 22 more days. For twenty minutes both historical lookups
-  // answer 404 for that boundary while the feed's latest report is served: the same answers a missing report gives.
-  // The keeper used to count them and void at about T+844, paying both sides a half.
-  const k = await overdue(t), { s } = k, until = (T + 1200) * 1000;
-  s.streams.reject = (feed, path) => Date.now() < until && !path.includes('/latest') && path.includes(String(k.closing)) ? 404 : null;
-  await k.pace(T + 1200);
-  assert.deepEqual([k.old.outcome, k.voids()], [0, 0]); assert(k.waits().has(`publish:${k.key}=STREAMS_NO_COVERING_REPORT`));
-  assert(s.streams.requests.filter(r => r.status === 404).length >= 20, 'it went on asking'); assert.equal(k.world.misses.has(k.key), false, 'and counted nothing');
-  await k.pace(T + 1800); // the lookup answers again: the true result
-  assert.deepEqual([k.old.outcome, k.voids()], [1, 0]);
-});
+// ---- Review of the 2026-10-05 follow-ups. ----
 
 test('review: a resolution somebody else sent, taken out by a reorganisation minutes later, is noticed while the round is in view and resolved again', async t => {
   const k = await keeper(t, T + 2), { s } = k; s.schedule(T); for (const feed of [BTC, ETH]) s.deliver(feed, T, T + 1);

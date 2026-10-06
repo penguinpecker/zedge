@@ -22,7 +22,7 @@
   "rules": {
     "observationWindow": 60,
     "openingGrace": 150,
-    "voidGrace": 604800,
+    "voidGrace": 300,
     "cutoffBuffer": 30,
     "minimumGasLimit": 600000
   },

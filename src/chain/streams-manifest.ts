@@ -93,7 +93,7 @@ export function parseStreamsManifest(value: unknown, expectedChain: number): Str
   const p = object(r.parameters, ["observationWindow", "openingGrace", "voidGrace", "cutoffBuffer", "minimumGasLimit", "btcFeedId", "ethFeedId", "btcDecimals", "ethDecimals", "collateralDecimals", "routeHash", "rulesHash"]);
   if (p.btcDecimals !== 18 || p.ethDecimals !== 18 || p.collateralDecimals !== 6) throw new Error("Unsupported Streams token or price precision.");
   const parameters: StreamsManifest["parameters"] = {
-    observationWindow: integer(p.observationWindow, 60n, 0n), openingGrace: integer(p.openingGrace, 2n ** 32n - 1n), voidGrace: integer(p.voidGrace, 1_814_400n, 86_400n),
+    observationWindow: integer(p.observationWindow, 60n, 0n), openingGrace: integer(p.openingGrace, 2n ** 32n - 1n), voidGrace: integer(p.voidGrace, 1_814_400n, 120n),
     cutoffBuffer: integer(p.cutoffBuffer, 299n), minimumGasLimit: integer(p.minimumGasLimit, 2_000_000n, 200_000n),
     btcFeedId: hash(p.btcFeedId), ethFeedId: hash(p.ethFeedId), btcDecimals: 18, ethDecimals: 18, collateralDecimals: 6, routeHash: hash(p.routeHash), rulesHash: hash(p.rulesHash),
   };

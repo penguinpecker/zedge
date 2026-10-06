@@ -71,7 +71,7 @@ test('report errors never echo response bodies or nested transport secrets', asy
 });
 
 test('round lifecycle respects exact deadlines and never substitutes a late price', () => {
-  const r = { start: 900, end: 1200, openingDeadline: 1110, voidableAfter: 606060, openedAt: 0, phase: 2 };
+  const r = { start: 900, end: 1200, openingDeadline: 1110, voidableAfter: 1560, openedAt: 0, phase: 2 };
   assert.equal(chooseAction(r, 899, false, false), null);
   assert.equal(chooseAction(r, 900, false, false).kind, 'publish');
   assert.equal(chooseAction(r, 1110, true, true).kind, 'open');
@@ -82,16 +82,16 @@ test('round lifecycle respects exact deadlines and never substitutes a late pric
   // New registry: resolution has no deadline. A cached closing price resolves however late; a missing one is
   // still published.
   assert.equal(chooseAction({ ...r, openedAt: 920, phase: 5 }, 4861, true, true).kind, 'resolve');
-  assert.equal(chooseAction({ ...r, openedAt: 920, phase: 5 }, 606061, false, false).kind, 'publish');
-  // Voidable (phase 8) on an opened round only says nothing is cached a week after its end. It is still worked
-  // for its true result, exactly like a round awaiting resolution, and voided only once its closing report is
-  // established to be unobtainable. A round nobody opened in time is voided at once, as before.
+  assert.equal(chooseAction({ ...r, openedAt: 920, phase: 5 }, 1561, false, false).kind, 'publish');
+  // Voidable (phase 8) on an opened round says nothing is cached 60 s + voidGrace after its end. It is still worked
+  // for its true result, exactly like a round awaiting resolution, and voided only once the keeper gives it up
+  // (main.mjs, step). A round nobody opened in time is voided at once, as before.
   const overdue = { ...r, openedAt: 920, phase: 8 };
-  assert.deepEqual([[false, false], [false, true], [true, true]].map(([cache, base]) => chooseAction(overdue, 606061, cache, base).kind), ['publish', 'await-delivery', 'resolve']);
-  assert.equal(chooseAction(overdue, 606061, false, false).overdue, true); assert.equal(chooseAction({ ...overdue, phase: 5 }, 606061, false, false).overdue, undefined);
-  assert.deepEqual(chooseAction(overdue, 606061, false, false, true), { kind: 'void', deadline: Number.MAX_SAFE_INTEGER, boundary: r.end });
-  assert.equal(chooseAction(overdue, 606061, true, false, true).kind, 'resolve', 'a cached price is resolved, whatever was established before');
-  assert.equal(chooseAction({ ...r, phase: 8 }, 606061, false, false).kind, 'void');
+  assert.deepEqual([[false, false], [false, true], [true, true]].map(([cache, base]) => chooseAction(overdue, 1561, cache, base).kind), ['publish', 'await-delivery', 'resolve']);
+  assert.deepEqual(chooseAction(overdue, 1561, false, false, true), { kind: 'void', deadline: Number.MAX_SAFE_INTEGER, boundary: r.end });
+  assert.equal(chooseAction(overdue, 1561, false, true, true).kind, 'void', 'given up while Base holds the price: its delivery did not arrive');
+  assert.equal(chooseAction(overdue, 1561, true, false, true).kind, 'resolve', 'a cached price is resolved, whatever was decided before');
+  assert.equal(chooseAction({ ...r, phase: 8 }, 1561, false, false).kind, 'void');
   assert.equal(chooseAction({ ...r, phase: 6 }, 5000, true, true), null);
   assert.equal(chooseAction({ ...r, phase: 0 }, 880, false, false), null);
 });
@@ -191,7 +191,7 @@ test('persisted create intent remains discoverable after a crash and a long rest
     read: async (_, fn, args) => {
       if (fn === 'roundIdFor') { seen.push(Number(args[2])); return `0x${BigInt(args[2]).toString(16).padStart(64, '0')}`; }
       if (fn === 'phase') return Number(BigInt(args[0])) === old ? 8 : 0;
-      return { asset: 0, duration: 300, start: BigInt(old), end: BigInt(old + 300), openedAt: 0n, openingDeadline: BigInt(old + 210), voidableAfter: BigInt(old + 300 + 60 + 604800) };
+      return { asset: 0, duration: 300, start: BigInt(old), end: BigInt(old + 300), openedAt: 0n, openingDeadline: BigInt(old + 210), voidableAfter: BigInt(old + 300 + 60 + 300) };
     } };
   const result = await discover(access, { old: { asset: 0, duration: 300, start: old } });
   assert(seen.includes(old)); assert.equal(chooseAction(result.rounds.find(r => r.start === old), now, false, false).kind, 'void');

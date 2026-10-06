@@ -35,7 +35,7 @@ export function expectedConstructors(config, plan) {
   const rules = config.rules;
   demand(feeds.btcDecimals === 18 && feeds.ethDecimals === 18);
   demand(rules.observationWindow === 60 && rules.openingGrace === 150
-    && rules.voidGrace === 604800 && rules.cutoffBuffer === 30 && rules.minimumGasLimit === 600000);
+    && rules.voidGrace === 300 && rules.cutoffBuffer === 30 && rules.minimumGasLimit === 600000);
   const route = {
     sourceChainId: 8453n,
     destinationChainId: 26514n,

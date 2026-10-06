@@ -37,7 +37,7 @@ const sleep = ms => ms > 0 ? new Promise(ok => setTimeout(ok, ms)) : undefined;
 export function fixture(status = 'deployed') {
   const config = JSON.stringify({ chains: { base: { chainId: 8453, rpcUrl: URLS.base, receiptRpcUrl: RECEIPTS }, horizen: { chainId: 26514, rpcUrl: URLS.horizen } },
     feeds: { btcFeedId: BTC, ethFeedId: ETH, btcDecimals: 18, ethDecimals: 18 },
-    rules: { observationWindow: 60, openingGrace: 150, voidGrace: 604800, cutoffBuffer: 30, minimumGasLimit: 600000 } });
+    rules: { observationWindow: 60, openingGrace: 150, voidGrace: 300, cutoffBuffer: 30, minimumGasLimit: 600000 } });
   const release = { schemaVersion: 2, release: 'simulated', status, configHash: keccak256(toHex(config)), routeHash: `0x${'d1'.repeat(32)}`, rulesHash: `0x${'d2'.repeat(32)}`,
     contracts: Object.keys(ADDRESS).map(name => ({ name, chain: CHAIN[name], chainId: CHAIN[name] === 'base' ? 8453 : 26514, address: ADDRESS[name],
       runtimeCodeHash: keccak256(code(name)), ...(name === 'StreamsRoundRegistry' ? { creationTransaction: null, proxy: { implementation: IMPLEMENTATION, implementationCodeHash: keccak256(code('implementation')), owner: OWNER } }
@@ -57,7 +57,7 @@ export async function simulate({ rtt = 0, relay = 24, status = 'deployed', key =
     rpc: null, // (chain, body, url) => Response | undefined : answer a whole HTTP request yourself (rate limits, outages)
     lagFor: null, // (chain, body) => seconds : this request is answered by a backend that many seconds behind the head
     reorg: {}, // chain => block number from which the chain was replaced: those blocks carry another hash
-    inclusion: null, // (transaction, name, functionName, args) => 'drop' | 'revert' | undefined : fate of a broadcast transaction
+    inclusion: null, // (transaction, name, functionName, args) => 'drop' | 'revert' | seconds | undefined : fate of a broadcast transaction (seconds: left out of blocks that long)
     beforeEstimate: null, // (name, functionName, args) => void : runs between the keeper's state read and its simulation
     streams: { latency: 1, gaps: new Set(), lookup: 'exact', reject: null, skewLimit: 5000, requests: [] } };
   let lag = 0;
@@ -74,7 +74,7 @@ export async function simulate({ rtt = 0, relay = 24, status = 'deployed', key =
   s.roundId = (asset, duration, start) => keccak256(encodeAbiParameters(['uint256', 'address', 'bytes32', 'uint8', 'uint32', 'uint64'].map(type => ({ type })),
     [26514n, ADDRESS.StreamsRoundRegistry, files.release.rulesHash, asset, duration, BigInt(start)]));
   s.seed = (asset, duration, start, openedAt = 0) => { const id = s.roundId(asset, duration, start);
-    s.rounds.set(id, { asset, duration, start, end: start + duration, openingDeadline: start + 210, voidableAfter: start + duration + 60 + 604800, openedAt, resolvedAt: 0, outcome: 0 }); return id; };
+    s.rounds.set(id, { asset, duration, start, end: start + duration, openingDeadline: start + 210, voidableAfter: start + duration + 60 + 300, openedAt, resolvedAt: 0, outcome: 0 }); return id; };
   // Every market's rounds around boundary T: the one ending there (opened), the one starting there and the next two.
   s.schedule = T => { for (const asset of [0, 1]) for (const duration of [300, 900]) for (let i = -1; i <= 2; i++) s.seed(asset, duration, T + i * duration, i < 0 ? T - duration + 30 : 0); };
   // An observation already published on Base and delivered to the Horizen cache at time `at`.
@@ -192,8 +192,8 @@ export async function simulate({ rtt = 0, relay = 24, status = 'deployed', key =
         if (tx.nonce < mined(chain) + (s.foreign?.[chain] ?? 0)) throw Object.assign(new Error('nonce too low'), { code: -32000 });
         const pooled = s.sent.find(x => x.chain === chain && !x.done && !x.replaced && x.fate !== 'drop' && x.tx.nonce === tx.nonce);
         if (pooled) { if (tx.maxFeePerGas * 10n < pooled.tx.maxFeePerGas * 11n) throw Object.assign(new Error('replacement transaction underpriced'), { code: -32000 }); pooled.replaced = true; }
-        const block = h + 1;
-        s.sent.push({ chain, hash: keccak256(p[0]), raw: p[0], tx, name, fn, args, sentAt: seconds(), block, ts: stamp(chain, block), fate: s.inclusion?.(tx, name, fn, args) });
+        const fate = s.inclusion?.(tx, name, fn, args), block = h + 1 + (typeof fate === 'number' ? Math.ceil(fate / (chain === 'base' ? 2 : 1)) : 0);
+        s.sent.push({ chain, hash: keccak256(p[0]), raw: p[0], tx, name, fn, args, sentAt: seconds(), block, ts: stamp(chain, block), fate });
         return keccak256(p[0]);
       }
       case 'eth_getTransactionByHash': case 'eth_getTransactionReceipt': {

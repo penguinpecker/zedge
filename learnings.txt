@@ -447,6 +447,8 @@ may arrive after expiry, subject to the independent Horizen round deadlines.
 no closing deadline and a seven-day void grace, and a closing price that arrives
 late still resolves the round. The 23-second sample was the deployment account's
 own deposit, not independent traffic.]
+[2026-10-06: the owner shortened the planned void grace to 300 seconds; see
+"Short refund window" at the end.]
 
 The existing engine and frontend are not automatically compatible with the new
 18-decimal registry. Do not truncate prices to fit the old uint64/int64 models or
@@ -688,6 +690,10 @@ What the audit found, by class, and how each class was fixed
    Lesson: never let "nobody acted in time" move value between winners and
    losers. Make the timeout long compared with what blocking costs, and make it
    give way to evidence that exists.
+   [2026-10-06: the planned grace is now 300 s, end + 60 s + 300 s, by owner
+   decision. The first half of this lesson is knowingly not followed: blocking
+   for a few minutes costs about 0.03-0.05 ETH. D4 is an accepted risk; see
+   "Short refund window" at the end.]
 
 2. Immutable everywhere leaves no repair.
    A billing, access or deactivation change at the upstream verifier would have
@@ -770,6 +776,8 @@ What remains a trust assumption
   round before it trades. A five-minute round may trade for only 60 seconds.
 - The seven-day lock. If a closing price can never be published, one-sided
   positions wait seven days for the void. Complete pairs can merge at any time.
+  [2026-10-06: now six minutes after the end (300 s grace), and in exchange a
+  few minutes of blocked delivery forces the half payout; see the end.]
 - USDC.e, the verifier, the messengers and the portal keep their own owners.
 
 What an operator must know
@@ -795,9 +803,12 @@ What an operator must know
   by design, and the site must show mainnet as unavailable, until a reviewed
   release names the new state.
 - "Voidable" on an opened round means only that seven days passed with nothing
-  cached. The closing report stays verifiable on Base for about 30 days and a
+  cached [2026-10-06: the grace is now 300 s]. The closing report stays verifiable on Base for about 30 days and a
   recorded void is final. Publish, relay and resolve first; void only when no
-  report can be obtained.
+  report can be obtained. [2026-10-06: superseded. The keeper now voids two
+  minutes after voidableAfter if the price is still not cached, also after an
+  ordinary outage, although the report could be published later. See "Short
+  refund window" below.]
 - The keeper needs: one process per wallet under a supervisor; a state
   directory on a local disk, never a network share; a host clock within five
   seconds (the report service rejects anything further off); an endpoint on
@@ -869,7 +880,8 @@ that evening's live fees, is about 0.0039 ETH a day on Base and 0.00025 ETH a
 day on Horizen, in line with the earlier estimate.
 Not shown: the live report service and DON signatures, the real bridge, real
 fees, public-endpoint latency, the seven-day overdue path, restarts and
-reorganisations.
+reorganisations. [2026-10-06: the rehearsal ran with the seven-day profile and
+build; it has not been repeated with the five-minute ones.]
 
 - A fork is not the chain. Anvil estimates gas past Base's 2^24
   per-transaction cap; Base refuses such an eth_estimateGas with -32003 "gas
@@ -887,6 +899,8 @@ reorganisations.
   round whose closing report never existed is voided by the keeper about 30
   days after its end, not seven. voidRound is permissionless, so anyone can void
   it by hand once the registry's seven-day grace has passed.
+  [2026-10-06: replaced by owner decision together with the 300 s grace; the
+  keeper rule is in "Short refund window" at the end.]
 
 Vela evaluation slice (adapters/vela/stack/README.md). The ZEDGE guest wasm ran
 on Horizen's local Vela v0.2.0 Docker stack: software TEE with fixed
@@ -900,7 +914,8 @@ milliseconds per request on states of a few kilobytes; the manager handled one
 transition per 5-second poll (the starter kit's setting).
 Not shown: confidentiality, attestation, a genuine sender, amount or time, the
 order book, round mirroring, MaxActivations/MaxSweeps on a full book, and
-performance on real hardware.
+performance on real hardware. [2026-10-06: rerun with the order build and the
+300 s grace: 210 of 210 checks (manifest 5, slice 205).]
 
 - The v0.2.0 manager does not recover. Restarted in the second between its
   state update being mined and its seeing the inclusion, it rolls back its
@@ -912,3 +927,62 @@ performance on real hardware.
   Nothing is private from the host on v0.2.0.
 - Anvil drops an evm_increaseTime offset across docker compose down/up. Block
   time then goes backwards and the guest rightly refuses later ticks.
+
+
+Short refund window: owner decision 2026-10-06
+----------------------------------------------
+The owner chose, knowingly, that an opened round whose closing price is not
+cached six minutes after its end can be voided (1/2 + 1/2, not a refund of
+the price paid), instead of seven days later. The planned void grace is 300 s, so
+voidableAfter = end + 60 + 300, six minutes after the end. The registry's
+initialize now accepts 2 minutes to 21 days (was 1 to 21 days). Normal rounds
+are unaffected: they resolve as soon as the closing price is cached (30 to 40 s
+after the end in the rehearsal), and a cached closing price still blocks any
+void. Nothing was deployed; the registry is still planned.
+
+Accepted risk, audit finding D4. Anyone can block Base-to-Horizen price
+delivery by pumping Horizen's deposit fee on Base. The cost grows with how long
+the block is held: at 2026-10-05 Base fees about 0.03-0.05 ETH for a few
+minutes and about 0.4 ETH per hour. One block stops every price
+message, so it voids every opened round closing at that boundary at once (up
+to four at a quarter-hour). With a five-minute grace, a trader on the losing
+side with more than roughly that amount at stake across those rounds can
+profit by forcing the void, and the winners then receive half of what they
+were owed. An ordinary outage of about eight minutes (report service, keeper
+endpoints, bridge) now also ends in a final void.
+Open item: stake limits on the total exposure of all rounds closing at the
+same boundary, or a test-only launch, before real money. Not built.
+
+Keeper rule decided the same day for an opened round past voidableAfter with
+no cached closing price: first relay it (if Base holds the observation) or
+publish it (if Chainlink serves a covering report the Base adapter accepts).
+Never void while a publication or relay the keeper sent is less than 90 s
+old or not yet settled (at most ten minutes after its first signature).
+Void when Chainlink's signed reports prove the window was skipped (the
+first report at or after the boundary has validFromTimestamp <= boundary and
+observationsTimestamp > boundary + 60, and the adapter rejects it with
+InvalidOracleResponse in a simulation), or when the closing price is still not
+cached two minutes after voidableAfter despite those attempts. This replaces
+the ~30-day expiry rule above.
+
+- One rule, many copies. The bound and the grace were pinned in the contract,
+  the profile, two deployment scripts (plan-registry.mjs, broadcast-hybrid.mjs),
+  the website's manifest parser, keeper tests and fixtures, and the engine's
+  own bound and known answers. Changing the grace means regenerating the
+  release (rules hash, configHash, implementation runtime hash, sample round
+  ids) and every copy; the planned addresses stay because the deployer's
+  Horizen nonce is still 2.
+- The engine still encodes the one-day minimum (engine/oracle.go, VoidGrace >=
+  86400) and its mainnet known-answer test still describes the seven-day
+  config. It rejects the planned profile until it is updated, which is the next
+  step. protocol/config.schema.json still says voidGrace minimum 86400; lower
+  it to 120 in the same step. [Done later on 2026-10-06: VoidGrace >= 120 (to
+  21 days, as initialize), known answers for the 300 s profile, schema
+  minimum 120; conformance passes.]
+- A guard counted from signing does not cover a transaction still on its way:
+  Base can leave one out of its blocks for minutes. The keeper's in-flight
+  guard counts from settlement, caps an unmined wait at ten minutes, and counts
+  a hash its own replacement dropped (a newer boundary taking the nonce) as on
+  its way until it was dropped (review fix, 2026-10-06).
+- The broadcaster's fork rehearsals and the keeper dress rehearsal ran with
+  the seven-day profile and build and have not been repeated.

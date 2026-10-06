@@ -12,16 +12,19 @@ func mainnetPolicy() Config {
 	c := config()
 	c.Collateral = "0xdf7108f8b10f9b9ec1aba01cca057268cbf86b6c"
 	c.Oracle = RegistryConfig{ChainID: 26514, Registry: "0x4dd4aacdb7e8d2e6d06c5af38238f3deab836744", Oracle: "0xc800c3f18d35d492ae6b07655d7f31bfe98a4b6b",
-		RulesHash: "0x17258005a90dc55ca45ae167eb0310278363a2ca89d8204437e1d21cc79ac45d", BTCFeedID: BTCStreamsFeed, ETHFeedID: ETHStreamsFeed,
-		Decimals: 18, ObservationWindow: 60, OpeningGrace: 150, VoidGrace: 604800, CutoffBuffer: 30}
+		RulesHash: "0x65e485f8468fda2de9d8681ee9fbbff779acabf1451e29a3d2cb2248b2a30ba6", BTCFeedID: BTCStreamsFeed, ETHFeedID: ETHStreamsFeed,
+		Decimals: 18, ObservationWindow: 60, OpeningGrace: 150, VoidGrace: 300, CutoffBuffer: 30}
 	return c
 }
 
-// Known answers for the planned mainnet registry (proxy 0x4DD4…6744 on 26514),
-// computed independently of this package with Foundry:
+// Known answers for the planned mainnet registry (proxy 0x4DD4…6744 on 26514,
+// profile contracts/deployment/hybrid-mainnet.json with the 300-second void
+// grace; the rules hash equals the planned release's rulesHash in
+// contracts/deployment/mainnet-addresses.json), computed independently of this
+// package with Foundry:
 //
 //	cast keccak $(cast abi-encode "f(string,uint256,(address,address,bytes32,bytes32,uint8,uint8,uint32,uint32,uint32,uint32))" \
-//	  "$RegistryRulesVersion" 26514 "(oracle,collateral,btcFeed,ethFeed,18,18,60,150,604800,30)")
+//	  "$RegistryRulesVersion" 26514 "(oracle,collateral,btcFeed,ethFeed,18,18,60,150,300,30)")
 //	cast keccak $(cast abi-encode "f(uint256,address,bytes32,uint8,uint32,uint64)" 26514 proxy rulesHash asset duration 1791100800)
 //
 // The same two commands reproduce the retired registry's published hash and
@@ -40,14 +43,14 @@ func TestRegistryKeccakConformance(t *testing.T) {
 		duration uint64
 		id       string
 	}{
-		{"BTC", 300, "0xd6ddd89dd7e2fa4749102c193d25b9ef2c50e0f2ed44769b64f56bd0c1f62e52"},
-		{"BTC", 900, "0xecee542cd8f10efbb6a797b8f63224dea094be323a4ef534747bc4dd9b67ae72"},
-		{"ETH", 300, "0xa2fd23e87713a1e61a74796b27fb7bea6cab35a6d9d94f49f151d669f1e9c9bd"},
-		{"ETH", 900, "0x7b8dc4d8b6de1dad0ad7cc9b63bb5d3b36746fae3da1a96114ead7e496b7c774"},
+		{"BTC", 300, "0xb4bcd96751ad786a84e0a2e4483daddd84a64109509e08578dd779ddbe5814d9"},
+		{"BTC", 900, "0x87b9f68f1e7c1497c3007eae929a6474d06552d9cee57af34570455705e90ac5"},
+		{"ETH", 300, "0x651f9d822dadb95f1cd04c3737ff87c19537eef6abc0f528e54727c632a88067"},
+		{"ETH", 900, "0x99240e32bf55fba5be2c1bf346c42ed3086e60c7991f6371101e958e05f725e3"},
 	}
 	for _, v := range vectors {
 		r, e := NewRoundSpec(c, v.asset, v.duration, 1791100800)
-		if e != nil || r.RegistryRoundID != v.id || r.Cutoff != r.End-30 || r.OpeningDeadline != r.Start+210 || r.VoidableAfter != r.End+604860 {
+		if e != nil || r.RegistryRoundID != v.id || r.Cutoff != r.End-30 || r.OpeningDeadline != r.Start+210 || r.VoidableAfter != r.End+360 {
 			t.Fatalf("round vector %s/%d: %+v %v", v.asset, v.duration, r, e)
 		}
 	}
@@ -197,7 +200,7 @@ func TestRoundBindingRejectsSubstitutedIdentityAndPolicy(t *testing.T) {
 			t.Fatal("legacy snapshot reinterpreted")
 		}
 	}
-	for grace, valid := range map[uint64]bool{3600: false, 86399: false, 86400: true, 21 * 86400: true, 21*86400 + 1: false} {
+	for grace, valid := range map[uint64]bool{0: false, 119: false, 120: true, 300: true, 86400: true, 21 * 86400: true, 21*86400 + 1: false} {
 		c = config()
 		c.Oracle.VoidGrace = grace
 		if _, e := RegistryRulesHash(c); (e == nil) != valid {
@@ -311,9 +314,10 @@ func TestRegistryInclusionTimeGovernsDeadlines(t *testing.T) {
 	future = resolve
 	future.Observation, future.RegistryTime = testObservation("97000000000000000000001", uint32(spec.End)+30), spec.End+29
 	h.reject(future, auth, 0)
-	// Mined six days after end, far beyond the retired one-hour window.
+	// Mined six days after end, far beyond the retired one-hour window and the
+	// voidableAfter (end + 360 s) that nobody used: the closing price still decides.
 	resolve.RegistryTime = spec.End + 6*86400
-	h.must(resolve, auth, 0)
+	h.must(resolve, auth, spec.End+6*86400)
 	if paid := h.must(Command{Op: Redeem, RoundID: h.round}, bob, 0).Amount; paid != 10*AtomScale {
 		t.Fatalf("winner paid %d", paid)
 	}

@@ -4,7 +4,7 @@
 //   node scripts/rehearsal/rehearse.mjs main   [--minutes 24] [--relay-delay 24] [--out <dir>]
 //   node scripts/rehearsal/rehearse.mjs faults [--relay-delay 24] [--out <dir>]
 // Ports 39101/39102 (forks), 39111/39112 (the keeper's endpoints), 39120 (report service stand-in). Nothing is sent
-// to a public chain: public endpoints serve the forks' state (and the B1 planner's own reads), a head and a fee quote
+// to a public chain: public endpoints serve the forks' state (and the registry planner's own reads), a head and a fee quote
 // per chain at start and a base fee per chain at the end.
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
@@ -100,7 +100,7 @@ let counting = false, FRONT;
 const describe = data => { for (const a of [ABI.registry, ABI.publisher]) { try { const d = decodeFunctionData({ abi: a, data });
   return `${d.functionName}(${d.args.map(x => typeof x === 'string' && x.length > 66 ? 'report' : String(x)).join(',')})`; } catch { /* other ABI */ } } return data.slice(0, 10); };
 // The keeper's endpoints. Anvil quotes a 1 gwei priority-fee floor neither chain has, so eth_maxPriorityFeePerGas is
-// answered with the live chain's own quote, read once at start (as the B1 planner does). The Base fork estimates past
+// answered with the live chain's own quote, read once at start (as the registry planner does). The Base fork estimates past
 // Base's 2^24 per-transaction cap, so an estimate above it gets the answer mainnet.base.org gave on 2026-10-05.
 // Everything else is Anvil's.
 function proxy(chain) {
@@ -204,7 +204,7 @@ try {
   say(`forks: base ${forkBlock.base}, horizen ${forkBlock.horizen}; live priority-fee quotes base ${BigInt(tips.base)} wei, horizen ${BigInt(tips.horizen)} wei`);
   servers.push(await proxy('base'), await proxy('horizen'));
 
-  // 2. The registry, deployed by the unmodified B1 tools in rehearsal mode (same addresses as planned).
+  // 2. The registry, deployed by the unmodified registry deployment tools in rehearsal mode (same addresses as planned).
   const tool = (script, args) => new Promise(ok => { const child = run('deploy', process.execPath, [`contracts/scripts/${script}`, ...args]); child.once('exit', ok); });
   const deployArgs = ['--rehearsal', `http://127.0.0.1:${PROXY.horizen}`, '--evidence', join(OUT, 'deploy')];
   if (await tool('plan-registry.mjs', deployArgs) !== 0 || await tool('broadcast-registry.mjs', deployArgs) !== 0) throw new Error('registry rehearsal deployment failed: see deploy.log');

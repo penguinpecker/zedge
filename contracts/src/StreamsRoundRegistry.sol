@@ -123,8 +123,10 @@ contract StreamsRoundRegistry is Initializable, UUPSUpgradeable, Ownable2StepUpg
                 || config.btcFeedId == config.ethFeedId || config.btcDecimals > 18 || config.ethDecimals > 18
                 || uint16(bytes2(config.btcFeedId)) != 3 || uint16(bytes2(config.ethFeedId)) != 3
                 || config.cutoffBuffer == 0 || config.cutoffBuffer >= 300 || config.openingGrace == 0
-                // A Chainlink report can be verified on Base for 30 days; void must be possible well before.
-                || config.voidGrace < 1 days || config.voidGrace > 21 days || config.observationWindow > 60
+                // At least two minutes, to leave time to deliver a late closing price (a short grace makes
+                // forcing a refund by blocking delivery cheap); at most 21 days, well inside the 30 days for
+                // which a Chainlink report can be verified on Base.
+                || config.voidGrace < 2 minutes || config.voidGrace > 21 days || config.observationWindow > 60
                 || uint256(config.observationWindow) + config.openingGrace >= 300 - config.cutoffBuffer
         ) revert InvalidConfig();
         IStreamsObservationCache cache = IStreamsObservationCache(config.oracle);

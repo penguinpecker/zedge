@@ -166,7 +166,7 @@ function fixture() {
       collateral: { address: address('5') },
     },
     feeds: { btcFeedId: BTC, ethFeedId: ETH, btcDecimals: 18, ethDecimals: 18 },
-    rules: { observationWindow: 60, openingGrace: 150, voidGrace: 604800, cutoffBuffer: 30, minimumGasLimit: 600000 },
+    rules: { observationWindow: 60, openingGrace: 150, voidGrace: 300, cutoffBuffer: 30, minimumGasLimit: 600000 },
   };
   const plan = { deployer: address('1'), chains: { base: { nonce: 11 }, horizen: { nonce: 22 } } };
   return { config, plan, expected: expectedConstructors(config, plan) };

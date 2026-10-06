@@ -181,7 +181,7 @@ contract StreamsRoundRegistryTest is Test {
         bad.openingGrace = 0;
         assertInvalidConfig(bad);
         bad = config;
-        bad.voidGrace = 1 days - 1;
+        bad.voidGrace = 2 minutes - 1;
         assertInvalidConfig(bad);
         bad = config;
         bad.observationWindow = 250;
@@ -195,8 +195,10 @@ contract StreamsRoundRegistryTest is Test {
         bad = config;
         bad.btcFeedId = keccak256("wrong-schema");
         assertInvalidConfig(bad);
-        // The longest accepted void grace is exactly 21 days.
+        // The accepted void grace is exactly 2 minutes to 21 days.
         bad = config;
+        bad.voidGrace = 2 minutes;
+        assertEq(proxy(bad).voidGrace(), 120);
         bad.voidGrace = 21 days;
         assertEq(proxy(bad).voidGrace(), 21 days);
     }
@@ -829,12 +831,14 @@ contract StreamsRoundRegistryTest is Test {
     }
 }
 
-/// @notice The new void and late-resolution rules against the real price cache with the planned mainnet
-/// timing (60 / 150 / 7 days / 30). Only the native messenger is a fixture.
+/// @notice The new void and late-resolution rules against the real price cache with the mainnet timing
+/// (60 / 150 / 30) and a seven-day void grace; the `PlannedProfile` tests use the planned five-minute grace.
+/// Only the native messenger is a fixture.
 contract StreamsRoundRegistryCacheTest is Test {
     uint32 internal constant START = 1_800_000_000;
     uint32 internal constant END = START + 300;
     uint32 internal constant VOIDABLE_AFTER = END + 60 + 7 days;
+    uint32 internal constant PLANNED_VOIDABLE_AFTER = END + 60 + 5 minutes;
     bytes32 internal constant BTC = bytes32((uint256(3) << 240) | 1);
     bytes32 internal constant ETH = bytes32((uint256(3) << 240) | 2);
     address internal constant PUBLISHER = address(0xBA5E);
@@ -866,13 +870,25 @@ contract StreamsRoundRegistryCacheTest is Test {
                 minimumGasLimit: 600_000
             })
         );
-        registry = StreamsRegistryProxy.deploy(
+        registry = deploy(7 days);
+        id = registry.createRound(StreamsRoundRegistry.Asset.BTC, 300, START);
+    }
+
+    function deploy(uint32 voidGrace) internal returns (StreamsRoundRegistry) {
+        return StreamsRegistryProxy.deploy(
             StreamsRoundRegistry.Config(
-                address(cache), address(new MockCollateral()), BTC, ETH, 18, 18, 60, 150, 7 days, 30
+                address(cache), address(new MockCollateral()), BTC, ETH, 18, 18, 60, 150, voidGrace, 30
             ),
             address(this)
         );
+    }
+
+    /// @dev The planned mainnet profile: void grace 300 seconds, so voidableAfter is end + 360.
+    function usePlannedProfile() internal {
+        registry = deploy(5 minutes);
         id = registry.createRound(StreamsRoundRegistry.Asset.BTC, 300, START);
+        assertEq(registry.voidGrace(), 300);
+        assertEq(registry.getRound(id).voidableAfter, PLANNED_VOIDABLE_AFTER);
     }
 
     /// @dev Native delivery of a Base-authenticated observation; may happen any time after the boundary.
@@ -982,9 +998,11 @@ contract StreamsRoundRegistryCacheTest is Test {
         assertPayout(0, 2);
     }
 
-    /// @dev Audit D4: a holder of the losing side prices out every Base-to-Horizen delivery. The retired
-    /// registry let anyone void one hour after the end and pay 1/2 + 1/2.
-    function testBlockedDeliveryCannotForceVoidAndLateClosingResolvesTruthfully() public {
+    /// @dev Audit D4 under the superseded seven-day grace of this contract's configuration: a holder of the losing
+    /// side prices out every Base-to-Horizen delivery for five hours and cannot force a void. The retired registry let
+    /// anyone void one hour after the end and pay 1/2 + 1/2. Under the planned five-minute grace D4 is an accepted
+    /// risk (owner decision 2026-10-06): see testPlannedProfileVoidsOneSecondAfterVoidableAfterWhenNothingIsCached.
+    function testSevenDayGraceBlockedDeliveryCannotForceVoidAndLateClosingResolvesTruthfully() public {
         open();
         vm.warp(END + 3661);
         assertPhase(StreamsRoundRegistry.Phase.ResolutionPending);
@@ -1028,6 +1046,53 @@ contract StreamsRoundRegistryCacheTest is Test {
         assertPhase(StreamsRoundRegistry.Phase.Voidable);
         registry.voidRound(id);
         assertPayout(1, 1);
+    }
+
+    /// @dev Accepted risk of the planned profile: six minutes without a cached closing price, for example
+    /// because delivery is blocked, and anyone can void the opened round.
+    function testPlannedProfileVoidsOneSecondAfterVoidableAfterWhenNothingIsCached() public {
+        usePlannedProfile();
+        open();
+        vm.warp(PLANNED_VOIDABLE_AFTER);
+        assertPhase(StreamsRoundRegistry.Phase.ResolutionPending);
+        vm.prank(LOSER);
+        vm.expectRevert(StreamsRoundRegistry.TimeoutNotReached.selector);
+        registry.voidRound(id);
+        vm.warp(PLANNED_VOIDABLE_AFTER + 1);
+        assertPhase(StreamsRoundRegistry.Phase.Voidable);
+        vm.prank(LOSER);
+        registry.voidRound(id);
+        assertPhase(StreamsRoundRegistry.Phase.Voided);
+        assertPayout(1, 1);
+    }
+
+    function testPlannedProfileRefusesVoidWhileTheClosingPriceIsCached() public {
+        usePlannedProfile();
+        open();
+        vm.warp(END + 35);
+        deliver(BTC, END, 100_000e18 - 1);
+        vm.warp(PLANNED_VOIDABLE_AFTER + 1);
+        assertPhase(StreamsRoundRegistry.Phase.ResolutionPending);
+        vm.prank(LOSER);
+        vm.expectRevert(StreamsRoundRegistry.ClosingEvidenceAvailable.selector);
+        registry.voidRound(id);
+        registry.resolveRound(id, "");
+        assertPayout(0, 2);
+    }
+
+    function testPlannedProfileStillResolvesALateClosingPrice() public {
+        usePlannedProfile();
+        open();
+        vm.warp(PLANNED_VOIDABLE_AFTER + 1 hours);
+        assertPhase(StreamsRoundRegistry.Phase.Voidable);
+        deliver(BTC, END, 100_000e18);
+        assertPhase(StreamsRoundRegistry.Phase.ResolutionPending);
+        vm.prank(LOSER);
+        vm.expectRevert(StreamsRoundRegistry.ClosingEvidenceAvailable.selector);
+        registry.voidRound(id);
+        registry.resolveRound(id, "");
+        assertPayout(2, 0);
+        assertEq(registry.getRound(id).resolvedAt, PLANNED_VOIDABLE_AFTER + 1 hours);
     }
 
     /// @dev Whenever the closing price reaches the cache and however long everyone then waits, the round

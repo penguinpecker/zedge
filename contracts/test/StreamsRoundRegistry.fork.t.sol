@@ -29,7 +29,7 @@ contract StreamsRoundRegistryForkTest is Test {
     bytes32 private constant ROUTE_HASH = 0xdd0243acfe5c168f4189af435f907cd3dd4a26085faf228e721ddee4e87ac36b;
     // keccak256(abi.encode(rules version string, 26514, the Config below)); independent of the proxy address.
     bytes32 private constant PLANNED_RULES_HASH =
-        0x17258005a90dc55ca45ae167eb0310278363a2ca89d8204437e1d21cc79ac45d;
+        0x65e485f8468fda2de9d8681ee9fbbff779acabf1451e29a3d2cb2248b2a30ba6;
     uint32 private constant DELIVERY_GAS = 600_000;
     // Version-1 message nonces far above any the real source messenger has issued.
     uint256 private nextNonce = (uint256(1) << 240) | (uint256(1) << 200);
@@ -46,7 +46,7 @@ contract StreamsRoundRegistryForkTest is Test {
 
         StreamsRoundRegistry registry = StreamsRegistryProxy.deploy(
             StreamsRoundRegistry.Config(
-                address(CACHE), USDC_E, Fixture.BTC_FEED, Fixture.ETH_FEED, 18, 18, 60, 150, 7 days, 30
+                address(CACHE), USDC_E, Fixture.BTC_FEED, Fixture.ETH_FEED, 18, 18, 60, 150, 5 minutes, 30
             ),
             address(this)
         );
@@ -62,8 +62,8 @@ contract StreamsRoundRegistryForkTest is Test {
         registry.recordOpening(id, "");
         assertTrue(registry.canTrade(id));
 
-        // The closing price is delivered later than the whole seven-day void grace.
-        vm.warp(uint256(start) + 300 + 60 + 7 days + 1);
+        // The closing price is delivered later than the whole five-minute void grace.
+        vm.warp(uint256(start) + 300 + 60 + 5 minutes + 1);
         assertEq(uint8(registry.phase(id)), uint8(StreamsRoundRegistry.Phase.Voidable));
         deliver(start + 300, 97_000e18 - 1);
         assertEq(uint8(registry.phase(id)), uint8(StreamsRoundRegistry.Phase.ResolutionPending));

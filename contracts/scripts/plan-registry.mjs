@@ -65,7 +65,7 @@ export function registryCreation(config, deployer, nonce, abi) {
   requireTrue(Number.isSafeInteger(nonce) && nonce >= 0 && nonce < Number.MAX_SAFE_INTEGER - 1, 'Unusable deployer nonce');
   const f = config.feeds; const r = config.rules;
   requireTrue(f.btcDecimals === 18 && f.ethDecimals === 18 && r.observationWindow === 60 && r.openingGrace === 150
-    && r.voidGrace === 604800 && r.cutoffBuffer === 30, 'Unexpected registry rules profile');
+    && r.voidGrace === 300 && r.cutoffBuffer === 30, 'Unexpected registry rules profile');
   const owner = address(deployer);
   const implementation = getContractAddress({ from: owner, nonce: BigInt(nonce) });
   const proxy = getContractAddress({ from: owner, nonce: BigInt(nonce + 1) });

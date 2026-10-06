@@ -16,8 +16,7 @@ export function schedules(timestamp, lookBack = 4800) {
 // Phases are the registry's own (0 Missing, 1 Scheduled, 2 OpeningPending, 3 Trading, 4 Closed, 5 ResolutionPending,
 // 6 Resolved, 7 Voided, 8 Voidable), read at `now`. For a Voidable round, openedAt is the registry's too: 0 when
 // nobody recorded its opening in time.
-// unobtainable: its closing report is established to be beyond reach (main.mjs, witness) and Base says, now, that
-// nobody has published it.
+// unobtainable: the keeper gives up the closing price of an opened, Voidable round on this tick (main.mjs, step).
 export function chooseAction(round, now, cachePresent, sourcePresent, unobtainable = false) {
   requireCondition(Number.isSafeInteger(now) && now > 0, 'KEEPER_CLOCK');
   const { phase, start, end, openingDeadline } = round;
@@ -30,11 +29,10 @@ export function chooseAction(round, now, cachePresent, sourcePresent, unobtainab
   const deadline = opening ? openingDeadline ?? start : Number.MAX_SAFE_INTEGER;
   // Resolution has no deadline: an opened round is resolved whenever its closing price is cached, however late.
   if (cachePresent) return { kind: opening ? 'open' : 'resolve', deadline, boundary };
-  // An opened round the registry calls Voidable only has nothing cached a week after its end. Its report stays
-  // verifiable on Base for 30 days, so it is worked exactly like a round awaiting resolution (publish, relay,
-  // resolve) and voided only when that report cannot be had. Unknown is not unobtainable: then it waits.
+  // An opened round the registry calls Voidable has nothing cached 60 s + voidGrace (300 s in the profile) after its
+  // end. It is still worked exactly like a round awaiting resolution (publish, relay, resolve) until the keeper gives it up.
   if (phase === 8 && unobtainable) return { kind: 'void', deadline, boundary };
-  return { kind: sourcePresent ? 'await-delivery' : 'publish', deadline, boundary, ...(phase === 8 ? { overdue: true } : {}) };
+  return { kind: sourcePresent ? 'await-delivery' : 'publish', deadline, boundary };
 }
 
 export function orderedActions(actions) {

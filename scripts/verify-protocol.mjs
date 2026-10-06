@@ -63,7 +63,7 @@ try {
   const btcFeedId = '0x00039d9e45394f473ab1f050a1b963e6b05351e52d71e507509ada0c95ed75b8';
   const ethFeedId = '0x000362205e10b3a147d02792eccee483dca6c7b44ecce7012cb8c6e0b68b3ae9';
   const config = { oracle, collateral, btcFeedId, ethFeedId, btcDecimals: 18, ethDecimals: 18,
-    observationWindow: 10, openingGrace: 20, voidGrace: 86400, cutoffBuffer: 5 };
+    observationWindow: 10, openingGrace: 20, voidGrace: 300, cutoffBuffer: 5 };
   const send = async (address, abi, functionName, args) => {
     const hash = await wallet.writeContract({ address, abi, functionName, args });
     const receipt = await client.waitForTransactionReceipt({ hash }); assert.equal(receipt.status, 'success'); return receipt;
@@ -81,7 +81,9 @@ try {
   await run('go', ['build', '-o', nativeBinary, './cmd/scenario'], { cwd: join(root, 'engine') });
   const summaries = [];
   // late: opening mined at its inclusive deadline, closing price first submitted six hours after the end.
-  // void: opened, no closing price ever delivered, voided one second after voidableAfter.
+  // late is therefore mined well after voidableAfter (end + 310 s): a round nobody voided still resolves.
+  // void: opened, no closing price ever delivered; the 300-second grace (the planned mainnet value) is
+  // refused at voidableAfter and accepted one second later.
   for (const [asset, duration, scenario = 'on-time'] of [[0, 900], [1, 300], [0, 300], [1, 900], [1, 300, 'late'], [0, 900, 'void']]) {
     const latest = await client.getBlock();
     const start = (latest.timestamp / BigInt(duration) + 1n) * BigInt(duration);
@@ -102,6 +104,7 @@ try {
     let expectedOutcome = closing >= opening ? 'up' : 'down';
     if (scenario === 'void') {
       expectedOutcome = 'void';
+      assert.equal(scheduled.voidableAfter, scheduled.end + 310n, 'void window is end + observationWindow + 300 s');
       await nextBlockAt(scheduled.voidableAfter);
       await client.request({ method: 'evm_mine', params: [] });
       assert.equal(await read('phase', [registryRoundId]), 5, 'ResolutionPending at voidableAfter');
@@ -146,7 +149,7 @@ try {
     checkedAt: new Date().toISOString(), localOnly: true, mockedOracle: true, noTokenTransfers: true, registryVersion,
     nativeWasmCompared: Boolean(process.env.ZEDGE_SCENARIO_WASM), summaries,
   }, null, 2) + '\n');
-  console.log(`PASS: ${summaries.length} local EVM rounds (one resolved six hours late, one voided after voidableAfter) → collateralized ledger → settlement → withdrawal accounting; engine rules hash and round ids equal the registry's${process.env.ZEDGE_SCENARIO_WASM ? '; identical native/TinyGo WASI hashes' : ''}.`);
+  console.log(`PASS: ${summaries.length} local EVM rounds (one resolved six hours late, past voidableAfter; one voided one second after its 300-second void grace) → collateralized ledger → settlement → withdrawal accounting; engine rules hash and round ids equal the registry's${process.env.ZEDGE_SCENARIO_WASM ? '; identical native/TinyGo WASI hashes' : ''}.`);
   console.log('Oracle inputs and collateral identity are test fixtures. This does not verify live custody, oracle signatures or Vela integration.');
 } finally {
   anvil.kill('SIGTERM');
