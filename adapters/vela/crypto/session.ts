@@ -157,9 +157,22 @@ export class EvaluationSession {
    */
   async decryptReceipt(ciphertext: Uint8Array, expectedRequestId: string): Promise<ReceiptResult> {
     if (!this.#keys) return { status: "locked" };
-    if (!requestIdValid(expectedRequestId) || ciphertext.length < 28 || ciphertext.length > MAX_RECEIPT_BYTES) {
-      return { status: "unreadable" };
-    }
+    if (!requestIdValid(expectedRequestId)) return { status: "unreadable" };
+    return this.#receipt(ciphertext, (id) => id === expectedRequestId);
+  }
+
+  /** `decryptReceipt` for a receipt whose request is not known in advance (History, newest first): any request ID of this
+   * account, a sync's or a command's, is accepted and returned in the envelope, so each receipt is decrypted once.
+   * Display only: a receipt names the command it answers, not the on-chain request that carried it, and every sync shares
+   * one ID, so a receipt can be shown under another request. Read a request in flight with `decryptReceipt`. */
+  async openReceipt(ciphertext: Uint8Array): Promise<ReceiptResult> {
+    if (!this.#keys) return { status: "locked" };
+    const own = `${this.account}:`;
+    return this.#receipt(ciphertext, (id) => requestIdValid(id) && id.startsWith(own) && /^(sync|[0-9]{1,16})$/.test(id.slice(own.length)));
+  }
+
+  async #receipt(ciphertext: Uint8Array, accept: (requestId: string) => boolean): Promise<ReceiptResult> {
+    if (ciphertext.length < 28 || ciphertext.length > MAX_RECEIPT_BYTES) return { status: "unreadable" };
     const { keys, generation } = this.#active();
     try {
       const peer = await importPublicKeyFromHex(this.epoch.enclavePublicKey);
@@ -173,7 +186,7 @@ export class EvaluationSession {
       catch { return { status: "context-mismatch" }; }
       if (Object.keys(value).sort().join(",") !== "account,body,domain,epoch,kind,requestId,version" ||
           value.version !== 1 || value.kind !== "receipt" || value.account !== this.account ||
-          value.epoch !== this.epoch.id || value.requestId !== expectedRequestId ||
+          value.epoch !== this.epoch.id || typeof value.requestId !== "string" || !accept(value.requestId) ||
           JSON.stringify(receiptDomain) !== JSON.stringify(this.domain)) {
         return { status: "context-mismatch" };
       }

@@ -50,6 +50,21 @@ test("receipt requires exact account, epoch, request, deployment and receipt kin
   assert.equal((await session.decryptReceipt(await seal({ ...receipt, domain: reversed }), "order-1")).status, "readable");
 });
 
+test("a receipt of an unknown request opens once with any request ID of this account, and nothing else", async () => {
+  const { session, receipt, seal } = await setup();
+  for (const requestId of [`${session.account}:sync`, `${session.account}:42`]) {
+    const r = await session.openReceipt(await seal({ ...receipt, requestId }));
+    assert.equal(r.status === "readable" && r.envelope.requestId, requestId);
+  }
+  for (const change of [{ requestId: "order-1" }, { requestId: `${session.account}:report:1791270900` }, { requestId: `0x${"2".repeat(40)}:sync` },
+    { account: `0x${"2".repeat(40)}`, requestId: `0x${"2".repeat(40)}:sync` }, { requestId: `${session.account}:sync`, epoch: "2" },
+    { requestId: `${session.account}:sync`, domain: { ...domain, applicationId: "2" } }, { requestId: `${session.account}:sync`, kind: "command" }]) {
+    assert.equal((await session.openReceipt(await seal({ ...receipt, ...change }))).status, "context-mismatch");
+  }
+  session.lock();
+  assert.equal((await session.openReceipt(await seal({ ...receipt, requestId: `${session.account}:sync` }))).status, "locked");
+});
+
 test("tampering, foreign keys and malformed receipts are unreadable, not empty", async () => {
   const { session, receipt, seal } = await setup();
   const bytes = await seal(receipt);
