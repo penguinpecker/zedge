@@ -55,6 +55,22 @@ test("every transaction is read once, oldest first; one not served yet holds the
   assert.deepEqual(s.cursor, { sig: late.signature, time: late.blockTime });
 });
 
+test("a refused read keeps what the step read before it, so a rate limit cannot hold the cursor back for good", async () => {
+  const s = stand(), rpc = s.deps.rpc;
+  s.served = true;
+  let refuse = true;
+  s.deps.rpc = async (method, params) => {
+    if (method === "getTransaction" && params[0] === late.signature && refuse) { refuse = false; throw Object.assign(new Error("RPC_HTTP_429"), { code: "RPC_HTTP_429" }); }
+    return rpc(method, params);
+  };
+  await assert.rejects(pricesStep(s.deps), { code: "RPC_HTTP_429" });
+  assert.deepEqual(s.cursor, { sig: "failed0", time: late.blockTime - 60 }); // past the early report and the failed page, before the refused one
+  assert.deepEqual(usd(s), [[minute(early.blockTime), 83102.82698224793]]);
+  await pricesStep(s.deps);
+  assert.deepEqual(s.cursor, { sig: late.signature, time: late.blockTime });
+  assert.equal(usd(s).length, 2);
+});
+
 test("a cursor transaction that was dropped stops the listing 300 s before its block time instead of paging back forever", async () => {
   const s = stand();
   s.cursor = { sig: "dropped", time: late.blockTime };

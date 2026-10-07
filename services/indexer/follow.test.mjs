@@ -61,11 +61,28 @@ test("a reorg at the cursor rewinds 600 blocks; the store then holds exactly the
   assert.deepEqual(s.logs, expected);
 });
 
+test("a reorg below the cursor landing between the head read and the range read rewinds; the old rows never join the new fork", async () => {
+  const ch = chain(2_503), s = store(0), c = settings();
+  await drain(s.deps(ch), c);
+  ch.head = 2_603;
+  const fork = chain(2_603, [{ from: 2_450, tag: "f" }]);
+  let calls = 0;
+  const racing = { rpc: async (batch) => (calls++ === 0 ? ch : fork).rpc(batch) }; // the first batch still sees the old chain
+  assert.deepEqual(await step(s.deps(racing), c), { reorg: true, from: 2_500, to: 1_900 });
+  await drain(s.deps(fork), c);
+  const expected = new Map(Array.from({ length: 2_600 }, (_, i) => i + 1).filter((n) => n % 7 === 0).map((n) => [n, `${n >= 2_450 ? "f" : ""}log${n}`]));
+  assert.deepEqual(s.logs, expected);
+});
+
 test("logs off the stored chain are refused unwritten; removed logs are skipped; a size refusal halves the range", async () => {
   const ch = chain(20), s = store(0), c = settings();
   // A backend that answers logs of another fork for block 7 (inside the rewind window) while its header says otherwise.
   ch.lie = (logs) => logs.map((l) => l.blockNumber === q(7) ? { ...l, blockHash: "0xother" } : l);
   await assert.rejects(step(s.deps(ch), c), { code: "INDEXER_LOG_HASH" });
+  assert.equal(s.writes, 0);
+  // A backend that reports a head it has no header for yet: refused, not indexed as an empty range.
+  const ahead = { rpc: async (batch) => batch[0].method === "eth_blockNumber" ? [q(ch.head + 10), ...(await ch.rpc(batch.slice(1)))] : ch.rpc(batch) };
+  await assert.rejects(step(s.deps(ahead), settings()), { code: "INDEXER_NODE_BEHIND" });
   assert.equal(s.writes, 0);
   ch.lie = (logs) => [...logs, { blockNumber: q(8), blockHash: "0xgone", logIndex: "0x1", data: "dropped", removed: true }];
   await drain(s.deps(ch), c);

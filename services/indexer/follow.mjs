@@ -14,8 +14,16 @@ export const tooLarge = (e) => e?.rpcCode === -32005 || /range|results|too (many
  * rewind(name, expect, fork) }. */
 export async function step(deps, c) {
   const cur = await deps.cursor(c.name);
-  const [head, at] = await deps.rpc([{ method: "eth_blockNumber", params: [] }, header(cur.block)]);
-  if (!at) throw fail("INDEXER_NODE_BEHIND"); // a backend that does not have the cursor's block yet
+  const [head] = await deps.rpc([{ method: "eth_blockNumber", params: [] }]);
+  const safe = Number(head) - c.depth;
+  if (!(safe > cur.block)) return { idle: true };
+  const from = cur.block + 1, to = Math.min(safe, cur.block + c.span);
+  // The cursor's header, the range's last header and its logs in one batch: one backend, one view of the chain. The cursor's
+  // header is read here and not before, so a reorg below the cursor can never join the new fork's range to the old rows.
+  let at, top, logs;
+  try { [at, top, logs] = await deps.rpc([header(cur.block), header(to), { method: "eth_getLogs", params: [{ ...c.filter, fromBlock: q(from), toBlock: q(to) }] }]); }
+  catch (e) { if (!tooLarge(e) || c.span === 1) throw e; c.span = Math.ceil(c.span / 2); return { span: c.span }; }
+  if (!at || !top) throw fail("INDEXER_NODE_BEHIND"); // a backend that does not have these blocks yet
   if (cur.hash && !same(at.hash, cur.hash)) {
     // The block we stopped at is no longer canonical: read the last `rewind` blocks again.
     const fork = Math.max(c.start, cur.block - c.rewind), [b] = await deps.rpc([header(fork)]);
@@ -23,14 +31,6 @@ export async function step(deps, c) {
     await deps.rewind(c.name, cur, { block: fork, hash: b.hash, time: Number(b.timestamp) });
     return { reorg: true, from: cur.block, to: fork };
   }
-  const safe = Number(head) - c.depth;
-  if (safe <= cur.block) return { idle: true };
-  const from = cur.block + 1, to = Math.min(safe, cur.block + c.span);
-  // The range's last header and its logs in one batch: one backend, one view of the chain.
-  let top, logs;
-  try { [top, logs] = await deps.rpc([header(to), { method: "eth_getLogs", params: [{ ...c.filter, fromBlock: q(from), toBlock: q(to) }] }]); }
-  catch (e) { if (!tooLarge(e) || c.span === 1) throw e; c.span = Math.ceil(c.span / 2); return { span: c.span }; }
-  if (!top) throw fail("INDEXER_NODE_BEHIND");
   if (!Array.isArray(logs)) throw fail("INDEXER_RPC_SHAPE");
   const kept = logs.filter((l) => !l.removed);
   // Every log must sit on the chain whose header is stored: block `to` by the header read with the logs, any other block still

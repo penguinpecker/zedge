@@ -89,8 +89,10 @@ export function handler(deps) {
         if (!(n >= 1 && n <= MAX_MINUTES)) throw refuse(400, `minutes: 1 to ${MAX_MINUTES}.`);
         to = minute; from = minute - n * 60;
       }
-      // The body /api/btc serves: { prices: [[unixSeconds, usd], …] }, oldest first.
-      return [{ prices: (await deps.db.prices(from, to)).map(price) }, to < minute - 300 ? FIXED(3_600) : "public, max-age=0, s-maxage=2, stale-while-revalidate=30"];
+      // The body /api/btc serves: { prices: [[unixSeconds, usd], …] }, oldest first. A past range is shared for an hour only once
+      // the follower has read past it (it reads oldest first, and a report lands within a minute), never a backfill's or outage's gap.
+      const [rows, latest] = await Promise.all([deps.db.prices(from, to), to < minute - 300 ? deps.db.latestPrice() : null]);
+      return [{ prices: rows.map(price) }, latest && latest.minute >= to + 120 ? FIXED(3_600) : "public, max-age=0, s-maxage=2, stale-while-revalidate=30"];
     },
     async "GET /v1/rounds"(params, now) {
       only(params, ["from", "to"]);
@@ -101,7 +103,8 @@ export function handler(deps) {
       } else { to = Math.floor(now / ROUND) * ROUND; from = to - RESULTS_ROUNDS * ROUND; } // the last 24 hours and the current round
       const starts = Array.from({ length: (to - from) / ROUND + 1 }, (_, i) => from + i * ROUND);
       const [head, list] = await Promise.all([deps.db.head(), rounds(starts)]);
-      return [{ head, rounds: list }, to + ROUND + 7_200 < now ? FIXED(300) : "public, max-age=0, s-maxage=1, stale-while-revalidate=5"];
+      // Rounds ended two hours before the indexed head (not the clock: a backfill's rounds are not final yet) are shared longer.
+      return [{ head, rounds: list }, head && to + ROUND + 7_200 < head.time ? FIXED(300) : "public, max-age=0, s-maxage=1, stale-while-revalidate=5"];
     },
     async "GET /v1/status"(params, now) {
       only(params, []);

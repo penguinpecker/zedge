@@ -17,8 +17,8 @@ site, so a browser no longer rebuilds history and prices from the chain itself.
 | Horizen endpoint, logs of this application (`topic1` = application id) | `RequestSubmitted`, `RequestCompleted`, `UserEvent`, `AppEvent` | last block + hash; 3 blocks behind the head; 1 s polls |
 | Solana round program (`2DeGBCAi…`, as `/api/btc`) | every transaction since 2026-10-07 00:00 UTC, oldest first; each verified BTC/USD report is its minute's price | last signature + its block time |
 
-Each Horizen step reads the cursor block's header (reorg check: a changed hash rewinds 600 blocks, the reorg ceiling), then the
-range's last header and its logs in one batch. Logs marked `removed` are skipped; every log in a block still inside the rewind
+Each Horizen step reads the head, then in one batch the cursor block's header (reorg check: a changed hash rewinds 600 blocks,
+the reorg ceiling), the range's last header and its logs. Logs marked `removed` are skipped; every log in a block still inside the rewind
 window must carry that block's hash; a size refusal halves the range. Each write is one transaction that moves the cursor
 compare-and-set, on the one connection that holds the advisory lock, so a second writer (a deploy overlap, a dropped
 connection) can never interleave. Losing that connection exits the process; Railway restarts it. Every instance serves the API.
@@ -34,8 +34,8 @@ JSON; big integers are decimal strings; hashes and addresses 0x hex; ciphertexts
 | Route | Body | Cache-Control |
 | --- | --- | --- |
 | `GET /v1/live` | `{ head: {block,time}, clock: {tick,block,timestamp,applied,skipped,deposits,txHash,logIndex} \| null, rounds: [previous, current, next], price: [minute, usd] \| null }` | `s-maxage=1, stale-while-revalidate=4` |
-| `GET /v1/btc` · `?minutes=N` (≤ 1,440) · `?from=&to=` (minute starts, ≤ 1,440 minutes apart) | `{ prices: [[minute, usd], …] }`, oldest first: `/api/btc`'s body; the default is its 120 minutes | `s-maxage=2, stale-while-revalidate=30`; a range ending over 5 min ago `s-maxage=3600` |
-| `GET /v1/rounds` · `?from=&to=` (round starts, ≤ 200 rounds) | `{ head, rounds }`; the default is the last 24 h and the current round | `s-maxage=1, stale-while-revalidate=5`; rounds ended over 2 h ago `s-maxage=300` |
+| `GET /v1/btc` · `?minutes=N` (≤ 1,440) · `?from=&to=` (minute starts, ≤ 1,440 minutes apart) | `{ prices: [[minute, usd], …] }`, oldest first: `/api/btc`'s body; the default is its 120 minutes | `s-maxage=2, stale-while-revalidate=30`; a range ending over 5 min ago that the follower has read past (a price held 2 min after its end) `s-maxage=3600` |
+| `GET /v1/rounds` · `?from=&to=` (round starts, ≤ 200 rounds) | `{ head, rounds }`; the default is the last 24 h and the current round | `s-maxage=1, stale-while-revalidate=5`; rounds ended over 2 h before the indexed head `s-maxage=300` |
 | `POST /v1/account` `{ address, before?: {block,logIndex}, limit? }` (≤ 100, default 50; `Origin` must be the site's; body ≤ 1 KB) | `{ head, more, requests: [{ requestId, block, logIndex, txHash, completed: {block,txHash,status,errorCode,errorMessage} \| null, ciphertexts: [base64] }] }`, newest first | `no-store` |
 | `GET /v1/status` | `{ horizen: {block,time,chainHead,behindBlocks}, solana: {minute,ageSeconds}, balances: {operator,house,relayer: {address,wei,low}}, dbBytes, alerts: [] }`; 503 if the database does not answer (the health check) | `s-maxage=5` |
 

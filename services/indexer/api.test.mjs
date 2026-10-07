@@ -44,6 +44,9 @@ test("GET /v1/btc: /api/btc's body for the last 120 minutes, shared briefly; ran
   assert.deepEqual(asked.prices, [minute - 7_200, minute]);
   assert.equal(r.headers["cache-control"], "public, max-age=0, s-maxage=2, stale-while-revalidate=30");
   assert.equal((await call(h, { url: `/v1/btc?from=${minute - 86_400}&to=${minute - 3_600}` })).headers["cache-control"], "public, max-age=0, s-maxage=3600");
+  // A follower still behind that range (a backfill, a Solana outage): its gap is not shared for an hour.
+  const behind = handler({ db: { ...db, latestPrice: async () => ({ minute: minute - 3_600, price: "1" }) }, book, origin, now: () => now * 1_000, chain, log: () => {} });
+  assert.equal((await call(behind, { url: `/v1/btc?from=${minute - 86_400}&to=${minute - 3_600}` })).headers["cache-control"], "public, max-age=0, s-maxage=2, stale-while-revalidate=30");
   for (const url of ["/v1/btc?minutes=1441", "/v1/btc?from=60&to=59", `/v1/btc?from=0&to=${1_441 * 60}`, "/v1/btc?from=61&to=120", "/v1/btc?x=1", "/v1/btc?minutes=5&minutes=6"]) {
     const bad = await call(h, { url });
     assert.equal(bad.status, 400, url);
@@ -71,6 +74,11 @@ test("GET /v1/rounds: the last 24 hours by default; at most 200 rounds", async (
   assert.equal((await call(h, { url: `/v1/rounds?from=${start - 199 * 900}&to=${start}` })).status, 200);
   assert.equal((await call(h, { url: `/v1/rounds?from=${start - 200 * 900}&to=${start}` })).status, 400);
   assert.equal((await call(h, { url: `/v1/rounds?from=${start + 1}&to=${start + 901}` })).status, 400);
+  const old = `/v1/rounds?from=${start - 13 * 900}&to=${start - 12 * 900}`; // ended 2 h 45 min before the head
+  assert.equal(r.headers["cache-control"], "public, max-age=0, s-maxage=1, stale-while-revalidate=5");
+  assert.equal((await call(h, { url: old })).headers["cache-control"], "public, max-age=0, s-maxage=300");
+  const backfilling = handler({ db: { ...db, head: async () => ({ block: 28_000_000, time: start - 11 * 900 }) }, book, origin, now: () => now * 1_000, chain, log: () => {} });
+  assert.equal((await call(backfilling, { url: old })).headers["cache-control"], "public, max-age=0, s-maxage=1, stale-while-revalidate=5");
 });
 
 test("POST /v1/account: our origin only, a strict body, never cached, paged; 20 a window per visitor", async () => {

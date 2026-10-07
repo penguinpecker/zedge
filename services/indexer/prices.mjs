@@ -23,14 +23,17 @@ export async function pricesStep(deps) {
     before = page.at(-1).signature;
   }
   const held = await deps.held(floor - 60), minutes = new Map();
-  let last = null, reads = 0, more = false;
+  let last = null, reads = 0, more = false, failed = null;
   for (const e of list.reverse()) {
     const t = e.blockTime, m = t - t % 60;
     // A report lands 0-33 s after its minute, so a transaction carries the minute it landed in or the one before: when both are
     // held it is passed over unread. Failed transactions carry no verified report.
     if (e.err == null && typeof t === "number" && !(held.has(m) && held.has(m - 60))) {
       if (reads++ === READS) { more = true; break; }
-      const tx = await deps.rpc("getTransaction", [e.signature, { encoding: "json", maxSupportedTransactionVersion: 0, commitment: "confirmed" }]);
+      let tx;
+      // A refusal (a rate limit above all) keeps what this step read: under a limit below READS a step must still move on.
+      try { tx = await deps.rpc("getTransaction", [e.signature, { encoding: "json", maxSupportedTransactionVersion: 0, commitment: "confirmed" }]); }
+      catch (error) { failed = error; break; }
       if (tx === null) break; // this node does not serve it yet: read again on the next step, the cursor stays before it
       for (const payload of reportsIn(tx)) {
         let o;
@@ -43,5 +46,6 @@ export async function pricesStep(deps) {
     last = e;
   }
   if (last) await deps.write(cur, { sig: last.signature, time: last.blockTime ?? cur.time ?? PRICES_FROM }, [...minutes.values()]);
+  if (failed) throw failed;
   return { more, latest: Math.max(0, ...held) };
 }
