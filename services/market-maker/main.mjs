@@ -330,8 +330,11 @@ async function main(argv) {
     log("receipt", { op: c.op, status: b.status, reason: b.reason, outcome: b.outcome && `${b.outcome.status}${b.outcome.reason ? `: ${b.outcome.reason}` : ""}`, ...summary(view) });
     return { done, body: b };
   }
-  const refused = ({ done, body }) => done.status !== 0 || !body || body.outcome?.status === "rejected" ||
-    (body.status === "rejected" && !/nonce|waiting for its tick/.test(body.reason ?? ""));
+  // "insufficient available …" means a user filled a house quote since the last receipt (the view was stale); the
+  // receipt carries the true view, so it is not counted against the round's refusals.
+  const refused = ({ done, body }) => done.status !== 0 || !body ||
+    (body.outcome?.status === "rejected" && !/insufficient available/.test(body.outcome.reason ?? "")) ||
+    (body.status === "rejected" && !/nonce|waiting for its tick|insufficient available/.test(body.reason ?? ""));
 
   /** Unlock (one silent local signature), then a sync; registers the key first if the host has none (error 9). */
   async function startup() {

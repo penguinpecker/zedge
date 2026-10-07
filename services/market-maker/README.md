@@ -55,7 +55,7 @@ The settings file is optional with `--mainnet` (`settings.example.json` holds th
 | --- | --- | --- | --- |
 | `halfSpreadCents` | 3 | 1–20 | h: bid = ⌊100p⌋ − h, ask = ⌈100p⌉ + h |
 | `quoteShares` | 10 | 1–1,000 | size of each quote, in shares |
-| `mintSets` | 40 | ≥ `quoteShares` | sets minted when an ask lacks shares, if cash allows |
+| `mintSets` | 40 | ≥ `quoteShares` | sets minted when an ask lacks shares; with less cash, only the shares that ask lacks |
 | `maxStakeUsdc` | 100 | 1–2,000 | local cap on the house's worst stake over all rounds (the on-chain `houseTotal` is 2,000) |
 | `quoteLifetimeSeconds` | 180 | 60–600 | each quote expires at min(now + this, cutoff − 60) |
 | `requoteDriftCents` | 8 | 1–50 | `cancel_all` when a resting quote is this far from 100p |
@@ -86,7 +86,7 @@ With `--fork`, also give the fork's deployment. Every address must be lowercase.
 ## One round
 
 1. **The opening.** The engine opens the round itself from the exact Chainlink report (the keeper relays it); the bot quotes once it sees the `settle` event. Only when the opening comes from the registry (fallback) does it send one sync, whose tick mirrors the opening into the engine.
-2. **Mint.** When an ask lacks shares, it mints `mintSets` sets if its cash allows.
+2. **Mint.** When an ask lacks shares, it mints `mintSets` sets, or with less cash than that only the shares the ask lacks, so a small house still rests asks.
 3. **Quote.** It places each missing quote in this order: ask Up, ask Down, bid Up, bid Down. Each is GTC and expires at min(now + 180, cutoff − 60). The engine releases expired orders in the checkpoint that runs before any activation, so **no house quote can fill after cutoff − 60, even when the queue is jammed**.
 4. **Rotate.** It places a quote again once it has expired or filled, and sends a `cancel_all` when the price moves `requoteDriftCents` from a resting quote.
 5. **Wind down.** From cutoff − 120 it places nothing new. Between cutoff − 90 and cutoff − 60 it sends a `cancel_all` if anything still rests, as a backstop.
@@ -105,7 +105,7 @@ With `--fork`, also give the fork's deployment. Every address must be lowercase.
 - **The stake cap.** It does not place an order that would take the house's worst stake (guest README §9), summed over every round it holds, above `maxStakeUsdc`.
 - **Busy queue.** It does not send while the endpoint queue holds 5 or more requests, except a `cancel_all`, which goes out until 9 (the endpoint refuses at 10). It keeps one request in flight at a time.
 - **Low ETH.** It sends no new quotes below `minEthWei`.
-- **Too many refusals.** After 3 refusals or failures in a round it places nothing new until the next round. Cancels still go out.
+- **Too many refusals.** After 3 refusals or failures in a round it places nothing new until the next round. Cancels still go out. A refusal for "insufficient available" cash or shares is not counted: it means a user filled a house quote since the last receipt, and that receipt brings the true view.
 - **No completion.** If a request has not completed after 15 minutes, the bot exits. It never resends.
 - **Errors.** Five network errors in a row stop the bot.
 - **Stopping.** On the first SIGTERM or SIGINT the bot finishes the request in flight, sends `cancel_all` if quotes still rest in the open round, and exits. A second signal exits at once.

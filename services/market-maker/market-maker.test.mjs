@@ -97,6 +97,8 @@ test("plan: a mint, the four quotes, rotation, a cancel on drift, the stake cap 
   for (let c; (c = plan(small, round, now, 0.5, S)); small = apply(small, c)) placed.push(c.op === "mint" ? `mint ${c.quantity / SHARE}` : `${c.side} ${c.outcome}`);
   assert.deepEqual(placed, ["mint 10", "sell up", "sell down", "buy up", "buy down"], "20 USDC rests all four quotes");
   assert.equal(plan(funded(5), round, now, 0.5, S).side, "buy", "no cash for even one ask's shares: the asks wait, a bid goes out");
+  assert.deepEqual(plan({ ...funded(7), holdings: [{ roundId: "r", up: 5_500_000, down: 0, reservedUp: 0, reservedDown: 0 }] }, round, now, 0.5, S),
+    { op: "mint", roundId: "r", quantity: 4_500_000 }, "a partial-fill leftover: mint only the rest");
 
   const withSets = apply(funded(200), mint);
   assert.equal(plan(withSets, round, 9_870, 0.5, S).expiry, 9_940, "no quote outlives cutoff − 60");
