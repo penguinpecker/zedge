@@ -136,7 +136,11 @@ function ChainMarkets() {
   const checksExpire = useRef(Infinity);
   const mismatch = active?.deploymentError === STREAMS_MISMATCH_REASON || active?.orderbookError === OPERATOR_KEYS_CHANGED || active?.orderbookError === ORDERBOOK_MISMATCH;
   useEffect(() => { if (orderbook) setPrivateBook(orderbook); else if (mismatch) setPrivateBook(null); }, [orderbook, mismatch]);
-  const priv = usePrivate(wallet, orderbook ?? (mismatch ? null : privateBook));
+  // While Horizen cannot be read, funding still opens from the published manifest: deposits and withdrawals happen on Base.
+  const [committedBook, setCommittedBook] = useState<VerifiedOrderbook | null>(null);
+  useEffect(() => { if (network !== 26514) return; let on = true; void loadOrderbook().then((b) => { if (on && b.status === "configured") setCommittedBook({ manifest: b, verified: true }); }, () => undefined); return () => { on = false; }; }, [network]);
+  const fundingBook = orderbook ?? (mismatch ? null : privateBook ?? committedBook);
+  const priv = usePrivate(wallet, fundingBook);
   const unlocked = Boolean(priv.snapshot?.unlocked);
 
   useEffect(() => {
@@ -306,6 +310,6 @@ function ChainMarkets() {
       <details className="chain-details chain-deployment-details"><summary>Market details</summary><div className="chain-technical-grid"><dl><dt>Network</dt><dd>{NETWORKS[network].name} · {network}</dd><dt>Connection</dt><dd>{snapshot ? `Connected · block ${snapshot.blockNumber}` : "Not verified"}</dd><dt>Trading</dt><dd>{orderbook ? "Open (private order book)" : "Unavailable"}</dd><dt>Private access</dt><dd>{orderbook ? "Sign in to use" : active?.orderbookError || "Unavailable"}</dd></dl><dl><dt>Contract checks</dt><dd>{verified && verification ? `Matched release · checked ${verificationTime(verification.checkedAt)} UTC` : planned ? "Not available yet" : offline ? "Not available" : "Not verified"}</dd><dt>Roles and governance</dt><dd>{verified ? streams ? <>The round registry is upgradeable: its owner address <code>{streams.contracts.registry.owner}</code> can replace its code, including the round rules. The three price-route contracts are fixed. The registry’s code and owner and the upstream implementations and governance matched this release at the checked blocks, with no ownership transfer pending.</> : "Registry fixed; external provider governance requires separate review." : "Not verified"}</dd><dt>Private account</dt><dd>{unlocked ? "Unlocked" : "Locked"}</dd></dl></div>{verified && <><p>Release {verified.manifest.release}. Matching code and configuration does not verify private execution or imply a security audit.</p>{streams && <p><a href="https://github.com/penguinpecker/zedge/blob/feat/production-core/contracts/deployment/MAINNET.md" target="_blank" rel="noreferrer">Deployment record and source-verification details <ArrowSquareOut size={13} /></a></p>}<dl className="chain-address-list">{pins.map((pin) => <div key={pin.name}><dt>{pin.name.replace(/([A-Z])/g, " $1")} · {pin.chainId === 8453 ? "Base" : NETWORKS[network].name}</dt><dd><a href={`${pin.chainId === 8453 ? "https://basescan.org" : NETWORKS[network].blockExplorers.default.url}/address/${pin.address}`} target="_blank" rel="noreferrer">{pin.address}</a><code>{pin.runtimeCodeHash}</code></dd></div>)}</dl></>}</details>
       <SiteFooter mode="chain" status={<span>ZEDGE · {network === 2651420 ? "Testnet" : "Mainnet"}</span>} action={<button onClick={() => setDrawer("security")}>Account security</button>} />
     </main>
-    {drawer && <AccountDrawer view={drawer} onView={setDrawer} onClose={() => setDrawer(null)} network={network} wallet={wallet} orderbook={orderbook} orderbookReason={active?.orderbookError ?? ""} priv={priv} />}
+    {drawer && <AccountDrawer view={drawer} onView={setDrawer} onClose={() => setDrawer(null)} network={network} wallet={wallet} orderbook={fundingBook} orderbookReason={active?.orderbookError ?? ""} priv={priv} />}
   </div>;
 }
