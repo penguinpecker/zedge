@@ -35,7 +35,12 @@ const committedBook = () => JSON.parse(readFileSync(new URL("../../public/deploy
 // The thirdweb Horizen gateway is rate-limited without a client id; the operator keeps it in a private file.
 // An Alchemy key in ~/.config/zedge/alchemy.key gives Base reads a keyed endpoint; otherwise Base's own public one.
 const BASE_RPC = (() => { try { const k = readFileSync(`${homedir()}/.config/zedge/alchemy.key`, "utf8").trim(); if (/^[A-Za-z0-9_-]{16,64}$/.test(k)) return `https://base-mainnet.g.alchemy.com/v2/${k}`; } catch {} return "https://mainnet.base.org"; })();
-const HORIZEN_RPC = (() => { try { const id = readFileSync(`${homedir()}/.config/zedge/thirdweb.id`, "utf8").trim(); if (/^[0-9a-f]{32}$/.test(id)) return `https://26514.rpc.thirdweb.com/${id}`; } catch {} return "https://26514.rpc.thirdweb.com"; })();
+// A private Horizen endpoint in ~/.config/zedge/horizen.url (https, never logged) comes first, when present.
+const HORIZEN_RPC = (() => {
+  try { const url = readFileSync(`${homedir()}/.config/zedge/horizen.url`, "utf8").trim(); if (/^https:\/\/\S+$/.test(url)) return url; } catch {}
+  try { const id = readFileSync(`${homedir()}/.config/zedge/thirdweb.id`, "utf8").trim(); if (/^[0-9a-f]{32}$/.test(id)) return `https://26514.rpc.thirdweb.com/${id}`; } catch {}
+  return "https://26514.rpc.thirdweb.com";
+})();
 const USAGE = "usage: main.mjs <run [--dry-run] | status | deposit <usdc> | withdraw <usdc>> (--mainnet | --fork http://127.0.0.1:<port>) [--settings <file>]";
 const COINBASE = "https://api.exchange.coinbase.com/products/BTC-USD", KRAKEN = "https://api.kraken.com/0/public/Ticker?pair=XBTUSD";
 
