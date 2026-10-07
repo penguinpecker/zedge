@@ -13,7 +13,7 @@ import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
-import { SHARE, apply, fairUp, plan, quotes, realizedSigma, spotCheck, worstStake } from "./pricing.mjs";
+import { SHARE, apply, expire, fairUp, plan, quotes, realizedSigma, spotCheck, worstStake } from "./pricing.mjs";
 
 const CHAIN = 26514, BASE = 8453, DURATION = 900, PROCESS = 1, ASSOCIATEKEY = 3, PUB_KEY_NOT_REGISTERED = 9, MAX_REFUSALS = 3;
 const BASE_USDC = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913";
@@ -52,9 +52,12 @@ const log = (event, fields = {}) => console.log(JSON.stringify({ t: new Date().t
 /** A refusal to start or to act. Always fatal, printed without a stack. */
 function fail(message) { throw Object.assign(new Error(message), { refused: true }); }
 
-/** The endpoint's shared queue is too full for this request. A cancel_all still goes out until one slot is left (the endpoint
- * refuses at 10): the relayer admits users up to 6 pending, and their requests must not keep stale house quotes alive. */
-export function queueFull(queue, op) { return queue >= (op === "cancel_all" ? 9n : 5n); }
+/** A cancel the house needs (not an optional requote): it lowers risk, so the queue, ETH and refusal guards let it through. */
+const pulls = (op, optional) => !optional && (op === "cancel_all" || op === "cancel_order");
+/** The endpoint's shared queue is too full for this request. A needed cancel still goes out until one slot is left (the endpoint
+ * refuses at 10): the relayer admits users up to 6 pending, and their requests must not keep stale house quotes alive.
+ * An optional requote waits for an empty queue, so user trades are not queued behind it. */
+export function queueFull(queue, op, optional = false) { return queue >= (optional ? 1n : pulls(op) ? 9n : 5n); }
 
 /** --mainnet, or --fork with a loopback http URL. Nothing else runs. */
 export function target(a) {
@@ -88,7 +91,7 @@ export async function checkBase(send, mode) {
 
 // Tuning: [default, lowest, highest]. The defaults are the spec's (README).
 const TUNING = { halfSpreadCents: [3, 1, 20], quoteShares: [10, 1, 1000], mintSets: [40, 1, 10_000], maxStakeUsdc: [100, 1, 2000],
-  quoteLifetimeSeconds: [180, 60, 600], requoteDriftCents: [8, 1, 50], maxRpcPerRound: [300, 50, 5000], pollSeconds: [10, 2, 60] };
+  quoteLifetimeSeconds: [60, 60, 600], requoteDriftCents: [4, 1, 50], maxRpcPerRound: [6000, 50, 20_000], pollSeconds: [2, 2, 60] };
 const FORK_FIELDS = ["applicationFingerprint", "applicationId", "authenticator", "baseRpc", "endpoint", "epoch", "house", "keyFile", "origin", "registry", "trigger", "vault"];
 
 /** Settings: tuning, and under --fork only the fork's deployment (--mainnet uses the manifest's). Unknown fields are refused. */
@@ -196,7 +199,7 @@ async function main(argv) {
     async _send(payload) { rpcCalls += Array.isArray(payload) ? payload.length : 1; return super._send(payload); }
   }
   const connection = (url, attempts) => { const f = new ethers.FetchRequest(url); f.setThrottleParams({ maxAttempts: attempts }); return f; };
-  const provider = new Horizen(connection(t.rpc, 3), CHAIN, { staticNetwork: true, pollingInterval: 3000 });
+  const provider = new Horizen(connection(t.rpc, 3), CHAIN, { staticNetwork: true, pollingInterval: 1000 });
   await checkNode((m, p) => provider.send(m, p), t.mode);
 
   const wallet = new ethers.Wallet(readKey(dep.keyFile), provider), account = lower(wallet.address);
@@ -288,19 +291,20 @@ async function main(argv) {
 
   // ---- requests (the house's own submitRequest, as demo-house.mjs and fork-round.mjs send them)
 
-  let lastCompletionBlock = -1;
+  let lastCompletionBlock = -1, cycle = 6; // cycle: seconds from submitting a request to its completion, a moving average
   const parse = (l) => { try { return endpoint.interface.parseLog(l); } catch { return null; } };
   async function request(label, type, payload, token = ethers.ZeroAddress, assetAmount = 0n) {
-    const sent = await client.submitRequestAndWaitForRequestId(0, APP, type, payload, token, assetAmount, fee);
+    const t0 = Date.now(), sent = await client.submitRequestAndWaitForRequestId(0, APP, type, payload, token, assetAmount, fee);
     const from = sent.transactionReceipt.blockNumber;
     log("submitted", { label, tx: sent.transactionReceipt.hash, requestId: sent.requestId });
     for (const end = Date.now() + 15 * 60_000; Date.now() < end;) {
-      await sleep(3000);
+      await sleep(1000);
       try {
         const e = (await endpoint.queryFilter(endpoint.filters.RequestCompleted(APP, sent.requestId), from)).at(0);
         if (!e) continue;
         const rc = await provider.getTransactionReceipt(e.transactionHash);
         lastCompletionBlock = e.blockNumber;
+        cycle = 0.75 * cycle + 0.25 * ((Date.now() - t0) / 1000);
         const cts = rc.logs.filter((l) => lower(l.address) === dep.endpoint).map(parse)
           .filter((p) => p?.name === "UserEvent" && p.args.applicationId === APP).map((p) => ethers.getBytes(p.args.encryptedData));
         return { status: Number(e.args.status), errorCode: Number(e.args.errorCode), errorMessage: e.args.errorMessage, tx: e.transactionHash, cts };
@@ -315,7 +319,8 @@ async function main(argv) {
   }
 
   const EMPTY = { nonce: 0, cash: 0, reservedCash: 0, holdings: [], orders: [] };
-  let view = EMPTY, staged = false; // the latest receipt's view, and whether a book command of ours awaits its outcome
+  // The latest receipt's view, whether a book command of ours awaits its outcome, and the latest clock a receipt was judged at.
+  let view = EMPTY, staged = false, clock = 0;
   const summary = (v) => ({ cash: usdc(v.cash), reserved: usdc(v.reservedCash), stake: usdc(worstStake(v)),
     orders: v.orders.map((o) => `${o.side} ${o.outcome} ${o.remaining / SHARE}@${o.price}${o.filled ? ` filled ${o.filled / SHARE}` : ""}`),
     holdings: v.holdings.map((h) => `${h.roundId.slice(0, 8)} up ${(h.up + h.reservedUp) / SHARE} down ${(h.down + h.reservedDown) / SHARE}`) });
@@ -331,14 +336,16 @@ async function main(argv) {
     const b = await readReceipt(done.cts, id);
     if (!b) { log("unreadable receipt", { op: c.op, tx: done.tx }); return { done }; }
     if (b.outcome || b.status === "staged" || /nonce/.test(b.reason ?? "")) staged = b.status === "staged";
-    view = b.view ? (b.status === "staged" ? apply(b.view, c) : b.view) : EMPTY;
+    view = b.view ? (b.status === "staged" ? apply(b.view, { ...c, id }) : b.view) : EMPTY; // a staged order rests under its command ID
+    clock = Math.max(clock, b.at?.timestamp ?? 0);
     log("receipt", { op: c.op, status: b.status, reason: b.reason, outcome: b.outcome && `${b.outcome.status}${b.outcome.reason ? `: ${b.outcome.reason}` : ""}`, ...summary(view) });
     return { done, body: b };
   }
-  // "insufficient available …" means a user filled a house quote since the last receipt (the view was stale); the
-  // receipt carries the true view, so it is not counted against the round's refusals.
+  // "insufficient available …" means a user filled a house quote since the last receipt, and "unknown active order" that a
+  // cancelled quote was filled or expired first (the view was stale); the receipt carries the true view, so neither is
+  // counted against the round's refusals.
   const refused = ({ done, body }) => done.status !== 0 || !body ||
-    (body.outcome?.status === "rejected" && !/insufficient available/.test(body.outcome.reason ?? "")) ||
+    (body.outcome?.status === "rejected" && !/insufficient available|unknown active order/.test(body.outcome.reason ?? "")) ||
     (body.status === "rejected" && !/nonce|waiting for its tick|insufficient available/.test(body.reason ?? ""));
 
   /** Unlock (one silent local signature), then a sync; registers the key first if the host has none (error 9). */
@@ -413,22 +420,23 @@ async function main(argv) {
   const nap = () => new Promise((done) => { const timer = setTimeout(done, s.pollSeconds * 1000); wake = () => { clearTimeout(timer); done(); }; });
   let noted = "";
   const note = (reason, fields) => { if (reason !== noted) log("waiting", { reason, ...fields }); noted = reason; };
-  let r = null, errors = 0, beat = 0;
-  /** Queue and gas guards, read just before a request. A cancel_all goes out below the ETH floor while it can. */
-  async function clear(c) {
+  let r = null, errors = 0, beat = 0, lastOptional = 0, n = 0;
+  /** Queue and gas guards, read just before a request. A needed cancel goes out below the ETH floor while it can. */
+  async function clear(c, optional = false) {
     const [queue, eth] = await Promise.all([endpoint.getPendingRequestsSize(), provider.getBalance(account)]);
     r.eth0 ??= eth; r.eth = eth;
-    if (queueFull(queue, c.op)) return note(`the endpoint queue holds ${queue} requests`), false;
-    if (eth < s.minEthWei && c.op !== "cancel_all") return note(`house ETH ${ethers.formatEther(eth)} is below the floor`), false;
+    if (queueFull(queue, c.op, optional)) return note(`the endpoint queue holds ${queue} requests`), false;
+    if (eth < s.minEthWei && !pulls(c.op, optional)) return note(`house ETH ${ethers.formatEther(eth)} is below the floor`), false;
     return true;
   }
   log("running", { mode: t.mode, dryRun: dry, house: account, settings: { ...s, deployment: undefined } });
   /** One decision. Returns true once stopped. */
   async function step() {
-    const head = await provider.getBlock("latest"), now = head.timestamp, start = Math.floor(now / DURATION) * DURATION;
+    // The exchange's clock is the later of the block time and a Chainlink report's time, which a receipt shows (guest README §8.3).
+    const head = await provider.getBlock("latest"), now = Math.max(head.timestamp, clock), start = Math.floor(now / DURATION) * DURATION;
     if (r?.start !== start) {
       const blocked = await deploymentProblem(); // before the round is taken on, so a failed read is read again
-      if (r) log("round done", { start: r.start, requests: r.requests, refusals: r.refusals, rpcCalls: rpcCalls - r.calls0, ethBefore: r.eth0, ethAfter: r.eth });
+      if (r) log("round done", { start: r.start, requests: r.requests, refusals: r.refusals, rpcCalls: rpcCalls - r.calls0, ethBefore: r.eth0, ethAfter: r.eth, cycle: +cycle.toFixed(1) });
       r = { ...roundAt(start), blocked, requests: 0, refusals: 0, calls0: rpcCalls, open: null, sigma: null, crossChecked: !cross, crossChecks: 0, crossAt: 0 };
     }
     if (stopping) { // cancel what rests in the open round, then exit
@@ -455,15 +463,18 @@ async function main(argv) {
     if (!r.sigma) r.sigma = await sigma().catch((e) => (note(`volatility unavailable: ${e.message}`), null));
     const sp = await spot();
     const p = sp.ok && r.sigma ? fairUp(sp.spot, r.open.s0, r.sigma, r.end - now) : null;
-    const c = plan(view, r, now, p, s);
+    // Needed work first. An optional requote goes out at most once per 15 s, and only into an empty queue (clear).
+    let c = plan(view, r, now, p, s, { cycle, optional: false }), optional = false;
+    if (!c && Date.now() - lastOptional >= 15_000) optional = !!(c = plan(view, r, now, p, s, { cycle }));
     if (Date.now() - beat >= 60_000) { beat = Date.now(); log("market", { secondsLeft: r.end - now, spot: sp.ok ? sp.spot : sp.reason, s0: r.open.s0, sigma: r.sigma, p, quotes: p === null ? null : quotes(p, s.halfSpreadCents), ...summary(view) }); }
     const held = !c ? (p === null && !sp.ok ? sp.reason : null)
-      : c.op === "cancel_all" ? null
+      : pulls(c.op, optional) ? null
       : r.refusals >= MAX_REFUSALS ? `${r.refusals} refusals this round; no new quotes until the next`
       : rpcCalls - r.calls0 > s.maxRpcPerRound ? `RPC budget of ${s.maxRpcPerRound} calls spent this round` : null;
     if (!c || held) { if (held) note(held); await nap(); return false; }
-    if (dry) { log("would send", { ...c, p }); view = apply(view, c); await nap(); return false; }
-    if (!(await clear(c))) { await nap(); return false; }
+    if (dry) { log("would send", { ...c, p, optional }); view = apply(expire(view, now), { ...c, id: `dry:${++n}` }); if (optional) lastOptional = Date.now(); await nap(); return false; }
+    if (!(await clear(c, optional))) { await nap(); return false; }
+    if (optional) lastOptional = Date.now();
     noted = "";
     r.requests++;
     if (refused(await send(c))) r.refusals++;

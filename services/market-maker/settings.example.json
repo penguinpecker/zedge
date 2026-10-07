@@ -3,9 +3,9 @@
   "quoteShares": 10,
   "mintSets": 40,
   "maxStakeUsdc": 100,
-  "quoteLifetimeSeconds": 180,
-  "requoteDriftCents": 8,
+  "quoteLifetimeSeconds": 60,
+  "requoteDriftCents": 4,
   "minEthWei": "200000000000000",
-  "maxRpcPerRound": 300,
-  "pollSeconds": 10
+  "maxRpcPerRound": 6000,
+  "pollSeconds": 2
 }
