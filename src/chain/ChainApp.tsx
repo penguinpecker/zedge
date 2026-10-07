@@ -8,8 +8,9 @@ import { price } from "../lib/market";
 import { BASE_RPC, DEFAULT_NETWORK, isNetworkId, NETWORKS, parseAtomicAmount, type NetworkId } from "./networks.ts";
 import { useChainWallet, WalletBoundary, type ChainWallet } from "./privy.tsx";
 import { buyLimit, fairUp, realizedSigma, sellLimit, stakeRoom } from "./fair.ts";
-import { checkDeployment, checkOrderbook, loadManifest, loadOrderbook, observationPrice, exactObservationPrice, PHASES, priceCaptions, readChain, readRound, type ChainSnapshot, type RoundRead, type RoundState } from "./gateway.ts";
-import { askCents, clockPhase, countdownLine, ORDER_MARGIN, versus, type RoundTimes } from "./market-view.ts";
+import { chainClient, checkDeployment, checkOrderbook, loadManifest, loadOrderbook, observationPrice, exactObservationPrice, PHASES, priceCaptions, readChain, readRound, type ChainSnapshot, type RoundRead, type RoundState } from "./gateway.ts";
+import { askCents, clockPhase, countdownLine, ORDER_MARGIN, roundResults, tradable, versus, type RoundResult, type RoundTimes } from "./market-view.ts";
+import { confirmSettle, liveNow, readApi, type ApiRound, type Live } from "./read-api.ts";
 import { createPriceFeed } from "./price-feed.ts";
 import { engineRound, LOT, OPERATOR_KEYS_CHANGED, type OrderbookManifest, type VerifiedOrderbook } from "./orderbook-manifest.ts";
 import { usePrivate, type PrivateState } from "./private/use-private.ts";
@@ -76,6 +77,17 @@ const smooth = (): ScrollBehavior => matchMedia("(prefers-reduced-motion: reduce
 
 function PrivateEmpty({ title, onOpen, open }: { title: string; onOpen: () => void; open: boolean }) {
   return <div className="chain-empty"><span className="chain-empty-icon"><LockKey size={26} /></span><h3>{title} are locked</h3><p>{open ? "Sign in and unlock your private account to see this." : "Private accounts are not available yet."}</p><button className="button" onClick={onOpen}>View account <CaretRight /></button></div>;
+}
+
+/** Every round that ended in the last 24 hours, oldest first: one mark each, Up lime, Down coral; the time and prices on hover. */
+function RoundResults({ results }: { results: RoundResult[] }) {
+  if (!results.length) return null;
+  const count = (outcome: RoundResult["outcome"]) => results.filter((r) => r.outcome === outcome).length;
+  const usd = (value: bigint | null) => value === null ? "—" : `$${price(Number(formatUnits(value, 18)))}`;
+  const name = { up: "Up", down: "Down", void: "Voided" } as const;
+  return <div className="chain-results"><span>Last 24 h <b className="up">Up {count("up")}</b> <b className="down">Down {count("down")}</b></span>
+    <ol role="img" aria-label={`Results of the last ${results.length} rounds, oldest first: ${count("up")} Up, ${count("down")} Down`}>{results.map((r) => <li key={r.start} className={r.outcome ?? ""}
+      title={`${utc(r.start).slice(0, 5)}–${utc(r.start + 900).slice(0, 5)} UTC · ${r.outcome ? name[r.outcome] : "No result yet"} · ${usd(r.open)} → ${usd(r.close)}`} />)}</ol></div>;
 }
 
 type TicketRound = { start: number; cutoff: number; end: number; opening: string | null };
@@ -285,6 +297,37 @@ function ChainMarkets() {
     // Scheduled once per round; `skew` only refines when.
   }, [slotStart]);
 
+  // The page's one /v1/live read every 2 s while the tab is visible (the price feeds and round results share it: read-api.ts liveNow).
+  // A failed read keeps the last answer.
+  const [indexed, setIndexed] = useState<Live | null>(null);
+  useEffect(() => {
+    let on = true;
+    const read = () => { if (document.visibilityState !== "hidden") void liveNow().then((x) => { if (on && x) setIndexed(x); }); };
+    read();
+    const timer = setInterval(read, 2_000);
+    return () => { on = false; clearInterval(timer); };
+  }, []);
+  // The engine's own opening for the current slot opens the ticket before the registry records it, but only once one receipt read
+  // shows that exact record on chain, because it feeds the buy limit. Once per round; a failed read is tried again at the next live read.
+  const [engineOpen, setEngineOpen] = useState<{ start: number; opening: string } | null>(null);
+  const confirming = useRef("");
+  useEffect(() => {
+    const book = orderbook?.manifest, entry = indexed?.rounds.find((r) => r.start === slotStart), ref = entry?.open;
+    if (!book || !entry || !ref || ref.kind !== 1 || engineOpen?.start === slotStart) return;
+    const id = engineRound(book, slotStart).spec.registryRoundId, key = `${slotStart}:${ref.txHash}:${ref.logIndex}`;
+    if (entry.registryRoundId !== id || confirming.current === key) return;
+    confirming.current = key;
+    void confirmSettle(chainClient(26514), book, ref, id).then((ok) => { if (ok) setEngineOpen({ start: slotStart, opening: formatUnits(ref.price, 18) }); }, () => { confirming.current = ""; });
+  }, [indexed, orderbook, slotStart, engineOpen]);
+  // The results strip: the read API's last 24 hours, read again each round; the live read's newer records go over it.
+  const [listed, setListed] = useState<ApiRound[]>([]);
+  useEffect(() => {
+    if (page !== "markets") return;
+    let on = true;
+    void readApi().rounds().then((r) => { if (on && r) setListed(r.rounds); });
+    return () => { on = false; };
+  }, [page, slotStart]);
+
   useEffect(() => {
     if (!verification) return;
     // Expire the displayed check even when the next poll is slow or this tab was hidden.
@@ -383,8 +426,9 @@ function ChainMarkets() {
   // The round being traded: the read of the current round (the block's, never an earlier round's), open by the clock.
   const live = verified && snapshot && liveRead?.key === keyOf(snapshot, 0) ? liveRead.read : null;
   const liveTimes = live?.round ? timesOf(live.round) : slotAt(0);
-  const openRound = live?.round && clockPhase(live.phase, liveTimes, now) === 3 ? { start: Number(live.start), cutoff: Number(live.round.cutoff) } : null;
-  const ticketRound = openRound && live?.round ? { ...openRound, end: Number(live.round.end), opening: live.round.openedAt ? exactObservationPrice(live.round.opening.price, live.round.opening.decimals) : null } : null;
+  const spec = orderbook && engineOpen?.start === slotStart ? engineRound(orderbook.manifest, slotStart).spec : null;
+  const ticketRound: TicketRound | null = tradable(live ? { phase: live.phase, times: liveTimes, opening: live.round?.openedAt ? exactObservationPrice(live.round.opening.price, live.round.opening.decimals) : null } : null,
+    spec && engineOpen ? { times: { start: spec.start, cutoff: spec.cutoff, end: spec.end }, opening: engineOpen.opening } : null, now);
   // The display feed's latest Chainlink report (from the current or next round's chart, which both reach now), used for prices only
   // while current (a report lands each minute).
   const spot = feed?.spot ?? null;
@@ -453,6 +497,7 @@ function ChainMarkets() {
               </div>
               {chartTimes ? <Suspense fallback={<div className="chain-chart-empty" />}><LiveChart start={chartTimes.start} cutoff={chartTimes.cutoff} end={chartTimes.end} priceToBeat={chartRound?.openedAt ? exactObservationPrice(chartRound.opening.price, chartRound.opening.decimals) : null}
                 offset={roundOffset} onMarket={roundOffset >= 0 ? onMarket : undefined} /></Suspense> : <div className="chain-chart-empty">{result && round?.round?.outcome !== 3 ? <Trophy size={30} /> : <ChartLine size={30} />}<strong>{round?.phase === 0 ? "No round scheduled for this time" : result ?? "Settlement observations"}</strong><p className="chain-copy">{round?.phase === 0 ? "The registry has no market in this time slot. Check the adjacent rounds or refresh." : "Opening and closing observations determine the outcome."}</p>{streams && <small>Chainlink Data Streams · Base → Horizen</small>}</div>}
+              <RoundResults results={roundResults(listed, indexed?.rounds ?? [], chainNow)} />
               {round?.round && <details className="chain-details"><summary>Round rules & exact observations</summary><dl className="chain-account-values"><div><dt>Trading cutoff</dt><dd>{utc(round.round.cutoff)} UTC{alsoLocal(round.round.cutoff)}</dd></div><div><dt>Opening deadline</dt><dd>{utc(round.round.openingDeadline)} UTC{alsoLocal(round.round.openingDeadline)}</dd></div>{round.round.voidableAfter !== null ? <div><dt>Closing price timeout</dt><dd>{utcDate(round.round.voidableAfter)} UTC</dd></div> : round.round.resolutionDeadline !== null && <div><dt>Resolution deadline</dt><dd>{utc(round.round.resolutionDeadline)} UTC{alsoLocal(round.round.resolutionDeadline)}</dd></div>}<div><dt>Exact opening</dt><dd>{round.round.openedAt ? `$${exactObservationPrice(round.round.opening.price, round.round.opening.decimals)}` : "Not recorded"}</dd></div><div><dt>Exact closing</dt><dd>{closing ? `$${exactObservationPrice(closing.price, closing.decimals)}` : "Not recorded"}</dd></div></dl><p className="chain-copy">A tie resolves Up. {round.round.voidableAfter !== null ? "After the round ends it can be resolved whenever its closing price has been delivered; there is no deadline. It can be voided only if no opening price was recorded by the opening deadline, or after the closing price timeout while no closing price has been delivered. Anyone can block price delivery until that timeout at a small cost in network fees, so a trader holding the losing side can force a void." : "If its opening or closing price is not recorded by the deadline, the round can be voided."} Prices shown above are rounded to cents for display; settlement compares the exact values.</p></details>}
               {round && <details className="chain-details"><summary>Round identity</summary><code>{round.roundId}</code><p className="chain-copy">{round.phase === 0 ? "Canonical ID for this unscheduled time slot." : "Read from the verified registry at the displayed block."}</p></details>}
               {roundError && verified && <p className="chain-error" role="alert">{roundError} <button className="chain-text-button" onClick={() => setRoundAttempt((n) => n + 1)}>Retry</button></p>}
@@ -462,7 +507,7 @@ function ChainMarkets() {
           </div>
           <Ticket priv={priv} orderbook={orderbook} wallet={wallet} round={ticketRound} now={now} up={up} outcome={outcome} onOutcome={setOutcome} loading={loading} onAccount={() => openAccount()} onFunds={() => openAccount("funds")} />
         </div>
-      </> : <section className="chain-panel chain-private-page"><div className="chain-panel-heading"><h2>{page === "portfolio" ? "Positions & balances" : "Fills & account history"}</h2><span className="chain-pill">{unlocked ? <LockKeyOpen size={13} /> : <LockKey size={13} />}{unlocked ? "Unlocked" : "Locked"}</span></div>{orderbook && unlocked && snapshot ? page === "portfolio" ? <PrivatePortfolio {...{ onDeposit: () => openAccount("funds") }} priv={priv} book={orderbook.manifest} chainNow={chainNow} openRound={openRound?.start ?? null} /> : <PrivateHistory priv={priv} fromBlock={later(snapshot.blockNumber > 604_800n ? snapshot.blockNumber - 604_800n : 0n, BigInt(orderbook.manifest.application.deployBlock))} /> : <PrivateEmpty title={page === "portfolio" ? "Your positions" : "Your records"} onOpen={() => openAccount()} open={Boolean(orderbook)} />}</section>}
+      </> : <section className="chain-panel chain-private-page"><div className="chain-panel-heading"><h2>{page === "portfolio" ? "Positions & balances" : "Fills & account history"}</h2><span className="chain-pill">{unlocked ? <LockKeyOpen size={13} /> : <LockKey size={13} />}{unlocked ? "Unlocked" : "Locked"}</span></div>{orderbook && snapshot && (unlocked || (page === "portfolio" && priv.snapshot?.cached)) ? page === "portfolio" ? <PrivatePortfolio {...{ onDeposit: () => openAccount("funds") }} priv={priv} book={orderbook.manifest} chainNow={chainNow} openRound={ticketRound?.start ?? null} /> : <PrivateHistory priv={priv} fromBlock={later(snapshot.blockNumber > 604_800n ? snapshot.blockNumber - 604_800n : 0n, BigInt(orderbook.manifest.application.deployBlock))} /> : <PrivateEmpty title={page === "portfolio" ? "Your positions" : "Your records"} onOpen={() => openAccount()} open={Boolean(orderbook)} />}</section>}
       <details className="chain-details chain-deployment-details"><summary>Market details</summary><div className="chain-technical-grid"><dl><dt>Network</dt><dd>{NETWORKS[network].name} · {network}</dd><dt>Connection</dt><dd>{snapshot ? `Connected · block ${snapshot.blockNumber}` : "Not verified"}</dd><dt>Trading</dt><dd>{orderbook ? "Open (private order book)" : "Unavailable"}</dd><dt>Private access</dt><dd>{orderbook ? "Sign in to use" : active?.orderbookError || "Unavailable"}</dd></dl><dl><dt>Contract checks</dt><dd>{verified && verification ? `Matched release · checked ${verificationTime(verification.checkedAt)} UTC` : planned ? "Not available yet" : offline ? "Not available" : "Not verified"}</dd><dt>Roles and governance</dt><dd>{verified ? streams ? <>The round registry is upgradeable: its owner address <code>{streams.contracts.registry.owner}</code> can replace its code, including the round rules. The three price-route contracts are fixed. The registry’s code and owner and the upstream implementations and governance matched this release at the checked blocks, with no ownership transfer pending.</> : "Registry fixed; external provider governance requires separate review." : "Not verified"}</dd><dt>Private account</dt><dd>{unlocked ? "Unlocked" : "Locked"}</dd></dl></div>{verified && <><p>Release {verified.manifest.release}. Matching code and configuration does not verify private execution or imply a security audit.</p>{streams && <p><a href="https://github.com/penguinpecker/zedge/blob/feat/production-core/contracts/deployment/MAINNET.md" target="_blank" rel="noreferrer">Deployment record and source-verification details <ArrowSquareOut size={13} /></a></p>}<dl className="chain-address-list">{pins.map((pin) => <div key={pin.name}><dt>{pin.name.replace(/([A-Z])/g, " $1")} · {pin.chainId === 8453 ? "Base" : NETWORKS[network].name}</dt><dd><a href={`${pin.chainId === 8453 ? "https://basescan.org" : NETWORKS[network].blockExplorers.default.url}/address/${pin.address}`} target="_blank" rel="noreferrer">{pin.address}</a><code>{pin.runtimeCodeHash}</code></dd></div>)}</dl></>}</details>
       <SiteFooter mode="chain" status={<span>ZEDGE · {network === 2651420 ? "Testnet" : "Mainnet"}</span>} action={<button onClick={() => openAccount("security")}>Account security</button>} />
     </main>

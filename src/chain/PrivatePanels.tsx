@@ -56,6 +56,8 @@ export function PrivateOrders({ priv, book, roundStart }: { priv: PrivateState; 
 export function PrivatePortfolio({ priv, book, chainNow, openRound, onDeposit }: { priv: PrivateState; book: Book; chainNow: number; openRound: number | null; onDeposit?: () => void }) {
   const [amount, setAmount] = useState("");
   const view = priv.snapshot?.view, unlocked = Boolean(priv.snapshot?.unlocked), { run } = priv;
+  // A cached view (shown while the unlock syncs) is read-only: nothing is signed from it.
+  const ready = unlocked && !priv.busy;
   // The settlement sweep pays out in the account's own name, and makers fill, which only the next receipt shows: a sync on opening,
   // when something could have changed and none was read in the last minute (each sync is a public request).
   useEffect(() => { if (unlocked) void run((a) => a.refresh()); }, [unlocked, run]);
@@ -83,16 +85,16 @@ export function PrivatePortfolio({ priv, book, chainNow, openRound, onDeposit }:
       return <div className="chain-book-row" key={h.roundId}>
         {start === undefined ? <span>Earlier round</span> : <span title={`${clock(start, "UTC")}–${clock(start + 900, "UTC")} UTC`}>{clock(start)}–{clock(start + 900)} {zone(start)}</span>}
         <span>{shares(h.up + h.reservedUp)} / {shares(h.down + h.reservedDown)}{h.reservedUp + h.reservedDown ? ` · ${shares(h.reservedUp + h.reservedDown)} offered` : ""}</span>
-        <span>{start !== undefined && sets > 0 && <button className="chain-text-button" disabled={priv.busy} onClick={() => void priv.run((a) => a.merge(start, sets))}>Merge</button>}
-          {start !== undefined && start + settleAfter <= chainNow && <button className="chain-text-button" disabled={priv.busy} onClick={() => void priv.run((a) => a.redeem(start))}>Redeem</button>}</span>
+        <span>{start !== undefined && sets > 0 && <button className="chain-text-button" disabled={!ready} onClick={() => void priv.run((a) => a.merge(start, sets))}>Merge</button>}
+          {start !== undefined && start + settleAfter <= chainNow && <button className="chain-text-button" disabled={!ready} onClick={() => void priv.run((a) => a.redeem(start))}>Redeem</button>}</span>
       </div>;
     })}
-    {openRound !== null && <form onSubmit={(event) => { event.preventDefault(); if (mintable) void priv.run((a) => a.mint(openRound, quantity)).then((ok) => ok && setAmount("")); }}>
+    {openRound !== null && <form onSubmit={(event) => { event.preventDefault(); if (mintable && ready) void priv.run((a) => a.mint(openRound, quantity)).then((ok) => ok && setAmount("")); }}>
       <label htmlFor="chain-mint-amount">Mint Up + Down sets for the open round · USDC</label>
       <input id="chain-mint-amount" inputMode="decimal" value={amount} onChange={(event) => setAmount(event.target.value)} placeholder="Enter amount" autoComplete="off" aria-invalid={quantity < 0 || (quantity > 0 && !mintable)} />
-      <button className="button" type="submit" disabled={!mintable || priv.busy}>Mint</button>
+      <button className="button" type="submit" disabled={!mintable || !ready}>Mint</button>
     </form>}
-    <ActionLine snapshot={priv.snapshot} names={["Sync", "Mint", "Merge", "Redeem"]} />
+    <ActionLine snapshot={priv.snapshot} names={["Unlock", "Sync", "Mint", "Merge", "Redeem"]} />
     {error}
   </div>;
 }

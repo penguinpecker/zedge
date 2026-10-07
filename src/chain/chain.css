@@ -63,6 +63,16 @@
 .chain-chart-empty strong { font-size: 13px; color: var(--text); }
 .chain-chart-empty p { max-width: 330px; font-size: 11px; line-height: 1.8; }
 .chain-market-foot { display: flex; justify-content: space-between; gap: 15px; border-top: 1px solid var(--line); font-size: 11px; color: var(--muted); padding: 13px 20px; }
+.chain-results { display: flex; align-items: center; gap: 14px; padding: 14px 24px; font-size: 11px; color: var(--muted); }
+.chain-results > span { display: flex; gap: 8px; flex-shrink: 0; white-space: nowrap; }
+.chain-results b { font: 600 11px var(--mono); }
+.chain-results b.up { color: var(--up); }
+.chain-results b.down { color: var(--down); }
+.chain-results ol { display: grid; grid-template-columns: repeat(48, minmax(0, 1fr)); gap: 2px; flex: 1; min-width: 0; margin: 0; padding: 0; list-style: none; }
+.chain-results li { height: 9px; border-radius: 1px; background: var(--line); }
+.chain-results li.up { background: var(--up); }
+.chain-results li.down { background: var(--down); }
+.chain-results li.void { background: var(--muted); }
 .chain-segment { display: flex; border: 1px solid var(--line); background: var(--bg); border-radius: 6px; padding: 3px; gap: 4px; }
 .chain-segment button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; flex: 1; font-size: 11px; border-radius: 4px; padding: 8px 11px; min-height: 34px; color: var(--muted); white-space: nowrap; }
 .chain-segment button[aria-pressed="true"] { color: var(--text); background: #30362b; }
@@ -210,6 +220,8 @@
   .chain-panel-heading h2 { font-size: 15px; }
   .chain-panel-heading .eyebrow { font-size: 11px; }
   .chain-market-foot { flex-direction: column; gap: 7px; }
+  .chain-results { flex-direction: column; align-items: stretch; gap: 8px; padding: 12px 17px; }
+  .chain-results ol { flex: none; }
   .chain-technical-grid { grid-template-columns: 1fr; gap: 0; }
   .chain-drawer-heading, .chain-drawer-content { padding-inline: 21px; }
   .chain-network-warning { flex-direction: column; align-items: flex-start; }

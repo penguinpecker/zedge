@@ -11,6 +11,24 @@
   },
   "headers": [
     {
+      "source": "/v1/(live|btc|rounds)",
+      "headers": [
+        {
+          "key": "x-vercel-enable-rewrite-caching",
+          "value": "1"
+        }
+      ]
+    },
+    {
+      "source": "/v1/account",
+      "headers": [
+        {
+          "key": "x-vercel-enable-rewrite-caching",
+          "value": "0"
+        }
+      ]
+    },
+    {
       "source": "/(.*)",
       "headers": [
         {
@@ -21,6 +39,10 @@
     }
   ],
   "rewrites": [
+    {
+      "source": "/v1/:path*",
+      "destination": "https://indexer-production-c462.up.railway.app/v1/:path*"
+    },
     {
       "source": "/terms",
       "destination": "/index.html"

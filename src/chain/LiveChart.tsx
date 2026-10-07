@@ -33,12 +33,13 @@ type Marks = { start: HTMLDivElement | null; cutoff: HTMLDivElement | null; end:
 export default function LiveChart({ start, cutoff, end, priceToBeat, offset, onMarket }: { start: number; cutoff: number; end: number; priceToBeat: string | null; offset: number; onMarket?: (feed: MarketFeed) => void }) {
   const box = useRef<HTMLDivElement>(null);
   const marks = useRef<Marks>({ start: null, cutoff: null, end: null, closed: null, target: null, tip: null });
-  const chart = useRef<{ api: IChartApi; series: ISeriesApi<"Area">; line: IPriceLine | null; place: () => void; relabel: () => void } | null>(null);
+  const chart = useRef<{ api: IChartApi; series: ISeriesApi<"Area">; line: IPriceLine | null; place: () => void; relabel: () => void; moved: boolean } | null>(null);
   const goal = useRef<number | null>(null);
   const [version, setVersion] = useState(0);
   const report = useRef(onMarket);
   useEffect(() => { report.current = onMarket; });
-  // The whole round is in view. The next round also shows the round before it, so its start line has context.
+  // The whole round is in view, until the viewer drags back through the day the feed holds. The next round also shows the round
+  // before it, so its start line has context.
   const upcoming = offset > 0, finished = offset < 0;
   const { feed, view } = useMemo(() => {
     const view = upcoming ? 2 * start - end : start;
@@ -65,9 +66,10 @@ export default function LiveChart({ start, cutoff, end, priceToBeat, offset, onM
       localization: { priceFormatter: usd, tickmarksPriceFormatter: ticks, timeFormatter: axisTime },
       grid: { vertLines: { visible: false }, horzLines: { color: "rgba(255,255,255,0.04)" } },
       rightPriceScale: { borderVisible: false, scaleMargins: { top: 0.18, bottom: 0.12 } },
-      timeScale: { borderVisible: false, timeVisible: true, secondsVisible: false, lockVisibleTimeRangeOnResize: true, tickMarkFormatter: axisTime },
+      timeScale: { borderVisible: false, timeVisible: true, secondsVisible: false, lockVisibleTimeRangeOnResize: true, tickMarkFormatter: axisTime, fixLeftEdge: true, fixRightEdge: true },
       crosshair: { mode: CrosshairMode.Magnet, horzLine: { visible: false, labelVisible: false }, vertLine: { color: "rgba(233,237,223,0.25)", style: LineStyle.Solid, labelBackgroundColor: "#2b322b" } },
-      handleScroll: false, handleScale: false,
+      // Dragged sideways (mouse or touch) only: the wheel and vertical swipes keep scrolling the page.
+      handleScroll: { mouseWheel: false, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false }, handleScale: false,
     });
     series = api.addSeries(AreaSeries, {
       lineColor: LINE, lineWidth: 2, topColor: "rgba(199,248,111,0.22)", bottomColor: "rgba(199,248,111,0)",
@@ -125,8 +127,11 @@ export default function LiveChart({ start, cutoff, end, priceToBeat, offset, onM
     api.timeScale().subscribeVisibleLogicalRangeChange(place);
     api.timeScale().subscribeSizeChange(place);
     const relabel = () => api.applyOptions({ localization: { tickmarksPriceFormatter: ticks } });
-    chart.current = { api, series, line: null, place, relabel };
-    return () => { cancelAnimationFrame(frame); api.timeScale().unsubscribeVisibleLogicalRangeChange(place); api.timeScale().unsubscribeSizeChange(place); api.remove(); chart.current = null; };
+    const c: NonNullable<typeof chart.current> = { api, series, line: null, place, relabel, moved: false };
+    chart.current = c;
+    const grab = () => { c.moved = true; };
+    element.addEventListener("pointerdown", grab);
+    return () => { cancelAnimationFrame(frame); element.removeEventListener("pointerdown", grab); api.timeScale().unsubscribeVisibleLogicalRangeChange(place); api.timeScale().unsubscribeSizeChange(place); api.remove(); chart.current = null; };
   }, [start, cutoff, end, feed]);
 
   useEffect(() => {
@@ -144,7 +149,7 @@ export default function LiveChart({ start, cutoff, end, priceToBeat, offset, onM
     // Redrawn on every feed change: one point a minute, an empty slot for each missing report, so the round's time axis
     // stays fixed from the first shown minute to the end.
     c.series.setData(feed.points().map((p) => ({ ...p, time: p.time as UTCTimestamp })));
-    c.api.timeScale().setVisibleRange({ from: view as UTCTimestamp, to: end as UTCTimestamp });
+    if (!c.moved) c.api.timeScale().setVisibleRange({ from: view as UTCTimestamp, to: end as UTCTimestamp });
     c.relabel();
     c.place();
     report.current?.({ spot: feed.last(), closes: feed.closes(), status: feed.status, startTick: feed.at(start * 1000) });

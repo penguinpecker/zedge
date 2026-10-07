@@ -1,6 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { askCents, clockPhase, countdownLine, ORDER_MARGIN, versus } from "./market-view.ts";
+import { askCents, clockPhase, countdownLine, ORDER_MARGIN, roundResults, tradable, versus } from "./market-view.ts";
+import type { ApiRound, SettleRef } from "./read-api.ts";
 
 const house = await import(new URL("../../services/market-maker/pricing.mjs", import.meta.url).href) as {
   quotes(p: number, h: number): { up: { ask: number }; down: { ask: number } };
@@ -53,4 +54,27 @@ test("the price estimate is the house's ask for either side", () => {
     assert.equal(askCents(1 - p), q.down.ask, `down at ${p}`);
   }
   assert.equal(askCents(0.57), 60);
+});
+
+test("the ticket trades the registry's round in its window, and before the registry records the opening the engine's confirmed one, until its cutoff", () => {
+  const engine = { times: round, opening: "100.5" }, registry = (phase: number, opening: string | null = null) => ({ phase, times: round, opening });
+  assert.deepEqual(tradable(registry(2), engine, 911), { ...round, opening: "100.5" }, "the engine opened at +8 s; the registry has not yet");
+  assert.deepEqual(tradable(null, engine, 911), { ...round, opening: "100.5" }, "no registry read at all");
+  assert.equal(tradable(registry(2), null, 911), null, "nothing confirmed: nothing to trade");
+  assert.deepEqual(tradable(registry(3, "100.4"), engine, 960), { ...round, opening: "100.4" }, "once the registry has it, the registry's");
+  assert.equal(tradable(registry(2), engine, 1770 - ORDER_MARGIN), null, "orders close ORDER_MARGIN before the engine's cutoff");
+  assert.equal(tradable(registry(2), engine, 899), null, "not before its start");
+  assert.equal(tradable(registry(7), engine, 911), null, "a registry round past opening (here voided) is never overridden");
+});
+
+test("the results strip lists the rounds that ended in the last 24 hours, oldest first, the live read's newer records over the list", () => {
+  const ref = (kind: number, outcome: number, price: bigint): SettleRef => ({ kind, outcome, price, observationsTimestamp: 0, reportHash: `0x${"0".repeat(64)}`, source: 1, block: 1, txHash: `0x${"1".repeat(64)}`, logIndex: 0 });
+  const r = (start: number, settle: SettleRef | null): ApiRound => ({ start, registryRoundId: `0x${"2".repeat(64)}`, open: ref(1, 0, 10n), settle });
+  const now = 100 * 900 + 30;
+  const listed = [r(2 * 900, ref(2, 1, 11n)), r(98 * 900, ref(2, 2, 9n)), r(99 * 900, null), r(100 * 900, null)];
+  assert.deepEqual(roundResults(listed, [r(99 * 900, ref(3, 3, 0n)), r(100 * 900, null), r(101 * 900, null)], now), [
+    { start: 98 * 900, outcome: "down", open: 10n, close: 9n },
+    { start: 99 * 900, outcome: "void", open: 10n, close: null },
+  ], "older than a day and not yet ended are left out");
+  assert.deepEqual(roundResults(listed, [], now).map((x) => x.outcome), ["down", null], "no result recorded yet");
 });

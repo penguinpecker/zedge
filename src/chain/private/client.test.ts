@@ -6,7 +6,8 @@ import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { decrypt, encrypt, exportPublicKeyToHex, generateKeyPair, importPublicKeyFromHex } from "@horizen/vela-common-ts";
 import { KEY_CHALLENGE_START, endpointAbi, engineRound, parseOrderbookManifest, requestTypedData, signable, type VerifiedOrderbook } from "../orderbook-manifest.ts";
 import { usdcPermitTypedData } from "../vault.ts";
-import { HISTORY_PAGE, KEY_CHANGED, NOT_SUBMITTED, PrivateAccount, PublicError, describeOutcome, fetchRelay, readView, relayText, sharesFor, viemChain, type Chain, type Completion, type Logged, type Relay, type RelayBody, type Settled, type Signer, type Snapshot, type Submission } from "./client.ts";
+import { HISTORY_PAGE, KEY_CHANGED, NOT_SUBMITTED, PrivateAccount, PublicError, describeOutcome, fetchRelay, indexedChain, readView, relayText, sharesFor, viemChain, type Chain, type Completion, type Logged, type Relay, type RelayBody, type Settled, type Signer, type Snapshot, type Submission } from "./client.ts";
+import type { AccountPage, ApiRound, Live } from "../read-api.ts";
 
 const RELAYER: Address = "0x5555555555555555555555555555555555555555";
 const fixture = JSON.parse(await readFile(new URL("../testdata/orderbook-configured.json", import.meta.url), "utf8"));
@@ -768,4 +769,94 @@ test("History opens on its latest page, a reopen reads only the blocks since, an
   // A read stopped by the page closing changes nothing.
   await account.loadHistory(floor, true, () => true);
   assert.equal(account.snapshot.historyHours, 12);
+});
+
+/** Every completion with a receipt that the account reads, in chain order, as the read API would index it. */
+function recording(s: Awaited<ReturnType<typeof stack>>) {
+  const logged: Logged[] = [], completion = s.chain.completion;
+  s.chain.completion = async (id, from) => {
+    const c = await completion(id, from);
+    if (c?.ciphertexts.length && !logged.some((x) => x.requestId === id)) logged.push({ requestId: id, block: c.block, txHash: c.txHash, ciphertexts: c.ciphertexts });
+    return c;
+  };
+  /** The read API over them: pages newest first, below `before`. */
+  const requests = async (_account: string, before?: { block: number; logIndex: number }, limit = 50): Promise<AccountPage> => {
+    const below = logged.filter((x) => !before || x.block < BigInt(before.block)).reverse();
+    return { head: { block: 1_000, time: 1 }, more: below.length > limit, requests: below.slice(0, limit).map((x) => ({ requestId: x.requestId, block: x.block, logIndex: 0, txHash: x.txHash, completed: { block: x.block, txHash: x.txHash, status: 0 }, ciphertexts: x.ciphertexts })) };
+  };
+  return { logged, requests };
+}
+
+test("unlock shows the newest readable receipt's view read-only (cached, still locked) until its own sync lands; a failed sync drops it", async () => {
+  let refuse = false;
+  const s = await stack({ relayRefuses: () => refuse ? { code: "QUEUE_BUSY" } : null }), signer = wallet(), hints = memory(), { requests } = recording(s);
+  const first = open(s, signer, hints);
+  await first.account.unlock();
+  s.fund(first.account.account, 10_000_000);
+  await first.account.mint(ROUND, 1_000_000);
+  const minted = first.account.snapshot.view!;
+  first.account.lock();
+  // A reload whose unlock sync is sent only once the cached view is on screen (or after 2 s, which fails below).
+  const reload = () => {
+    let seen = () => {};
+    const shown = new Promise<void>((resolve) => { seen = resolve; setTimeout(resolve, 2_000).unref(); });
+    const snapshots: Snapshot[] = [];
+    const relay: Relay = { post: async (body) => { await shown; return s.relay.post(body); } };
+    return { snapshots, account: new PrivateAccount(s.book, signer, { ...s.chain, requests }, relay, { hints, onChange: (x) => { snapshots.push(x); if (x.cached) seen(); }, now: () => 0, sleep: async () => {} }) };
+  };
+  const ok = reload();
+  await ok.account.unlock();
+  const cached = ok.snapshots.find((x) => x.cached);
+  assert.deepEqual([cached?.unlocked, cached?.view?.cash, cached?.view?.holdings[0].up], [false, minted.cash, 1_000_000], "the minted position, locked");
+  assert.deepEqual([ok.account.snapshot.unlocked, ok.account.snapshot.cached, ok.account.snapshot.view?.sequence], [true, false, minted.sequence]);
+  // A failed unlock sync: the cached view goes with it.
+  refuse = true;
+  const failed = reload();
+  await assert.rejects(failed.account.unlock(), /queue is busy/);
+  assert.ok(failed.snapshots.some((x) => x.cached), "it was shown");
+  assert.deepEqual([failed.account.snapshot.unlocked, failed.account.snapshot.cached, failed.account.snapshot.view], [false, false, null]);
+});
+
+test("History from the read API: pages newest first, each receipt decrypted once, Load older below the oldest, and the chain scan when the API fails", async () => {
+  const s = await stack(), { logged, requests } = recording(s), pages: (object | undefined)[] = [];
+  const { account } = open(s, wallet());
+  await account.unlock();
+  s.fund(account.account, 10_000_000);
+  await account.mint(ROUND, 1_000_000);
+  await account.merge(ROUND, 1_000_000);
+  let api: Chain["requests"] = async (a, before) => { pages.push(before); return requests(a, before, 2); };
+  s.chain.requests = (a, before, limit) => api!(a, before, limit);
+  s.chain.sent = async () => { throw new Error("the chain is not read while the API answers"); };
+  await account.loadHistory(0n);
+  assert.deepEqual([account.snapshot.history.map((h) => h.text), account.snapshot.historyMore], [["Applied · applied", "Applied · applied"], true]);
+  // Reopened: the newest page again, merged; a line already read is not decrypted again (its receipt now reads as garbage).
+  logged[2].ciphertexts = [new Uint8Array(100)];
+  await account.loadHistory(0n);
+  assert.equal(account.snapshot.history.length, 2);
+  assert.ok(account.snapshot.history.every((h) => h.readable));
+  await account.loadHistory(0n, true);
+  assert.deepEqual(pages, [undefined, undefined, { block: Number(logged[1].block), logIndex: 0 }]);
+  assert.deepEqual([account.snapshot.history.map((h) => h.text), account.snapshot.historyMore], [["Applied · applied", "Applied · applied", "Account synced"], false]);
+  // The API fails: the chain scan as before.
+  api = async () => null;
+  s.chain.sent = async () => ({ head: 1_000n, total: 1n });
+  s.chain.history = async () => logged.slice(0, 1);
+  await account.loadHistory(0n);
+  assert.deepEqual(account.snapshot.history.map((h) => h.text), ["Account synced"]);
+});
+
+test("held rounds' results come from the shared live read; the chain is read only for rounds it lacks or when it fails, at most every 5 s", async () => {
+  const id = (n: number) => keccak256(toHex(`round:${n}`)), settle = { kind: 2, outcome: 2, price: 1n, observationsTimestamp: 0, reportHash: id(9), source: 1, block: 1, txHash: id(8), logIndex: 0 };
+  let live: Live | null = { head: { block: 1, time: 1 }, price: null, rounds: [{ start: 0, registryRoundId: id(1), open: null, settle }, { start: 900, registryRoundId: id(2), open: null, settle: null }] as ApiRound[] };
+  let reads = 0, t = 0;
+  const chain = { settled: async () => { reads++; return [{ roundId: id(3), outcome: 1 }]; } } as unknown as Chain;
+  const indexed = indexedChain(chain, { account: async () => null, live: async () => live }, () => t);
+  assert.deepEqual(await indexed.settled([id(1), id(2)], 0n), [{ roundId: id(1), outcome: 2 }]);
+  assert.equal(reads, 0);
+  live = null;
+  await indexed.settled([id(3)], 0n);
+  t += 4_999; await indexed.settled([id(3)], 0n);
+  assert.equal(reads, 1, "the chain fallback keeps today's 5 s");
+  t += 1; assert.deepEqual(await indexed.settled([id(3)], 0n), [{ roundId: id(3), outcome: 1 }]);
+  assert.equal(reads, 2);
 });

@@ -1,6 +1,7 @@
 /** Display rules of the live market page (ChainApp.tsx), free of React so they can be tested: the round's phase and countdown by
  * the 1 s clock, and the house's ask as a price estimate. */
 import { countdown } from "../lib/market.ts";
+import type { ApiRound } from "./read-api.ts";
 
 /** A round's start, order cutoff and end, in unix seconds. */
 export type RoundTimes = { start: number; cutoff: number; end: number };
@@ -37,3 +38,25 @@ export const versus = (value: number | null, opening: string | null) => value ==
 /** The house's ask for a side it values at `p` (services/market-maker/pricing.mjs quotes at its default 3¢ half-spread): what a
  * one-click buy most likely pays. Shown as an estimate until the house publishes its own quotes. */
 export const askCents = (p: number) => Math.min(99, Math.max(3, Math.ceil(Math.round(p * 1e8) / 1e6) + 3));
+
+/** The round the ticket trades and its opening price. The registry's while its trading window is open (by the clock, as the badge).
+ * Before the registry records the opening (Not scheduled, Scheduled, Awaiting opening price), the engine's own opening for that slot,
+ * which the caller has confirmed on chain because it feeds the buy limit, until ORDER_MARGIN before the engine's cutoff. The engine
+ * refuses an early order itself; this only opens the ticket about 25 s sooner each round. */
+export function tradable(registry: { phase: number; times: RoundTimes; opening: string | null } | null, engine: { times: RoundTimes; opening: string } | null, now: number): (RoundTimes & { opening: string | null }) | null {
+  const phase = registry ? clockPhase(registry.phase, registry.times, now) : 0;
+  if (registry && phase === 3) return { ...registry.times, opening: registry.opening };
+  if (engine && phase <= 2 && now >= engine.times.start && now < engine.times.cutoff - ORDER_MARGIN) return { ...engine.times, opening: engine.opening };
+  return null;
+}
+
+export type RoundResult = { start: number; outcome: "up" | "down" | "void" | null; open: bigint | null; close: bigint | null };
+/** The results strip: every round that ended in the last 24 hours, oldest first, from the read API's rounds with the shared live
+ * read's newer records over them. Display only. `outcome` null: no result recorded yet. */
+export function roundResults(listed: ApiRound[], live: ApiRound[], now: number): RoundResult[] {
+  const byStart = new Map([...listed, ...live].map((r) => [r.start, r]));
+  return [...byStart.values()].filter((r) => r.start + 900 <= now && r.start + 900 > now - 86_400).sort((a, b) => a.start - b.start).map((r) => {
+    const s = r.settle;
+    return { start: r.start, outcome: !s ? null : s.kind === 3 || s.outcome === 3 ? "void" : s.outcome === 1 ? "up" : s.outcome === 2 ? "down" : null, open: r.open?.price ?? null, close: s && s.kind === 2 ? s.price : null };
+  });
+}

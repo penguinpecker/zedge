@@ -6,6 +6,7 @@ import { baseClient, chainClient } from "../gateway.ts";
 import { publicError } from "../networks.ts";
 import { KEY_CHALLENGE_START, signable, type VerifiedOrderbook } from "../orderbook-manifest.ts";
 import type { ChainWallet } from "../privy.tsx";
+import { liveNow, readApi } from "../read-api.ts";
 import type { PrivateAccount, Snapshot } from "./client.ts";
 
 // A per-viewer convenience: the fingerprint of the key this browser derived before. Never relied on for safety.
@@ -55,7 +56,9 @@ export function usePrivate(wallet: ChainWallet, orderbook: VerifiedOrderbook | n
     void import("./client.ts").then((m) => {
       if (!live) return;
       isPublic.current = (e) => e instanceof m.PublicError;
-      created = new m.PrivateAccount(manifest, signer, m.viemChain(chainClient(26514) as unknown as PublicClient, manifest, baseClient() as unknown as PublicClient),
+      // History, the cached Portfolio and round results read the read API first (display only); everything else reads the chain.
+      const chain = m.indexedChain(m.viemChain(chainClient(26514) as unknown as PublicClient, manifest, baseClient() as unknown as PublicClient), { account: readApi().account, live: liveNow });
+      created = new m.PrivateAccount(manifest, signer, chain,
         m.fetchRelay(manifest.relayer.path, () => latest.current.authHeaders()), { hints, onChange: (s) => { if (live) setSnapshot(s); } });
       account.current = created;
       setSnapshot(created.snapshot);
@@ -72,8 +75,9 @@ export function usePrivate(wallet: ChainWallet, orderbook: VerifiedOrderbook | n
     // Keyed on the release, the relayer and the address on purpose: a re-render must not recreate the account and drop its key.
   }, [key]);
 
-  // Round results: while the account holds shares, look every 5 s for the public result of any held round that ended. One look at a
-  // time, none while the tab is hidden; the client spaces out looks after a failed read.
+  // Round results: while the account holds shares, look every 2 s for the public result of any held round that ended (the page's
+  // shared /v1/live read; the chain at most every 5 s when that fails). One look at a time, none while the tab is hidden; the client
+  // spaces out looks after a failed read.
   const unlocked = Boolean(snapshot?.unlocked), holds = Boolean(snapshot?.view?.holdings.length);
   useEffect(() => {
     if (!unlocked || !holds) return;
@@ -84,7 +88,7 @@ export function usePrivate(wallet: ChainWallet, orderbook: VerifiedOrderbook | n
       looking = true;
       void a.checkResults().catch(() => undefined).finally(() => { looking = false; });
     };
-    const timer = setInterval(look, 5_000);
+    const timer = setInterval(look, 2_000);
     return () => clearInterval(timer);
   }, [unlocked, holds]);
 

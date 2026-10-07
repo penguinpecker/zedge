@@ -15,21 +15,38 @@ test("minute reports become candles that open at one report and close at the nex
   assert.deepEqual(toTicks({ error: "x" }), []);
 });
 
-test("the feed reads /api/btc, is live while the last report is fresh, keeps its points on a failed read, and pause stops it", async () => {
-  let now = (M + 125) * 1000, body: unknown = { prices: [[M, 101], [M + 60, 102], [M + 120, 103]] }, ok = true;
+test("the feed reads its day from /v1/btc once, then each minute from the shared live read; a read API that fails or falls behind hands the rest of the feed to /api/btc", async () => {
+  let now = (M + 125) * 1000, price: [number, number] | null = [M + 120, 103], ok = true;
   const urls: string[] = [], timers: (() => void)[] = [];
-  const env: FeedEnv = { fetch: async (url) => { urls.push(url); return { ok, json: async () => body }; }, now: () => now,
-    setTimeout: (fn) => { timers.push(fn); return 0 as unknown as ReturnType<typeof setTimeout> }, clearTimeout: () => { timers.length = 0; } };
+  const bodies: Record<string, unknown> = { "/api/btc": { prices: [[M + 180, 104]] } };
+  const env: FeedEnv = { fetch: async (url) => { urls.push(url); return { ok: ok || url !== "/api/btc", json: async () => bodies[url] ?? { prices: [[M, 101], [M + 60, 102]] } }; }, now: () => now,
+    setTimeout: (fn) => { timers.push(fn); return 0 as unknown as ReturnType<typeof setTimeout> }, clearTimeout: () => { timers.length = 0; },
+    live: async () => ({ head: { block: 1, time: M }, rounds: [], price: price && { t: price[0] * 1000, p: price[1] } }) };
+  const next = async () => { timers.shift()!(); await new Promise((r) => setImmediate(r)); };
   const feed = createPriceFeed(M * 1000, (M + 900) * 1000, env);
   feed.resume(); await new Promise((r) => setImmediate(r));
-  assert.deepEqual(urls, ["/api/btc"]);
+  assert.deepEqual(urls, [`/v1/btc?from=${M + 900 - 86_400}&to=${M + 900}`], "one window, a day back from the end");
   assert.equal(feed.status, "live");
-  assert.equal(feed.points().filter((p) => p.value !== undefined).length, 3);
-  assert.deepEqual(feed.last(), { t: (M + 120) * 1000, p: 103 });
+  assert.deepEqual(feed.points().filter((p) => p.value !== undefined).map((p) => p.value), [101, 102, 103]);
   assert.deepEqual(feed.closes(), [102, 103]);
-  ok = false; now += 200_000; timers.shift()!(); await new Promise((r) => setImmediate(r));
-  assert.equal(feed.status, "reconnecting");
-  assert.equal(feed.points().filter((p) => p.value !== undefined).length, 3);
+  // A day of history scrolls back past the shown window.
+  bodies[urls[0]] = { prices: [[M - 7_200, 99], [M, 101]] };
+  feed.pause(); feed.resume(); await new Promise((r) => setImmediate(r));
+  assert.equal(feed.points()[0].time, M - 7_200, "the points start at the oldest report held");
+  urls.length = 0;
+  await next();
+  assert.deepEqual(urls, [], "the next minute comes from the shared live read: no request of its own");
+  // The live read falls behind (its newest report is older than 150 s): /api/btc from now on, at most every 5 s.
+  now += 200_000; ok = false;
+  await next();
+  assert.deepEqual([urls, feed.status], [["/api/btc"], "reconnecting"]);
+  assert.equal(feed.points().filter((p) => p.value !== undefined).length, 4, "a failed read keeps the points");
+  await next();
+  assert.deepEqual(urls, ["/api/btc"], "not again within 5 s");
+  now += 5_000; ok = true; price = [M + 400, 1];
+  await next();
+  assert.deepEqual(urls, ["/api/btc", "/api/btc"], "the read API is not read again for this feed");
+  assert.deepEqual(feed.last(), { t: (M + 180) * 1000, p: 104 });
   feed.pause();
   assert.equal(timers.length, 0);
 });
@@ -40,14 +57,14 @@ test("a missing minute costs one point, not two, and merging reads never shrinks
   assert.deepEqual(toPoints(ticks, M * 1000, (M + 300) * 1000), [
     { time: M, value: 101 }, { time: M + 60, value: 102 }, { time: M + 120 }, { time: M + 180, value: 104 }, { time: M + 240, value: 105 }, { time: M + 300 },
   ]);
-  // A later read that returns only the newest minutes (a cold /api/btc instance) adds to the series and drops nothing.
-  let body: unknown = { prices: [[M, 101], [M + 60, 102], [M + 180, 104]] };
+  // The window, then a live read that has only the newest minute: it adds to the series and drops nothing.
+  let price = { t: (M + 180) * 1000, p: 104 };
   const timers: (() => void)[] = [];
-  const env: FeedEnv = { fetch: async () => ({ ok: true, json: async () => body }), now: () => (M + 245) * 1000,
-    setTimeout: (fn) => { timers.push(fn); return 0 as unknown as ReturnType<typeof setTimeout> }, clearTimeout: () => {} };
+  const env: FeedEnv = { fetch: async () => ({ ok: true, json: async () => ({ prices: [[M, 101], [M + 60, 102], [M + 180, 104]] }) }), now: () => (M + 245) * 1000,
+    setTimeout: (fn) => { timers.push(fn); return 0 as unknown as ReturnType<typeof setTimeout> }, clearTimeout: () => {}, live: async () => ({ head: { block: 1, time: M }, rounds: [], price }) };
   const feed = createPriceFeed(M * 1000, (M + 300) * 1000, env);
   feed.resume(); await new Promise((r) => setImmediate(r));
-  body = { prices: [[M + 240, 105]] };
+  price = { t: (M + 240) * 1000, p: 105 };
   timers.shift()!(); await new Promise((r) => setImmediate(r));
   assert.deepEqual(feed.points().map((p) => p.value ?? null), [101, 102, null, 104, 105, null]);
   assert.deepEqual(feed.last(), { t: (M + 240) * 1000, p: 105 });

@@ -9,6 +9,7 @@ import { commandBody, commandId, syncBody, syncRequestId, type EngineCommand, ty
 import { padBody } from "../../../adapters/vela/crypto/pad.ts";
 import { ASSOCIATEKEY, LOT, OPERATOR_KEYS_CHANGED, PROCESS, ZERO_ADDRESS, endpointAbi, engineRound, normalizeSignature, requestTypedData, type VerifiedOrderbook } from "../orderbook-manifest.ts";
 import { SUBTYPES, decodeCredit, decodePayout, decodeSettle, inboxAbi, usdcAbi, usdcPermitTypedData, vaultAbi } from "../vault.ts";
+import type { AccountPage, Live } from "../read-api.ts";
 
 export type Book = VerifiedOrderbook["manifest"];
 export type TypedData = ReturnType<typeof requestTypedData> | ReturnType<typeof usdcPermitTypedData>;
@@ -61,6 +62,9 @@ export interface Chain {
   paid(ordinal: bigint, fromBlock: bigint): Promise<Hex | null>;
   /** Resolve and void `settle` events of these engine rounds since Horizen block `fromBlock` (within the last 1,000 blocks). */
   settled(roundIds: Hex[], fromBlock: bigint): Promise<Settled[]>;
+  /** The read API's page of the account's requests with their receipts, newest first, below `before`; null to read the chain.
+   * Display only (indexedChain). */
+  requests?(account: Address, before?: { block: number; logIndex: number }, limit?: number): Promise<AccountPage | null>;
 }
 export interface HintStore { get(key: string): string | null; set(key: string, value: string): void }
 
@@ -159,8 +163,9 @@ export function sharesFor(pay: number, price: number): number {
 
 /** `wallet`: Base USDC at the account's own address, ready to deposit. `historyMore`: History has older blocks to read ("Load older"),
  * and `historyHours` is how far back it has read. `behind`: a deposit was credited after the last view was read, so the balance
- * shown is short until the next sync. */
-export type Snapshot = { unlocked: boolean; registered: boolean; view: View | null; fingerprint: string | null; actions: ActionState[]; history: HistoryEntry[]; historyMore: boolean; historyHours: number; wallet: bigint | null; error: string; behind: boolean };
+ * shown is short until the next sync. `cached`: `view` is the newest readable receipt the read API had, shown read-only while the
+ * unlock sync runs; `unlocked` is still false. */
+export type Snapshot = { unlocked: boolean; registered: boolean; view: View | null; fingerprint: string | null; actions: ActionState[]; history: HistoryEntry[]; historyMore: boolean; historyHours: number; wallet: bigint | null; error: string; behind: boolean; cached: boolean };
 /** One History page: about six hours of Horizen's ~1 s blocks. */
 export const HISTORY_PAGE = 21_600n;
 
@@ -168,9 +173,14 @@ export class PrivateAccount {
   readonly account: Address;
   #session: EvaluationSession;
   #queue: Promise<unknown> = Promise.resolve();
-  #state: Snapshot = { unlocked: false, registered: false, view: null, fingerprint: null, actions: [], history: [], historyMore: false, historyHours: 0, wallet: null, error: "", behind: false };
+  #state: Snapshot = { unlocked: false, registered: false, view: null, fingerprint: null, actions: [], history: [], historyMore: false, historyHours: 0, wallet: null, error: "", behind: false, cached: false };
   /** History read so far: blocks `oldest` to `head`, the account's requests there in chain order, and its request count at `head`. */
   #scan: { head: bigint; oldest: bigint; total: bigint; logged: Logged[] } | null = null;
+  /** History from the read API instead: its entries newest first, each with its log index (the next page's cursor), and whether
+   * older requests exist. */
+  #indexed: { items: { entry: HistoryEntry; logIndex: number }[]; more: boolean } | null = null;
+  /** An unlock is waiting for its sync: only then may a cached view be shown. */
+  #unlocking = false;
   #actionId = 0;
   #closed = false;
   /** Rounds whose result line was shown. */
@@ -233,18 +243,44 @@ export class PrivateAccount {
     if (hint && hint !== fingerprint) { this.#session.lock(); throw new PublicError(KEY_CHANGED); }
     this.#set({ fingerprint: fingerprint.slice(0, 16), error: "" });
     const register = async () => (await this.#send("Register key", ASSOCIATEKEY, toHex(await this.#session.associationPayload()))).step("done", "Key registered");
-    // Keys live in the operator's state, not on chain. But an account whose request nonce is still 0 has never sent a request, so it
-    // has no key: it registers first instead of sending a sync that can only fail (one relayed request and ~20 s less to set up).
-    if (!hint && await this.#chain.context(this.account).then((c) => c.nonce === 0n, () => false)) await register();
-    // Unlocked only once the key is registered and the first view is in: a refused first request leaves Set up / Unlock in place.
-    try { await this.#sync("Unlock"); }
-    catch (error) {
-      if (!(error instanceof PublicError) || error.code !== "NO_KEY") throw error;
-      await register();
-      await this.#sync("Unlock");
+    this.#unlocking = true;
+    void this.#cachedView().catch(() => undefined);
+    try {
+      // Keys live in the operator's state, not on chain. But an account whose request nonce is still 0 has never sent a request, so it
+      // has no key: it registers first instead of sending a sync that can only fail (one relayed request and ~20 s less to set up).
+      if (!hint && await this.#chain.context(this.account).then((c) => c.nonce === 0n, () => false)) await register();
+      // Unlocked only once the key is registered and the first view is in: a refused first request leaves Set up / Unlock in place.
+      try { await this.#sync("Unlock"); }
+      catch (error) {
+        if (!(error instanceof PublicError) || error.code !== "NO_KEY") throw error;
+        await register();
+        await this.#sync("Unlock");
+      }
+    } finally {
+      this.#unlocking = false;
+      // A cached view still shown here was never replaced by a fresh one: the unlock failed, so it goes.
+      if (this.#state.cached) this.#set({ view: null, cached: false });
     }
     this.#hints?.set(hintKey, fingerprint);
     this.#set({ unlocked: true, registered: true });
+  }
+
+  /** While the unlock sync runs: the view in the newest of this account's receipts the read API has that this key opens, shown
+   * read-only (`cached`). Display only: `unlocked` stays false, and it is not a fresh read (#readAt), so it suppresses no sync. */
+  async #cachedView() {
+    const page = await this.#chain.requests?.(this.account, undefined, 10);
+    for (const r of page?.requests ?? []) {
+      for (const ciphertext of r.ciphertexts) {
+        const o = await this.#session.openReceipt(ciphertext);
+        let view: View | null = null;
+        try { view = o.status === "readable" ? readView((o.envelope.body as ReceiptBody).view) : null; } catch { /* unreadable: the next one */ }
+        if (!view) continue;
+        const held = this.#state.view;
+        // Never over a fresh view: the sync may have landed first.
+        if (this.#unlocking && !this.#closed && (!held || view.sequence > held.sequence)) this.#set({ view, cached: true });
+        return;
+      }
+    }
   }
 
   sync(): Promise<ReceiptBody> { return this.#serial(() => this.#sync("Sync")); }
@@ -379,7 +415,7 @@ export class PrivateAccount {
           const body = r.envelope.body as ReceiptBody;
           const view = readView(body.view), held = this.#state.view;
           if (view && held && (view.sequence < held.sequence || view.nonce < held.nonce)) { stale = true; break; }
-          if (view) this.#set({ view, registered: true, behind: false });
+          if (view) this.#set({ view, registered: true, behind: false, cached: false });
           this.#readAt = this.#now();
           if (body.outcome) this.#collected(body.outcome);
           return { body, id };
@@ -640,9 +676,11 @@ export class PrivateAccount {
   /** History in pages of HISTORY_PAGE blocks, newest first, never below `floor`: the first open reads the latest page, a reopen only
    * the blocks since (none when the request count has not moved), and `older` the page before the oldest read. Receipts are
    * decrypted once each, under any request ID of this account (display only); unmatched ones stay listed as unreadable. `stop()`
-   * abandons the read (the page closed). */
+   * abandons the read (the page closed). The read API, when the chain has one, answers first, in pages of requests (#indexedHistory);
+   * any failure there reads the chain. */
   async loadHistory(floor: bigint, older = false, stop: () => boolean = () => false): Promise<void> {
     const quit = () => this.#closed || stop();
+    if (this.#chain.requests && (!older || this.#indexed) && (await this.#indexedHistory(floor, older, quit) || quit())) return;
     const page = (to: bigint) => ({ from: to - HISTORY_PAGE + 1n > floor ? to - HISTORY_PAGE + 1n : floor, to });
     try {
       let scan = this.#scan;
@@ -672,16 +710,43 @@ export class PrivateAccount {
     const scan = this.#scan;
     if (!scan) return;
     const entries: HistoryEntry[] = [];
-    for (const item of scan.logged) {
-      let body: ReceiptBody | null = null;
-      for (const ciphertext of item.ciphertexts) {
-        const r = await this.#session.openReceipt(ciphertext);
-        if (r.status === "readable") { body = r.envelope.body as ReceiptBody; break; }
-      }
-      entries.unshift({ requestId: item.requestId, block: item.block, txHash: item.txHash, readable: Boolean(body), text: body ? describeReceipt(body) : item.ciphertexts.length ? "Unreadable record" : "No private record" });
-    }
+    for (const item of scan.logged) entries.unshift(await this.#historyEntry(item));
     // Simplification: hours from block numbers at Horizen's ~1 s blocks, as the seven-day window is.
     this.#set({ history: entries, historyMore: scan.oldest > floor && BigInt(scan.logged.length) < scan.total, historyHours: Math.round(Number(scan.head - scan.oldest + 1n) / 3600) });
+  }
+
+  /** One History line: the first of the request's receipts this key opens. */
+  async #historyEntry(item: Logged): Promise<HistoryEntry> {
+    let body: ReceiptBody | null = null;
+    for (const ciphertext of item.ciphertexts) {
+      const r = await this.#session.openReceipt(ciphertext);
+      if (r.status === "readable") { body = r.envelope.body as ReceiptBody; break; }
+    }
+    return { requestId: item.requestId, block: item.block, txHash: item.txHash, readable: Boolean(body), text: body ? describeReceipt(body) : item.ciphertexts.length ? "Unreadable record" : "No private record" };
+  }
+
+  /** History from the read API: on opening its newest page, merged into what was read (a page that no longer reaches it starts again);
+   * `older` the page below the oldest read. A readable line is never decrypted again. False when the API did not answer. */
+  async #indexedHistory(floor: bigint, older: boolean, quit: () => boolean): Promise<boolean> {
+    const held = this.#indexed, last = held?.items.at(-1);
+    const page = await this.#chain.requests!(this.account, older && last ? { block: Number(last.entry.block), logIndex: last.logIndex } : undefined);
+    if (!page) { this.#indexed = null; return false; }
+    if (quit()) return true;
+    const keep = held && (older || page.requests.some((r) => held.items.some((x) => x.entry.requestId === r.requestId)));
+    const known = new Map((keep ? held.items : []).map((x) => [x.entry.requestId, x]));
+    const within = page.requests.filter((r) => r.block >= floor);
+    for (const r of within) {
+      if (known.get(r.requestId)?.entry.readable) continue;
+      known.set(r.requestId, { logIndex: r.logIndex, entry: await this.#historyEntry({ requestId: r.requestId, block: r.block, txHash: r.completed?.txHash ?? r.txHash, ciphertexts: r.ciphertexts }) });
+      if (quit()) return true;
+    }
+    const items = [...known.values()].sort((a, b) => a.entry.block === b.entry.block ? b.logIndex - a.logIndex : a.entry.block < b.entry.block ? 1 : -1);
+    // A reopen leaves the pages below as they were; a page reaching the seven-day floor has nothing older to show.
+    const more = within.length === page.requests.length && (older || !keep ? page.more : held.more);
+    this.#indexed = { items, more };
+    const oldest = items.at(-1)?.entry.block ?? BigInt(page.head.block);
+    this.#set({ history: items.map((x) => x.entry), historyMore: more, historyHours: Math.round(Number(BigInt(page.head.block) - oldest + 1n) / 3600) });
+    return true;
   }
 }
 
@@ -718,6 +783,26 @@ const authAbi = [
   { type: "function", name: "getTeeSigner", stateMutability: "view", inputs: [], outputs: [{ type: "address" }] },
   { type: "function", name: "getPubSecp521r1", stateMutability: "view", inputs: [], outputs: [{ type: "bytes" }] },
 ] as const;
+
+/** `chain` with the read API first where only display depends on it: History and the cached Portfolio (`requests`, POST /v1/account)
+ * and held rounds' results (`settled`, from the page's shared /v1/live read). Every money path and every request in flight still
+ * reads the chain. A failed API read falls back to the chain read, which for results runs at most every 5 s, as before. */
+export function indexedChain(chain: Chain, api: { account: NonNullable<Chain["requests"]>; live: () => Promise<Live | null> }, now: () => number = Date.now): Chain {
+  let fallback: { at: number; key: string; answer: Promise<Settled[]> } | null = null;
+  return {
+    ...chain,
+    requests: (account, before, limit) => api.account(account, before, limit),
+    async settled(roundIds, fromBlock) {
+      const wanted = roundIds.map((id) => id.toLowerCase() as Hex), live = await api.live();
+      const rounds = new Map((live?.rounds ?? []).map((r) => [r.registryRoundId, r]));
+      // /v1/live holds the previous, current and next rounds: the only ones whose result the client reads.
+      if (wanted.every((id) => rounds.has(id))) return wanted.flatMap((id) => { const s = rounds.get(id)!.settle; return s ? [{ roundId: id, outcome: s.outcome }] : []; });
+      const key = wanted.join(), t = now();
+      if (!fallback || fallback.key !== key || t - fallback.at >= 5_000) fallback = { at: t, key, answer: chain.settled(roundIds, fromBlock) };
+      return fallback.answer;
+    },
+  };
+}
 
 export function viemChain(client: PublicClient, book: Book, base: PublicClient, options: { sleep?: (ms: number) => Promise<void> } = {}): Chain {
   const { app, endpoint } = eventsOf(book);
