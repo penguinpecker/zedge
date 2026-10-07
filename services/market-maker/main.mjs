@@ -24,7 +24,7 @@ export function mainnetDeployment(book) {
   if (book?.kind !== "zedge-private-orderbook" || book.chainId !== CHAIN) fail("public/deployments/26514-orderbook.json is not Horizen's order-book manifest");
   if (book.status !== "configured") fail("the order-book manifest is planned: nothing is deployed to quote on yet");
   return {
-    rpc: "https://26514.rpc.thirdweb.com", crossCheckRpc: "https://horizen.calderachain.xyz/http", baseRpc: "https://mainnet.base.org",
+    rpc: HORIZEN_RPC, crossCheckRpc: "https://horizen.calderachain.xyz/http", baseRpc: "https://mainnet.base.org",
     endpoint: book.endpoint.address, authenticator: book.authenticator.address, trigger: book.trigger.address, registry: book.trigger.registry,
     applicationId: book.application.id, applicationFingerprint: book.application.wasmSha256, origin: book.application.origin, epoch: book.application.epoch,
     house: book.application.house, keyFile: `${homedir()}/.config/zedge/house.key`, minFeeWei: BigInt(book.endpoint.minFeePerRequestWei),
@@ -32,6 +32,8 @@ export function mainnetDeployment(book) {
   };
 }
 const committedBook = () => JSON.parse(readFileSync(new URL("../../public/deployments/26514-orderbook.json", import.meta.url), "utf8"));
+// The thirdweb Horizen gateway is rate-limited without a client id; the operator keeps it in a private file.
+const HORIZEN_RPC = (() => { try { const id = readFileSync(`${homedir()}/.config/zedge/thirdweb.id`, "utf8").trim(); if (/^[0-9a-f]{32}$/.test(id)) return `https://26514.rpc.thirdweb.com/${id}`; } catch {} return "https://26514.rpc.thirdweb.com"; })();
 const USAGE = "usage: main.mjs <run [--dry-run] | status | deposit <usdc> | withdraw <usdc>> (--mainnet | --fork http://127.0.0.1:<port>) [--settings <file>]";
 const COINBASE = "https://api.exchange.coinbase.com/products/BTC-USD", KRAKEN = "https://api.kraken.com/0/public/Ticker?pair=XBTUSD";
 
@@ -50,7 +52,7 @@ export function queueFull(queue, op) { return queue >= (op === "cancel_all" ? 9n
 /** --mainnet, or --fork with a loopback http URL. Nothing else runs. */
 export function target(a) {
   if (a.mainnet && a.fork !== undefined) fail("pass one of --mainnet and --fork, not both");
-  if (a.mainnet) return { mode: "mainnet", rpc: "https://26514.rpc.thirdweb.com" };
+  if (a.mainnet) return { mode: "mainnet", rpc: HORIZEN_RPC };
   if (a.fork === undefined) fail("refusing to run without --mainnet or --fork http://127.0.0.1:<port>");
   let u;
   try { u = new URL(a.fork); } catch { fail(`--fork: not a URL: ${a.fork}`); }
@@ -462,9 +464,10 @@ async function main(argv) {
       if (await step()) return;
       errors = 0;
     } catch (e) {
-      if (e.refused || ++errors >= 5) throw e; // five failed loops in a row stop the bot
-      log("error", { message: e.shortMessage ?? e.message });
-      await nap();
+      const limited = /429|Too Many Requests|rate limit/i.test(`${e.shortMessage ?? ""} ${e.message ?? ""} ${e.info?.responseStatus ?? ""}`);
+      if (e.refused || (!limited && ++errors >= 5)) throw e; // five failed loops in a row stop the bot; a rate limit only slows it
+      log("error", { message: e.shortMessage ?? e.message, limited });
+      await (limited ? new Promise((r) => setTimeout(r, 30_000)) : nap());
     }
   }
 }
