@@ -3,7 +3,7 @@ import { ArrowDownRight, ArrowSquareOut, ArrowUpRight, ArrowsClockwise, CaretLef
 import AccountDrawer, { type DrawerView } from "./AccountDrawer";
 import type { MarketFeed } from "./LiveChart.tsx";
 import SiteFooter from "../components/SiteFooter";
-import { DEFAULT_NETWORK, isNetworkId, NETWORKS, parseAtomicAmount, type NetworkId } from "./networks.ts";
+import { BASE_RPC, DEFAULT_NETWORK, isNetworkId, NETWORKS, parseAtomicAmount, type NetworkId } from "./networks.ts";
 import { useChainWallet, WalletBoundary, type ChainWallet } from "./privy.tsx";
 import { buyLimit, fairUp, realizedSigma, sellLimit, stakeRoom } from "./fair.ts";
 import { checkDeployment, checkOrderbook, loadManifest, loadOrderbook, observationPrice, exactObservationPrice, PHASES, priceCaptions, readChain, readRound, type ChainSnapshot, type RoundRead } from "./gateway.ts";
@@ -12,7 +12,7 @@ import { usePrivate, type PrivateState } from "./private/use-private.ts";
 import { ActionLine, PrivateHistory, PrivateOrders, PrivatePortfolio, shares, usdc } from "./PrivatePanels.tsx";
 import { sharesFor } from "./private/client.ts";
 import type { DeploymentManifest, VerifiedDeployment } from "./manifest.ts";
-import { STREAMS_MISMATCH_REASON, STREAMS_PLANNED_REASON, STREAMS_RPCS, StreamsMismatchError } from "./streams-manifest.ts";
+import { STREAMS_MISMATCH_REASON, STREAMS_PLANNED_REASON, StreamsMismatchError } from "./streams-manifest.ts";
 import { rpcCooldownRemaining } from "./rpc.ts";
 import { createVerificationCache, verificationIsFresh, type ReadOnlyVerification } from "./verification-cache.ts";
 import "./chain.css";
@@ -24,7 +24,7 @@ const verificationCache = createVerificationCache<VerifiedDeployment | null>();
 const orderbookCache = createVerificationCache<VerifiedOrderbook | null>();
 const verificationTime = (value: number) => new Date(value).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "UTC" });
 function cooldownRemaining(network: NetworkId) {
-  return Math.max(rpcCooldownRemaining(NETWORKS[network].rpcUrls.default.http[0]), network === 26514 ? rpcCooldownRemaining(STREAMS_RPCS.base) : 0);
+  return Math.max(rpcCooldownRemaining(NETWORKS[network].rpcUrls.default.http[0]), network === 26514 ? rpcCooldownRemaining(BASE_RPC) : 0);
 }
 function networkError(network: NetworkId) {
   const remaining = cooldownRemaining(network);

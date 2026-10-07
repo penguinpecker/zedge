@@ -180,7 +180,7 @@ test("RPC transports refuse altered or unreviewed endpoint strings", (t) => {
   for (const url of [
     "https://attacker.example", `${horizen}?key=secret`, `${horizen}/`,
     "https://user:password@horizen.calderachain.xyz/http", "http://horizen.calderachain.xyz/http",
-    "https://mainnet.base.org", "javascript:alert(1)", "",
+    "https://base.llamarpc.com", "javascript:alert(1)", "",
   ]) {
     assert.throws(() => rpcTransport(url), /Unreviewed RPC endpoint/);
     assert.throws(() => rpcCooldownRemaining(url), /Unreviewed RPC endpoint/);

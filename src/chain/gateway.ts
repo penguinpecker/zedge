@@ -1,7 +1,7 @@
 import { createPublicClient, erc20Abi, formatUnits, isHash, parseAbi, type Address, type Hex, type Abi, type PublicClient } from "viem";
 import { registryReadAbi, oracleReadAbi } from "./abi.ts";
 import { streamsRegistryReadAbi } from "./streams-abi.ts";
-import { STREAMS_RPCS, verifyRegistryControl, verifyStreamsDeployment, type StreamsChainId, type StreamsManifest, type StreamsReader } from "./streams-manifest.ts";
+import { verifyRegistryControl, verifyStreamsDeployment, type StreamsChainId, type StreamsManifest, type StreamsReader } from "./streams-manifest.ts";
 import { parseOrderbookManifest, verifyOrderbook, type OrderbookManifest, type VerifiedOrderbook } from "./orderbook-manifest.ts";
 import { BASE_RPC, NETWORKS, type NetworkId } from "./networks.ts";
 import { parseManifest, verifyDeployment, type DeploymentManifest, type VerifiedDeployment } from "./manifest.ts";
@@ -58,7 +58,7 @@ export async function checkDeployment(manifest: DeploymentManifest, snapshot: Ch
   const client = chainClient(snapshot.chainId);
   let result: VerifiedDeployment;
   if (manifest.schemaVersion === 3) {
-    const source = createPublicClient({ transport: rpcTransport(STREAMS_RPCS.base) });
+    const source = createPublicClient({ transport: rpcTransport(BASE_RPC) });
     const sourceBlock = await source.getBlock();
     if (sourceBlock.number === null || !sourceBlock.hash) throw new Error("Base oracle network is unavailable.");
     fresh(sourceBlock.timestamp);
