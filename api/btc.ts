@@ -11,7 +11,7 @@ const KEEP = 120; // minutes kept; the chart reads at most 90 (two rounds and th
 const FETCH = 40; // transactions read per refresh at most; a cold instance fills the rest over the next refreshes
 const REFRESH_MS = 3_000; // at most one Solana refresh per instance per 3 s, whatever the traffic
 const RELIST_MS = 60_000; // a minute still missing from a filled window is looked for again at most once a minute
-// ponytail: memory per warm instance: a cold one starts empty and fills the window over its first refreshes; move
+// Simplification: memory per warm instance: a cold one starts empty and fills the window over its first refreshes; move
 // `prices` to the Upstash Redis the relay already uses if cold starts show.
 const prices = new Map<number, number>(); // minute (unix s) → USD
 const checked = new Set<string>(); // transactions read: one does not change

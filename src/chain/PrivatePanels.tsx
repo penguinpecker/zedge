@@ -72,7 +72,7 @@ export function PrivatePortfolio({ priv, book, chainNow, openRound, onDeposit }:
   let quantity = 0;
   try { quantity = amount ? Number(parseAtomicAmount(amount, 6)) : 0; } catch { quantity = -1; }
   const mintable = quantity > 0 && quantity % LOT === 0 && quantity <= view.cash;
-  // ponytail: Redeem waits until the closing price can be recorded (end + observation window), when a round is normally settled;
+  // Simplification: Redeem waits until the closing price can be recorded (end + observation window), when a round is normally settled;
   // gate it on the rounds the results check reports as settled once the client exposes them.
   const settleAfter = 900 + book.application.engine.oracle.observationWindow;
   return <div className="chain-private-list">

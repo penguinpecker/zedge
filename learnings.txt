@@ -1,18 +1,15 @@
 ZEDGE — HORIZEN / VELA SDK AND CONFIDENTIAL TRADING LEARNINGS
 Source review date: 2026-10-04 (Asia/Kolkata)
 
-CURRENT HANDOFF STATUS — 2026-10-04
-----------------------------------
-Read the local handoff document (kept out of the repository) for the complete
-takeover guide, deployed addresses, commands, privacy boundaries, completed work
-and remaining acceptance criteria. The latest user instruction pauses
-implementation for a handoff and this learning-log update. The preceding request
-to keep implementing is superseded.
+STATUS SNAPSHOT — 2026-10-04 (historical; later dated sections supersede it)
+--------------------------------------------------------------------------
+The maintainers keep operational details (deployed addresses, commands, completed
+work and acceptance criteria) outside this repository.
 
 Last implementation commit: 0715b4be07369e921aae777a3783d0a8787b61a2
 Branch: feat/production-core; draft PR https://github.com/penguinpecker/zedge/pull/1
 That exact commit has 17/17 successful GitHub checks; it is not assumed merged
-into main. This handoff documentation is subsequent to that tested code baseline.
+into main.
 
 Four public oracle/round contracts are deployed on Base and Horizen. The V1 demo
 is preserved; ?mode=chain verifies and reads the real deployed route. The keeper
@@ -29,7 +26,7 @@ engine is protocol v3. See "Audit and fix program — 2026-10-05" at the end.]
 
 The entries below are chronological research/engineering notes. Earlier statements
 about unconfigured contracts, Pyth, the old engine or a failed browser visit are
-historical; use dated later evidence and the handoff for the current state.
+historical; use dated later evidence for the current state.
 
 Purpose
 -------
@@ -548,14 +545,10 @@ bounded read-only verification freshness and hidden-tab pause are availability
 requirements; they do not make the public endpoint a production availability SLA.
 
 
-Final production follow-up and handoff — 2026-10-04
+Production follow-up — 2026-10-04
 ------------------------------------------------
-Implementation is paused at the user's request. The local handoff document
-records the complete repository/branch/PR state, selected design, deployment
-identities, architecture, source map, test commands, known issues and prioritized
-remaining work. No new implementation, keeper activation, contract signing or
-deployment was performed as part of this handoff task. The documentation contains
-locations and variable names only, never credentials.
+Implementation paused at this point. No keeper activation, contract signing or
+deployment was performed in this step.
 
 Selected product: V1, branded ZEDGE with the colored Z. Preserve saved alternative
 versions. This is a collateralized binary prediction-share market, not perps.
@@ -565,9 +558,7 @@ production ledger. Gas is ETH on both Base and the current Horizen L3; the pinne
 six-decimal collateral is Stargate USDC.e, not Circle-native USDC.
 
 Final production UI: https://zedge-markets.vercel.app/?mode=chain
-Immutable build:
-https://edge-markets-v1-p8pm4zsrn-penguinpeckers-projects.vercel.app
-Vercel deployment: dpl_GMcZi5DWQPcPa2adBvPJtQk6kv4z, production READY.
+Production deployment: READY.
 Code baseline: 0715b4be07369e921aae777a3783d0a8787b61a2.
 
 The earlier production visit at about 12:26 UTC genuinely failed because the
@@ -645,7 +636,7 @@ Chainlink subscription credentials and a supported/permitted production Vela
 environment remain external gates. An Etherscan key or extra wallet ETH supplies
 neither. No vendor contact, grant submission or subscription purchase occurred.
 
-Handoff precision notes from the final internal cross-check:
+Precision notes from the internal cross-check:
 - Evidence must execute on chain by the opening/resolution deadline, inclusive;
   broadcasting before the deadline does not ensure timely inclusion. Trading
   ends strictly at cutoff, and void is strictly after its applicable deadline.
@@ -951,7 +942,7 @@ profit by forcing the void, and the winners then receive half of what they
 were owed. An ordinary outage of about eight minutes (report service, keeper
 endpoints, bridge) now also ends in a final void.
 Open item: stake limits on the total exposure of all rounds closing at the
-same boundary, or a test-only launch, before real money. Not built.
+same boundary: built in the order-book engine (adapters/vela/guest/README.md, section 9).
 
 Keeper rule decided the same day for an opened round past voidableAfter with
 no cached closing price: first relay it (if Base holds the observation) or

@@ -101,7 +101,7 @@ test("signatures are normalized to 65 bytes with v 27 or 28, so every wallet kin
 
 test("engine round IDs are computed offline exactly as the registry and the guest compute them", () => {
   const round = engineRound(book, 1_791_301_500);
-  // The live round that opened at 21:15 IST on 2026-10-06 (records.txt).
+  // The live round that opened at 21:15 IST on 2026-10-06.
   assert.equal(round.spec.registryRoundId, "0xc493319ec34e01cc4ced23a97543c50cefd4dc4d85a3dc502814b10256b3a3eb");
   assert.deepEqual([round.spec.cutoff, round.spec.openingDeadline, round.spec.voidableAfter], [1_791_302_370, 1_791_301_710, 1_791_302_760]);
   assert.match(round.id, /^[0-9a-f]{64}$/);

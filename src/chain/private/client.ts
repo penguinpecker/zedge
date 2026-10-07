@@ -546,7 +546,7 @@ export class PrivateAccount {
         if (h && !this.#reported.has(r.id)) ended.set(r.spec.registryRoundId.toLowerCase() as Hex, { id: r.id, h, end: r.spec.end });
       }
       if (!ended.size) return;
-      // ponytail: 900 s stands for the 1,000-block window at Horizen's ~1 s blocks; an older round's event can no longer be read.
+      // Simplification: 900 s stands for the 1,000-block window at Horizen's ~1 s blocks; an older round's event can no longer be read.
       const readable = [...ended].filter(([, e]) => now - e.end < 900).map(([key]) => key);
       let found: Settled[] = [], failed = false;
       if (readable.length) {
@@ -635,7 +635,7 @@ export class PrivateAccount {
       if (body?.view) nonce = body.view.nonce;
       entries.unshift({ requestId: item.requestId, block: item.block, txHash: item.txHash, readable: Boolean(body), text: body ? describeReceipt(body) : item.ciphertexts.length ? "Unreadable record" : "No private record" });
     }
-    // ponytail: hours from block numbers at Horizen's ~1 s blocks, as the seven-day window is.
+    // Simplification: hours from block numbers at Horizen's ~1 s blocks, as the seven-day window is.
     this.#set({ history: entries, historyMore: scan.oldest > floor && BigInt(scan.logged.length) < scan.total, historyHours: Math.round(Number(scan.head - scan.oldest + 1n) / 3600) });
   }
 }
@@ -737,7 +737,7 @@ export function viemChain(client: PublicClient, book: Book, base: PublicClient, 
         count += BigInt(logs.length);
         return { toBlock, fromBlock, logs };
       }), sleep, stop, () => count >= want)).filter((c) => c.logs.length);
-      // ponytail: a receipt is read in its request's chunk and the next one (1,000-2,000 blocks); a completion slower than that is
+      // Simplification: a receipt is read in its request's chunk and the next one (1,000-2,000 blocks); a completion slower than that is
       // listed as "No private record". Topic lists stay at 50 IDs.
       const reads: (() => Promise<{ requestId: Hex; txHash: Hex; data: Hex }[]>)[] = [];
       for (const { fromBlock: low, toBlock: high, logs } of found) {
