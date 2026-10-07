@@ -10,6 +10,7 @@
 set -u
 hold() { echo "manager-start: HOLD: $*" >&2; exec sleep 2147483647; }
 lc() { printf %s "$1" | tr A-Z a-z; }
+[ -z "${VELA_HOLD:-}" ] || hold "VELA_HOLD is set" # the operator's pause switch: unset it and redeploy to start
 [ -f /vela/.copy-verified ] || hold "no verified database on /vela"
 want=$(lc "${VELA_MANAGER_ADDRESS:?}")
 k=${MANAGER_KEY_SECP256:-}; unset MANAGER_KEY_SECP256
