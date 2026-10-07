@@ -1072,3 +1072,23 @@ Going live: endpoints, sign-in and price display — 2026-10-07
   The site must keep showing what does not depend on Horizen (chart, funding) while it waits.
 - After a Vercel deploy the CDN can serve the previous index.html for a few requests. Verify a deploy with
   cache-control: no-cache and several requests, matching the bundle hash.
+
+Order-book liquidity and the operator's endpoint — 2026-10-07
+- The engine matches an order only against the same outcome on the opposite side; there is no Up-against-Down
+  complement match. A Buy Up fills only against a resting Sell Up, so the house must hold shares, which it gets by
+  minting. With 20 USDC and a 40-set mint the house never minted, rested bids only, and no user buy could fill. The
+  house now mints just the shares an ask lacks when it is short of cash.
+- Slow or unfilled trades looked like the house bot requoting too often. The cause was the operator: Caldera's public
+  endpoint cut the operator's network off for about 12 minutes in every 15 ("Bandwidth limit exceeded", Retry-After
+  900), and nothing private moved meanwhile. Read the operator's own log for 429s before tuning anything downstream.
+  The operator now falls back to thirdweb's public gateway while Caldera rests.
+- Two gateways do not share pending transactions. A send accepted by one is invisible on the other until it is mined,
+  and a resend there answers "already known". Treat "already known" as proof the transaction is held, and look a send
+  up on every gateway, or a retry layer reports a failure for a transaction that will mine.
+- A script bind-mounted into a container runs on the container's next restart, planned or not. Once it is edited,
+  either restart deliberately or put the old file back.
+- A refusal for "insufficient available" cash or shares after a user fill only means the bot's view was stale; the
+  refusal's receipt carries the true view. Counting it toward a stop limit made the house stop quoting after a few fills.
+- At 20 USDC with 10-share quotes, a fast BTC move makes the house cancel every quote about once a minute and place
+  them back one request (about 20 s) at a time, so one side is often missing. Depth needs capital, or a replace that
+  places the new quote before cancelling the old one.
