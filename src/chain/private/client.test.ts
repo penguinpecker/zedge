@@ -284,6 +284,40 @@ test("a book order's collect sync goes out as soon as the order is submitted, be
   assert.equal(account.snapshot.actions.find((a) => a.action === "Buy Up")?.text, "Filled");
 });
 
+test("a collect sync the relayer refuses at once (IN_FLIGHT) leaves the collection to after the tick: the result still shows, one sync reaches the operator", async () => {
+  let log: string[] = [], refused = 0;
+  const s = await stack({ relayRefuses: () => log.at(-1) === "place_order" && refused < 1 ? (refused++, { code: "IN_FLIGHT" }) : null });
+  log = s.log;
+  const { account, phases } = open(s, wallet());
+  await account.unlock();
+  s.fund(account.account, 10_000_000);
+  const before = s.sent.length;
+  await account.placeOrder(ORDER);
+  assert.deepEqual([refused, s.sent.length - before, s.log.slice(-2)], [1, 3, ["place_order", "sync"]], "the order, the refused sync, then one collect after the tick");
+  assert.deepEqual(phases("Buy Up").slice(3), ["Waiting for the operator", "Staged", "Matching", "Collecting result", "Filled"], "the refusal never shows on the order");
+});
+
+test("a book command whose wait fails holds the queue until its collect sync is on chain: the next request never signs at that sync's nonce", async () => {
+  const s = await stack(), { account } = open(s, wallet());
+  await account.unlock();
+  s.fund(account.account, 10_000_000);
+  const post = s.relay.post.bind(s.relay), completion = s.chain.completion;
+  let release!: () => void, order: Hex | undefined;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  // The order goes through; its collect sync is held at the relayer; the operator fails the order in public.
+  s.relay.post = async (b) => { if (order) await gate; const a = await post(b); order ??= a.ok ? a.requestId : undefined; return a; };
+  s.chain.completion = async (id, from) => { const c = await completion(id, from); return c && id === order ? { ...c, status: 1, errorCode: 2, errorMessage: "malformed envelope" } : c; };
+  let settled = false;
+  const placed = account.placeOrder(ORDER).catch((e: Error) => e).finally(() => { settled = true; });
+  const next = account.sync();
+  for (let i = 0; i < 50; i++) await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual([settled, s.log.at(-1)], [false, "place_order"], "neither the failure nor the next request before the sync is sent");
+  release();
+  assert.match((await placed as Error).message, /^Failed: malformed envelope/);
+  await next;
+  assert.deepEqual(s.log.slice(-3), ["place_order", "sync", "sync"], "the collect sync, then the next request at the nonce after it");
+});
+
 test("a nonce the sweep spent is re-signed once with a fresh authorization; a refusal is shown as such", async () => {
   const s = await stack(), signer = wallet();
   const { account, phases } = open(s, signer);

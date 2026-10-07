@@ -419,13 +419,14 @@ export class PrivateAccount {
         let outcome: Outcome | undefined;
         const capture = (o: Outcome) => { outcome = o; };
         if (book) this.#awaiting.set(c.id, capture);
+        let piped: Promise<Submitted | null> | null = null;
         try {
           const sent = await this.#submit(label, PROCESS, toHex(await this.#session.encryptCommand(c.id, padBody(this.#session, c.id, commandBody(c)))));
           // A book command's collect sync goes out as soon as the command is submitted, at the next request nonce: the operator
           // serves ticks first, so it runs the command, its tick and the sync back to back, and the sync's receipt brings the result.
           // A sync that cannot go out now leaves the collection to after the tick, as before.
-          // Simplification: if the command's own wait fails, the piped sync is not waited for; its receipt is then not read here.
-          let piped: Promise<Submitted | null> | null = book ? this.#sendSync("Collect result", { ...sent.ctx, nonce: sent.ctx.nonce + 1n }).catch(() => null) : null;
+          // Simplification: if the command's own wait fails, the piped sync's receipt is not read here (see finally).
+          piped = book ? this.#sendSync("Collect result", { ...sent.ctx, nonce: sent.ctx.nonce + 1n }).catch(() => null) : null;
           /** The piped sync's receipt, read once; null when none went out. */
           const collect = async () => { const p = await piped; piped = null; return p && this.#syncDone(p); };
           const done = await this.#finish(sent);
@@ -466,6 +467,8 @@ export class PrivateAccount {
         } finally {
           // Nobody reads `outcome` past here: a result that comes later gets a line of its own.
           if (this.#awaiting.get(c.id) === capture) this.#awaiting.delete(c.id);
+          // A failure left the piped sync unread: until it is on chain or refused, the next request would sign at its nonce.
+          await piped;
         }
       }
     });
