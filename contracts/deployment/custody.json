@@ -1,18 +1,18 @@
 {
   "schemaVersion": 1,
   "kind": "zedge-custody",
-  "status": "planned",
+  "status": "deployed",
   "deployer": "0x279173ac297ad146bc92f877552c8c2b78334d07",
   "owner": "0x279173ac297ad146bc92f877552c8c2b78334d07",
-  "signer": "0x0000000000000000000000000000000000000000",
+  "signer": "0xbd8543eaea45395d444d270bb9450f2a70d61839",
   "plannedFrom": {
     "base": {
       "nonce": 5,
-      "block": 52267927
+      "block": 52282970
     },
     "horizen": {
       "nonce": 16,
-      "block": 27927918
+      "block": 27958006
     }
   },
   "limits": {

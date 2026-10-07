@@ -17,8 +17,15 @@ const book = parseOrderbookManifest(configured()) as ConfiguredOrderbook;
 const word = (t: string) => keccak256(stringToHex(t));
 const words = (...w: bigint[]): Hex => concat(w.map((x) => `0x${x.toString(16).padStart(64, "0")}` as Hex));
 
-test("the committed manifest is planned (nothing deployed yet); a configured one pins the engine, the trigger, Chainlink and the vault", () => {
-  assert.deepEqual(parseOrderbookManifest(committed), { schemaVersion: 3, kind: "zedge-private-orderbook", chainId: 26514, status: "planned", release: committed.release });
+test("the committed manifest is the live deployment; a configured one pins the engine, the trigger, Chainlink and the vault", () => {
+  const live = parseOrderbookManifest(committed);
+  assert.equal(live.status, "configured");
+  if (live.status !== "configured") return;
+  assert.equal(live.application.id, "7408397676477227659");
+  assert.equal(live.trigger.address, "0x9ca46470b05350384c31c8b236af4df638cbb30d");
+  assert.equal(live.custody.vault.address, "0xf07b81d96b572007c8ea500db1f8095cf0c73d29");
+  assert.equal(live.custody.vault.signer, "0xbd8543eaea45395d444d270bb9450f2a70d61839");
+  assert.equal(live.relayer.facilitator, "0x9336887b575f11da697f53614d0f2a262dded024");
   assert.equal(book.status, "configured");
   assert.equal(book.application.engine.authority, book.trigger.address);
   assert.equal(book.application.engine.collateral, "0xdf7108f8b10f9b9ec1aba01cca057268cbf86b6c", "the engine's collateral stays the registry's: its rules hash commits to it");
@@ -182,7 +189,7 @@ const verifiable = () => {
 test("verification passes on the deployment as read, and fails closed on a new executor key, a rebinding, another vault signer or an upgrade", async () => {
   const m = verifiable();
   assert.equal((await verifyOrderbook(m, streams, ...readers())).verified, true);
-  await assert.rejects(verifyOrderbook(parseOrderbookManifest(committed), streams, ...readers()), /not open yet/);
+  await assert.rejects(verifyOrderbook(parseOrderbookManifest({ schemaVersion: 3, kind: "zedge-private-orderbook", chainId: 26514, status: "planned", release: committed.release }), streams, ...readers()), /not open yet/);
   for (const [field, value] of [[`${m.authenticator.address}:getPubSecp521r1`, `0x04${"7".repeat(264)}`], [`${m.authenticator.address}:getTeeSigner`, RELAYER], [`${m.authenticator.address}:owner`, RELAYER]] as const) {
     await assert.rejects(verifyOrderbook(m, streams, ...readers({ [field]: value })), (e: Error) => e instanceof StreamsMismatchError && e.message === OPERATOR_KEYS_CHANGED, field);
   }

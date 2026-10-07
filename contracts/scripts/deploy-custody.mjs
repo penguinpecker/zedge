@@ -24,7 +24,7 @@ import { loadAccount } from './broadcast-hybrid.mjs';
 
 export const DEPLOYER = '0x279173ac297ad146bc92f877552c8c2b78334d07';
 export const RELEASE = resolve(CONTRACTS, 'deployment/custody.json');
-const RPC = { base: 'https://base-rpc.publicnode.com', horizen: 'https://26514.rpc.thirdweb.com' };
+const RPC = { base: 'https://mainnet.base.org', horizen: 'https://26514.rpc.thirdweb.com' }; // publicnode refuses older receipts
 const CHAIN = { base: 8453, horizen: 26514 };
 // Owner-adjustable later with setLimits. 1-500 USDC per deposit, 1,000 per payout, 10,000 of payouts a day.
 export const LIMITS = { minDeposit: 1_000_000n, maxDeposit: 500_000_000n, maxPayout: 1_000_000_000n, dailyPayoutCap: 10_000_000_000n };
