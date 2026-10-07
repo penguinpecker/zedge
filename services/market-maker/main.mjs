@@ -24,7 +24,7 @@ export function mainnetDeployment(book) {
   if (book?.kind !== "zedge-private-orderbook" || book.chainId !== CHAIN) fail("public/deployments/26514-orderbook.json is not Horizen's order-book manifest");
   if (book.status !== "configured") fail("the order-book manifest is planned: nothing is deployed to quote on yet");
   return {
-    rpc: HORIZEN_RPC, crossCheckRpc: "https://horizen.calderachain.xyz/http", baseRpc: BASE_RPC,
+    rpc: HORIZEN_RPC, crossCheckRpc: null, baseRpc: BASE_RPC, // Caldera's public endpoint refuses this network, so its cross-check skipped every round
     endpoint: book.endpoint.address, authenticator: book.authenticator.address, trigger: book.trigger.address, registry: book.trigger.registry,
     applicationId: book.application.id, applicationFingerprint: book.application.wasmSha256, origin: book.application.origin, epoch: book.application.epoch,
     house: book.application.house, keyFile: `${homedir()}/.config/zedge/house.key`, minFeeWei: BigInt(book.endpoint.minFeePerRequestWei),

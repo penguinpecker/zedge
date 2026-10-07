@@ -24,7 +24,7 @@ node --experimental-strip-types services/market-maker/main.mjs <command> (--main
 
 The bot refuses to start unless exactly one target is named:
 
-- **`--mainnet`** uses the deployment in the committed order-book manifest, `public/deployments/26514-orderbook.json` (read at start; refused while it is `planned`). It sends through `https://26514.rpc.thirdweb.com` and reads Base through `https://base-rpc.publicnode.com`. An opening taken from the registry (the fallback) is checked once more on `https://horizen.calderachain.xyz/http`: one read per round, at most three tries.
+- **`--mainnet`** uses the deployment in the committed order-book manifest, `public/deployments/26514-orderbook.json` (read at start; refused while it is `planned`). It sends through `https://26514.rpc.thirdweb.com` (keyed with `~/.config/zedge/thirdweb.id` when present) and reads Base through Alchemy (`~/.config/zedge/alchemy.key`) or `https://mainnet.base.org`. An opening taken from the registry is not cross-checked on a second endpoint: Caldera's public one refused the operator's network and the bot skipped every round.
 - **`--fork <url>`** takes only `http://127.0.0.1`, `localhost` or `[::1]`. The node must answer `web3_clientVersion` as Anvil and serve chain 26514, so a real node is refused even on a loopback address. A fork needs a settings file with a `fork` section.
 
 Run with Node 22 or later. The bot imports `adapters/vela/crypto` (`session.ts`, `guest.ts`, `pad.ts`, and their `ethers` and `@horizen/vela-common-ts`) the same way `demo-house.mjs` and `fork-round.mjs` do, so run `npm ci` in `adapters/vela/crypto` first.
