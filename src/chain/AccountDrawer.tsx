@@ -129,7 +129,7 @@ export default function AccountDrawer({ view, onView, onClose, network, wallet, 
   return (
     <dialog ref={dialog} className="chain-drawer" aria-labelledby={titleId} onCancel={(event) => { event.preventDefault(); onClose(); }}>
       <div className="chain-drawer-heading">
-        <div><span className="eyebrow">ZEDGE · {network === 2651420 ? "TESTNET" : live ? "MAINNET" : "MAINNET READ-ONLY"}</span><h2 id={titleId}>{title}</h2></div>
+        <div><span className="eyebrow">ZEDGE · {network === 2651420 ? "TESTNET" : "MAINNET"}</span><h2 id={titleId}>{title}</h2></div>
         <button className="icon-button" onClick={onClose} aria-label="Close account drawer"><X size={22} /></button>
       </div>
       <nav className="chain-drawer-nav" aria-label="Account sections">
