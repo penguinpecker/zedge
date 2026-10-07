@@ -110,7 +110,9 @@ export function plan(view, round, now, p, s) {
   for (const [outcome, side] of [["up", "sell"], ["down", "sell"], ["up", "buy"], ["down", "buy"]]) {
     if (mine.some((o) => o.outcome === outcome && o.side === side)) continue;
     const order = { op: "place_order", roundId: round.id, outcome, side, price: q[outcome][side === "sell" ? "ask" : "bid"], quantity: Q, tif: "gtc", expiry };
-    const mint = side === "sell" && held[outcome] < Q ? { op: "mint", roundId: round.id, quantity: s.mintSets * SHARE } : null;
+    // mintSets sets, or only the shares this ask lacks when cash is short, so a small house still rests asks
+    const lack = side === "sell" && held[outcome] < Q ? (v.cash >= s.mintSets * SHARE ? s.mintSets * SHARE : Q - held[outcome]) : 0;
+    const mint = lack ? { op: "mint", roundId: round.id, quantity: lack } : null;
     if (mint && v.cash < mint.quantity) continue;
     if (side === "buy" && v.cash < Math.floor(Q / 100) * order.price) continue;
     if (worstStake(apply(mint ? apply(v, mint) : v, order)) > s.maxStakeUsdc * SHARE) continue; // a mint itself changes no stake
