@@ -1052,3 +1052,23 @@ Operational lessons from the first live day:
 - Live timing over 20 BTC 15-minute boundaries: report available +3.5 s, Base
   publication +5 s, price in the Horizen cache +28 s, round opened +32 s,
   previous round resolved +35 s (median).
+
+Going live: endpoints, sign-in and price display — 2026-10-07
+- thirdweb's free plan allows 10 requests a second per client id, counted across the site and every service using
+  that id. Its 429 ("You've been rate limited, please upgrade your plan") has no Retry-After. One shared id made the
+  site's market checks fail intermittently. Give background services their own id; a 429 without Retry-After now
+  pauses the site's reads for 5 s, not 60.
+- base-rpc.publicnode.com refuses historical receipts and state ("Archive requests require a personal token"), from
+  browsers too. The site reads Base through a keyed endpoint set at build time, else mainnet.base.org.
+- Privy issues identity tokens only when the app enables them; getIdentityToken() returns null otherwise. The relayer
+  must not require one: the request's own signature, or the deposit permit, already proves the sender.
+- The public Solana RPC answers 403 to any request with an Origin header, so a browser cannot read it; a small
+  server function reads it instead. The Chainlink BTC/USD report lands on Solana (program 2DeGBCAi…) once a minute,
+  0-5 s after the minute: enough for 1-minute candles, not for intra-minute highs and lows.
+- A Base deposit needs neither the private-account setup nor any Horizen read: the engine registers a new account on
+  its first credit. Coupling the deposit to setup left users unable to deposit whenever Horizen or the RPC was busy.
+- Horizen's sequencer halted three times on 2026-10-07 (17, 26 and 13 minutes). A 0-value transaction is accepted
+  but not included during a halt; after it, blocks resume at the halt timestamp and catch up faster than real time.
+  The site must keep showing what does not depend on Horizen (chart, funding) while it waits.
+- After a Vercel deploy the CDN can serve the previous index.html for a few requests. Verify a deploy with
+  cache-control: no-cache and several requests, matching the bundle hash.
