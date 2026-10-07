@@ -2,7 +2,9 @@ import { defineChain } from "viem";
 import { STREAMS_RPCS } from "./streams-manifest.ts";
 
 // `vite --mode fork` only: the local Anvil forks of Horizen and Base. Vite replaces MODE at build time, so production keeps the public RPCs.
-const HORIZEN_RPC = import.meta.env?.MODE === "fork" ? "http://127.0.0.1:38945" : "https://horizen.calderachain.xyz/http";
+// A keyed gateway set at build time (VITE_HORIZEN_RPC_URL) avoids the public endpoint's per-address limits.
+const HORIZEN_RPC = import.meta.env?.MODE === "fork" ? "http://127.0.0.1:38945"
+  : /^https:\/\/26514\.rpc\.thirdweb\.com\/[0-9a-f]{32}$/.test(String(import.meta.env?.VITE_HORIZEN_RPC_URL ?? "")) ? String(import.meta.env.VITE_HORIZEN_RPC_URL) : "https://horizen.calderachain.xyz/http";
 /** Base, where the vault takes deposits and pays withdrawals. */
 export const BASE_RPC = import.meta.env?.MODE === "fork" ? "http://127.0.0.1:39301" : STREAMS_RPCS.base;
 
