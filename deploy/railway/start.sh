@@ -35,6 +35,11 @@ keeper)
   rm -f /data/keeper-state/keeper.*.lock /data/keeper-state/keeper.*.live # another host's lock reads as live
   unset KEEPER_VELA_KEY KEEPER_ENV_B64 ZEDGE_HORIZEN_RPC
   set -- node services/keeper/main.mjs "${KEEPER_MODE:---watch}" --secrets "$d/keeper.env" --state-directory /data/keeper-state ;;
-*) echo "start: set ZEDGE_SERVICE to house-bot, payout-signer or keeper" >&2; exit 64 ;;
+indexer)
+  # DATABASE_URL: a reference to the Postgres service's private-network URL. No volume: the database is the state.
+  put indexer.env "$(printf 'DATABASE_URL=%s\nINDEXER_HORIZEN_RPC_URL=%s\nINDEXER_SOLANA_RPC_URL=%s\n' "${DATABASE_URL:-}" "${ZEDGE_HORIZEN_RPC:-}" "${ZEDGE_SOLANA_RPC:-}")"
+  unset DATABASE_URL ZEDGE_HORIZEN_RPC ZEDGE_SOLANA_RPC
+  set -- node --experimental-strip-types services/indexer/main.mjs --settings "$d/indexer.env" ;;
+*) echo "start: set ZEDGE_SERVICE to house-bot, payout-signer, keeper or indexer" >&2; exit 64 ;;
 esac
 exec "$@"
