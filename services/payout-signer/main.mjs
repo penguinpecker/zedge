@@ -131,7 +131,8 @@ async function main(argv) {
   const bytes = await privateFile(resolve(a.settings)).catch(() => fail(`${a.settings}: a private (0600) settings file is required`));
   const env = parseEnv(bytes.toString()); bytes.fill(0);
   const urls = { horizen: env.PAYOUT_SIGNER_HORIZEN_RPC_URL || "https://26514.rpc.thirdweb.com", base: env.PAYOUT_SIGNER_BASE_RPC_URL || "https://base-rpc.publicnode.com" };
-  if (/calderachain/i.test(urls.horizen)) fail("use the thirdweb gateway or a private endpoint, never the operator's Caldera endpoint");
+  // Caldera's public endpoint limits by IP and the operator depends on it; a keyed partner endpoint has its own limits.
+  if (/calderachain/i.test(urls.horizen) && !/\/infra-partner-http\//.test(urls.horizen)) fail("use the thirdweb gateway or a private endpoint, never the operator's Caldera endpoint");
   const book = parseOrderbookManifest(JSON.parse(await readFile(a.manifest ?? new URL("../../public/deployments/26514-orderbook.json", import.meta.url), "utf8")));
   if (book.status !== "configured") fail("the order-book manifest is planned: nothing to pay yet");
   const clients = Object.fromEntries(Object.entries(urls).map(([k, u]) => [k, createPublicClient({ transport: http(u, { timeout: 10_000, retryCount: 1 }) })]));

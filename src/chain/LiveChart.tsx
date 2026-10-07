@@ -6,7 +6,10 @@ import { observationPrice } from "./gateway.ts";
 import { createPriceFeed, type FeedStatus, type Tick } from "./price-feed.ts";
 import "./live-chart.css";
 
-const LINE = "#c7f86f", TARGET = "#e9eddf", MUTED = "#8f9a86";
+const LINE = "#c7f86f", TARGET = "#e9eddf", MUTED = "#8f9a86", FONT = 11;
+/** Pixels between a badge's centre and a tick label's: half the badge (the font plus 2.5/12 of it above and below, as the chart
+ * draws it) plus half a label, rounded up. */
+const BADGE_CLEARANCE = Math.ceil(FONT * (1 + 5 / 12) / 2 + FONT / 2) + 1;
 /** Seconds of price drawn before the first shown minute, so the line runs in from the left edge. */
 const LEAD = 300;
 /** The viewer's local time, 24-hour like the rest of the site. */
@@ -25,37 +28,48 @@ export type MarketFeed = { spot: Tick | null; closes: number[]; status?: FeedSta
 type Marks = { start: HTMLDivElement | null; cutoff: HTMLDivElement | null; end: HTMLDivElement | null; closed: HTMLDivElement | null; target: HTMLDivElement | null; tip: HTMLDivElement | null };
 
 /** Live BTC/USD line for one round, one Chainlink report a minute (TradingView Lightweight Charts). Round times are unix
- * seconds; `priceToBeat` is the verified Chainlink opening observation as an exact decimal, or null before it is recorded. */
-export default function LiveChart({ start, cutoff, end, priceToBeat, onMarket }: { start: number; cutoff: number; end: number; priceToBeat: string | null; onMarket?: (feed: MarketFeed) => void }) {
+ * seconds; `priceToBeat` is the verified Chainlink opening observation as an exact decimal, or null before it is recorded.
+ * `offset` is the round's place from the current one (decided by the page in chain time): 1 is the next round, below 0 a finished one. */
+export default function LiveChart({ start, cutoff, end, priceToBeat, offset, onMarket }: { start: number; cutoff: number; end: number; priceToBeat: string | null; offset: number; onMarket?: (feed: MarketFeed) => void }) {
   const box = useRef<HTMLDivElement>(null);
   const marks = useRef<Marks>({ start: null, cutoff: null, end: null, closed: null, target: null, tip: null });
-  const chart = useRef<{ api: IChartApi; series: ISeriesApi<"Area">; line: IPriceLine | null; place: () => void } | null>(null);
+  const chart = useRef<{ api: IChartApi; series: ISeriesApi<"Area">; line: IPriceLine | null; place: () => void; relabel: () => void } | null>(null);
   const goal = useRef<number | null>(null);
   const [version, setVersion] = useState(0);
   const report = useRef(onMarket);
   useEffect(() => { report.current = onMarket; });
-  // The whole round is in view. A round that has not started also shows the round before it, so its start line has context.
+  // The whole round is in view. The next round also shows the round before it, so its start line has context.
+  const upcoming = offset > 0, finished = offset < 0;
   const { feed, view } = useMemo(() => {
-    const view = Date.now() < start * 1000 ? 2 * start - end : start;
+    const view = upcoming ? 2 * start - end : start;
     return { view, feed: createPriceFeed((view - LEAD) * 1000, end * 1000) };
-  }, [start, end]);
+  }, [start, end, upcoming]);
   // The header's string, from the same exact value through the same function, so chart and header always agree.
   const target = priceToBeat === null ? null : observationPrice(parseUnits(priceToBeat, 18), -18);
 
   useEffect(() => {
     const element = box.current;
     if (!element) return;
+    // The price axis leaves out any tick label a badge (the latest price, the price to beat) would partly cover; the chart has no
+    // option for it. Re-applied whenever a badge moves (`relabel`), which makes the axis format its ticks again.
+    let series: ISeriesApi<"Area"> | null = null;
+    const ticks = (values: number[]) => {
+      const labels = axisPrices(values), s = series;
+      if (!s) return labels;
+      const badges = [goal.current, feed.last()?.p ?? null].flatMap((p) => p === null ? [] : [s.priceToCoordinate(p)]).filter((y): y is NonNullable<typeof y> => y !== null);
+      return labels.map((label, i) => { const y = s.priceToCoordinate(values[i]); return y !== null && badges.some((b) => Math.abs(b - y) < BADGE_CLEARANCE) ? "" : label; });
+    };
     const api = createChart(element, {
       autoSize: true,
-      layout: { background: { type: ColorType.Solid, color: "transparent" }, textColor: MUTED, fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, attributionLogo: false },
-      localization: { priceFormatter: usd, tickmarksPriceFormatter: axisPrices, timeFormatter: axisTime },
+      layout: { background: { type: ColorType.Solid, color: "transparent" }, textColor: MUTED, fontFamily: "'IBM Plex Mono', monospace", fontSize: FONT, attributionLogo: false },
+      localization: { priceFormatter: usd, tickmarksPriceFormatter: ticks, timeFormatter: axisTime },
       grid: { vertLines: { visible: false }, horzLines: { color: "rgba(255,255,255,0.04)" } },
       rightPriceScale: { borderVisible: false, scaleMargins: { top: 0.18, bottom: 0.12 } },
       timeScale: { borderVisible: false, timeVisible: true, secondsVisible: false, lockVisibleTimeRangeOnResize: true, tickMarkFormatter: axisTime },
       crosshair: { mode: CrosshairMode.Magnet, horzLine: { visible: false, labelVisible: false }, vertLine: { color: "rgba(233,237,223,0.25)", style: LineStyle.Solid, labelBackgroundColor: "#2b322b" } },
       handleScroll: false, handleScale: false,
     });
-    const series = api.addSeries(AreaSeries, {
+    series = api.addSeries(AreaSeries, {
       lineColor: LINE, lineWidth: 2, topColor: "rgba(199,248,111,0.22)", bottomColor: "rgba(199,248,111,0)",
       priceLineVisible: false, lastPriceAnimation: LastPriceAnimationMode.Continuous,
       // The price to beat always stays on the plot.
@@ -110,7 +124,8 @@ export default function LiveChart({ start, cutoff, end, priceToBeat, onMarket }:
     });
     api.timeScale().subscribeVisibleLogicalRangeChange(place);
     api.timeScale().subscribeSizeChange(place);
-    chart.current = { api, series, line: null, place };
+    const relabel = () => api.applyOptions({ localization: { tickmarksPriceFormatter: ticks } });
+    chart.current = { api, series, line: null, place, relabel };
     return () => { cancelAnimationFrame(frame); api.timeScale().unsubscribeVisibleLogicalRangeChange(place); api.timeScale().unsubscribeSizeChange(place); api.remove(); chart.current = null; };
   }, [start, cutoff, end, feed]);
 
@@ -130,6 +145,7 @@ export default function LiveChart({ start, cutoff, end, priceToBeat, onMarket }:
     // stays fixed from the first shown minute to the end.
     c.series.setData(feed.points().map((p) => ({ ...p, time: p.time as UTCTimestamp })));
     c.api.timeScale().setVisibleRange({ from: view as UTCTimestamp, to: end as UTCTimestamp });
+    c.relabel();
     c.place();
     report.current?.({ spot: feed.last(), closes: feed.closes(), status: feed.status, startTick: feed.at(start * 1000) });
   }, [version, feed, view, start, cutoff, end]);
@@ -141,6 +157,7 @@ export default function LiveChart({ start, cutoff, end, priceToBeat, onMarket }:
     // Placed at the shown cents, so its axis label reads exactly the header's string.
     goal.current = target === null ? null : Number(target.replace(/[$,]/g, ""));
     c.line = goal.current === null ? null : c.series.createPriceLine({ price: goal.current, color: TARGET, lineWidth: 1, lineStyle: LineStyle.LargeDashed, axisLabelVisible: true, axisLabelColor: TARGET, axisLabelTextColor: "#111410", title: "" });
+    c.relabel();
     c.place();
   }, [target, start, cutoff, end, feed]);
 
@@ -154,10 +171,11 @@ export default function LiveChart({ start, cutoff, end, priceToBeat, onMarket }:
         <span>{name === "cutoff" ? `CUTOFF ${clock(cutoff * 1000, true)}` : name.toUpperCase()}</span></div>)}
       <div className="live-chart-target" ref={(el) => { marks.current.target = el; }} aria-hidden="true" style={{ display: "none" }}>PRICE TO BEAT</div>
       <div className="live-chart-tip" ref={(el) => { marks.current.tip = el; }} aria-hidden="true" style={{ display: "none" }} />
-      {!last && <p className="live-chart-wait" role="status">Connecting to the live price…</p>}
+      {!last && <p className="live-chart-wait" role="status">{finished ? "No price data for this round" : "Connecting to the live price…"}</p>}
     </div>
-    <p className="live-chart-source"><span className={`status-dot ${feed.status === "live" ? "" : "paused"}`} />
-      <span>Chainlink BTC/USD · one report a minute{last ? ` · last ${clock(last.t)} ${ZONE}` : ""}{feed.status === "reconnecting" ? " · Reconnecting…" : ""}</span>
+    {/* A finished round's feed has stopped on purpose: no status dot, no Reconnecting. */}
+    <p className="live-chart-source">{!finished && <span className={`status-dot ${feed.status === "live" ? "" : "paused"}`} />}
+      <span>Chainlink BTC/USD · one report a minute{last ? ` · last ${clock(last.t)} ${ZONE}` : ""}{!finished && feed.status === "reconnecting" ? " · Reconnecting…" : ""}</span>
       <a href="https://www.tradingview.com/" target="_blank" rel="noopener noreferrer">Chart by TradingView</a></p>
   </div>;
 }

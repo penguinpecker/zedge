@@ -58,7 +58,7 @@ const reviewAndConfirm = async () => {
   await settle();
 };
 
-await page.open("http://127.0.0.1:4188/");
+await page.open("http://127.0.0.1:4188/?mode=demo");
 await page.wait("#review-order");
 await settings();
 await page.click(".settings-row .danger");
@@ -318,7 +318,7 @@ check(
   "CSV export includes all orders and accounting fields",
 );
 
-await page.open("http://127.0.0.1:4188/#/portfolio");
+await page.open("http://127.0.0.1:4188/?mode=demo#/portfolio");
 await page.wait(".portfolio-overview");
 const restored = await read();
 check(

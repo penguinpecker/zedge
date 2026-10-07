@@ -6,7 +6,7 @@ import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { decrypt, encrypt, exportPublicKeyToHex, generateKeyPair, importPublicKeyFromHex } from "@horizen/vela-common-ts";
 import { KEY_CHALLENGE_START, engineRound, parseOrderbookManifest, requestTypedData, signable, type VerifiedOrderbook } from "../orderbook-manifest.ts";
 import { usdcPermitTypedData } from "../vault.ts";
-import { KEY_CHANGED, NOT_SUBMITTED, PrivateAccount, PublicError, describeOutcome, fetchRelay, readView, relayText, sharesFor, viemChain, type Chain, type Completion, type Relay, type RelayBody, type Settled, type Signer, type Snapshot, type Submission } from "./client.ts";
+import { HISTORY_PAGE, KEY_CHANGED, NOT_SUBMITTED, PrivateAccount, PublicError, describeOutcome, fetchRelay, readView, relayText, sharesFor, viemChain, type Chain, type Completion, type Relay, type RelayBody, type Settled, type Signer, type Snapshot, type Submission } from "./client.ts";
 
 const RELAYER: Address = "0x5555555555555555555555555555555555555555";
 const fixture = JSON.parse(await readFile(new URL("../testdata/orderbook-configured.json", import.meta.url), "utf8"));
@@ -101,6 +101,7 @@ async function stack(options: { relayRefuses?: (body: RelayBody) => { code: stri
       return "pending";
     },
     async completion(requestId) { return completions.get(requestId) ?? null; },
+    async sent() { return { head: block, total: 0n }; },
     async history() { return []; },
     async head() { return block; },
     async wallet() { return wallet; },
@@ -231,6 +232,19 @@ test("one-click deposit: a silent permit to the vault, sent by the relayer, then
   await assert.rejects(account.depositFromBase(999_999n), /Deposits are 1 USDC to 500 USDC/);
   await assert.rejects(account.depositFromBase(40_000_000n), /holds less than this deposit/);
   assert.equal(s.log.filter((x) => x.startsWith("deposit")).length, 1);
+});
+
+test("a credit whose sync fails leaves the balance marked behind until a view is read, so the ticket offers a refresh, not a second deposit", async () => {
+  let refuse = false;
+  const s = await stack({ relayRefuses: (body) => refuse && body.kind === "request" ? { code: "QUEUE_BUSY" } : null }), signer = wallet();
+  const { account } = open(s, signer);
+  await account.unlock();
+  refuse = true;
+  assert.equal(await account.depositFromBase(20_000_000n), "credited");
+  assert.deepEqual([account.snapshot.behind, account.snapshot.view?.cash], [true, 0]);
+  refuse = false;
+  await account.sync();
+  assert.deepEqual([account.snapshot.behind, account.snapshot.view?.cash], [false, 20_000_000]);
 });
 
 test("a book order goes Signing, Sending, Submitted, Waiting, Staged, Matching, Collecting result, then its fills", async () => {
@@ -585,7 +599,7 @@ test("settling from the chain: the request nonce first, then the calldata that c
   assert.deepEqual(await settle(), { requestId: ours, block: 21n, txHash: ours });
 });
 
-test("History and round results read logs in 1,000-block ranges, four at a time, and History stops at the account's first request", async () => {
+test("History reads 1,000-block ranges at most five a second, stops at the account's first request, and can be stopped", async () => {
   const s = await stack(), account = wallet().address;
   const head = BigInt(s.book.application.deployBlock) + 30_500n, id = (n: number) => keccak256(toHex(`req:${n}`));
   // Three requests; the second sits on the last block of its range, so its receipt lands in the next one.
@@ -593,11 +607,11 @@ test("History and round results read logs in 1,000-block ranges, four at a time,
   const receipts = [{ n: 1, block: head - 2_490n }, { n: 2, block: head - 990n }, { n: 3, block: head - 3n }];
   const roundId = engineRound(s.book, ROUND).spec.registryRoundId.toLowerCase() as Hex;
   const settle = encodeAbiParameters(parseAbiParameters("bytes32, uint256, uint256, uint256, uint256, bytes32, uint256"), [roundId, 2n, 1n, 0n, 0n, roundId, 0n]);
-  let total = 3n, inFlight = 0, peak = 0;
-  const asked: { event: string; from: bigint; to: bigint }[] = [];
+  let inFlight = 0, peak = 0;
+  const asked: { event: string; from: bigint; to: bigint }[] = [], waits: number[] = [];
   const client = {
     getBlockNumber: async () => head,
-    readContract: async () => total,
+    readContract: async () => 3n,
     getLogs: async ({ event, args, fromBlock, toBlock }: { event: { name: string }; args: { requestId?: Hex[] }; fromBlock: bigint; toBlock: bigint | "latest" }) => {
       if (typeof toBlock !== "bigint" || toBlock - fromBlock + 1n > 1_000n) throw new Error("Log response size exceeded. Maximum allowed number of requested blocks is 1000");
       asked.push({ event: event.name, from: fromBlock, to: toBlock });
@@ -610,15 +624,53 @@ test("History and round results read logs in 1,000-block ranges, four at a time,
       return [{ args: { data: settle } }];
     },
   } as unknown as PublicClient;
-  const chain = viemChain(client, s.book, client);
-  const history = await chain.history(account, 0n);
+  // Each wave waits out the rest of its second before the next one starts.
+  const chain = viemChain(client, s.book, client, { sleep: async (ms) => { waits.push(ms); } });
+  assert.deepEqual(await chain.sent(account), { head, total: 3n });
+  const range = { from: head - 21_599n, to: head, head };
+  const history = await chain.history(account, { ...range, want: 3n });
   assert.deepEqual(history.map((h) => [h.requestId, h.ciphertexts.length]), [[id(1), 1], [id(2), 1], [id(3), 1]], "in chain order, each with its receipt");
-  assert.ok(asked.filter((x) => x.event === "RequestSubmitted").every((x) => x.from >= head - 3_999n), "one wave of four ranges found all three requests");
-  assert.ok(peak <= 4);
-  // Requests to another application keep the count short of the total: the scan runs on to the deploy block, still in safe ranges.
-  total = 5n; asked.length = 0; peak = 0;
-  assert.equal((await chain.history(account, 0n)).length, 3);
-  assert.equal(asked.filter((x) => x.event === "RequestSubmitted").at(-1)?.from, BigInt(s.book.application.deployBlock));
-  assert.ok(peak <= 4);
+  assert.deepEqual(asked.filter((x) => x.event === "RequestSubmitted").map((x) => x.to), [head, head - 1_000n, head - 2_000n, head - 3_000n, head - 4_000n], "one wave of five ranges found all three requests");
+  assert.ok(peak <= 5);
+  // Requests to another application keep the count short: the scan runs on to the bottom of the range, five reads a wave.
+  asked.length = 0; peak = 0; waits.length = 0;
+  assert.equal((await chain.history(account, { ...range, want: 5n })).length, 3);
+  const scanned = asked.filter((x) => x.event === "RequestSubmitted");
+  assert.equal(scanned.length, 22);
+  assert.equal(scanned.at(-1)?.from, range.from);
+  assert.ok(peak <= 5 && waits.length >= 4 && waits.every((ms) => ms > 0 && ms <= 1_000), "22 ranges in waves of at most five, a second apart");
+  // Closing the page stops the scan between waves.
+  asked.length = 0;
+  let waves = 0;
+  await assert.rejects(chain.history(account, { ...range, want: 5n }, () => ++waves > 2));
+  assert.equal(asked.length, 10, "two waves, then it stopped");
   assert.deepEqual(await chain.settled([roundId], 0n), [{ roundId, outcome: 1 }], "the results read asks for the last 1,000 blocks, never \"latest\"");
+});
+
+test("History opens on its latest page, a reopen reads only the blocks since, and Load older reads the page before", async () => {
+  const s = await stack(), signer = wallet();
+  let head = 1_000_000n, total = 2n;
+  const ranges: { from: bigint; to: bigint; want: bigint }[] = [];
+  const req = (n: number, block: bigint) => ({ requestId: keccak256(toHex(`h:${n}`)), block, txHash: keccak256(toHex(`h:${n}`)), ciphertexts: [] });
+  s.chain.sent = async () => ({ head, total });
+  s.chain.history = async (_account, { from, to, want }) => { ranges.push({ from, to, want }); return from <= 990_000n && 990_000n <= to ? [req(1, 990_000n)] : []; };
+  const { account } = open(s, signer);
+  const floor = head - 604_800n;
+  await account.loadHistory(floor);
+  assert.deepEqual(ranges, [{ from: head - HISTORY_PAGE + 1n, to: head, want: 2n }], "the latest six hours first");
+  assert.deepEqual([account.snapshot.history.length, account.snapshot.historyMore, account.snapshot.historyHours], [1, true, 6]);
+  // Reopened a minute later with no new request: nothing is scanned. One new request: only the new blocks.
+  head += 60n;
+  await account.loadHistory(floor);
+  assert.equal(ranges.length, 1);
+  head += 60n; total = 3n;
+  await account.loadHistory(floor);
+  assert.deepEqual(ranges.at(-1), { from: head - 59n, to: head, want: 1n });
+  // Load older: the page below, looking for the one request not found yet.
+  await account.loadHistory(floor, true);
+  assert.deepEqual(ranges.at(-1), { from: 1_000_000n - 2n * HISTORY_PAGE + 1n, to: 1_000_000n - HISTORY_PAGE, want: 2n });
+  assert.equal(account.snapshot.historyHours, 12);
+  // A read stopped by the page closing changes nothing.
+  await account.loadHistory(floor, true, () => true);
+  assert.equal(account.snapshot.historyHours, 12);
 });

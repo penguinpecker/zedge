@@ -37,8 +37,12 @@ export interface Chain {
    * the deadline, or used by another signature well past it); "pending" before either. Never decided from a relayer's answer. */
   settle(sender: Address, signature: Hex, nonce: bigint, deadline: bigint, fromBlock: bigint): Promise<Submission | "pending" | "absent">;
   completion(requestId: Hex, fromBlock: bigint): Promise<Completion | null>;
-  /** Receipts of the account's requests since `fromBlock`, in chain order, read back no further than its first request. */
-  history(account: Address, fromBlock: bigint): Promise<Logged[]>;
+  /** Requests the account has sent, to any application, as of the latest block, and that block's number. */
+  sent(account: Address): Promise<{ head: bigint; total: bigint }>;
+  /** Receipts of the account's requests in blocks `from` to `to`, in chain order. Ranges are read newest first, a few a second,
+   * until `want` requests are found (older blocks then hold none) or `stop()` says to (the read then throws). `head` bounds the
+   * receipt reads above `to`. */
+  history(account: Address, range: { from: bigint; to: bigint; head: bigint; want: bigint }, stop?: () => boolean): Promise<Logged[]>;
   /** Horizen's latest block number. */
   head(): Promise<bigint>;
   /** Base USDC in the account's own wallet (its deposit address). */
@@ -150,14 +154,20 @@ export function sharesFor(pay: number, price: number): number {
   return Math.floor(pay * 100 / price / 1000) * 1000;
 }
 
-/** `wallet`: Base USDC at the account's own address, ready to deposit. */
-export type Snapshot = { unlocked: boolean; registered: boolean; view: View | null; fingerprint: string | null; actions: ActionState[]; history: HistoryEntry[]; wallet: bigint | null; error: string };
+/** `wallet`: Base USDC at the account's own address, ready to deposit. `historyMore`: History has older blocks to read ("Load older"),
+ * and `historyHours` is how far back it has read. `behind`: a deposit was credited after the last view was read, so the balance
+ * shown is short until the next sync. */
+export type Snapshot = { unlocked: boolean; registered: boolean; view: View | null; fingerprint: string | null; actions: ActionState[]; history: HistoryEntry[]; historyMore: boolean; historyHours: number; wallet: bigint | null; error: string; behind: boolean };
+/** One History page: about six hours of Horizen's ~1 s blocks. */
+export const HISTORY_PAGE = 21_600n;
 
 export class PrivateAccount {
   readonly account: Address;
   #session: EvaluationSession;
   #queue: Promise<unknown> = Promise.resolve();
-  #state: Snapshot = { unlocked: false, registered: false, view: null, fingerprint: null, actions: [], history: [], wallet: null, error: "" };
+  #state: Snapshot = { unlocked: false, registered: false, view: null, fingerprint: null, actions: [], history: [], historyMore: false, historyHours: 0, wallet: null, error: "", behind: false };
+  /** History read so far: blocks `oldest` to `head`, the account's requests there in chain order, and its request count at `head`. */
+  #scan: { head: bigint; oldest: bigint; total: bigint; logged: Logged[] } | null = null;
   #actionId = 0;
   #closed = false;
   /** Rounds whose result line was shown. */
@@ -337,7 +347,7 @@ export class PrivateAccount {
           const body = r.envelope.body as ReceiptBody;
           const view = readView(body.view), held = this.#state.view;
           if (view && held && (view.sequence < held.sequence || view.nonce < held.nonce)) { stale = true; break; }
-          if (view) this.#set({ view, registered: true });
+          if (view) this.#set({ view, registered: true, behind: false });
           this.#readAt = this.#now();
           if (body.outcome) this.#collected(body.outcome);
           return { body, id };
@@ -494,7 +504,8 @@ export class PrivateAccount {
     if (!credit) { step("waiting", "Reached Horizen · waiting for the exchange to credit it"); return "pending"; }
     if (credit.status !== 1) { step("refused", "Refunded: the exchange could not take this deposit. It is paid back to your wallet on Base."); return "refunded"; }
     step("done", `Credited · ${usd(credit.amount)}`, undefined, undefined, 3);
-    // A failed unlock or sync shows on its own line; the money is credited either way.
+    this.#set({ behind: true });
+    // A failed unlock or sync shows on its own line; the money is credited either way (and `behind` stays until a view is read).
     await this.#serial<unknown>(() => this.#state.unlocked ? this.#sync("Sync") : this.#unlock()).catch(() => undefined);
     return "credited";
   }
@@ -578,13 +589,42 @@ export class PrivateAccount {
     return this.placeOrder({ roundStart, outcome, side: "sell", price, quantity, tif: "ioc", expiry });
   }
 
-  /** Receipts of the last seven days from the chain, trial-decrypted in order; unmatched ones stay listed as unreadable. */
-  async loadHistory(fromBlock: bigint): Promise<void> {
-    // A failed read is the network's, never the wallet's.
-    const logged = await this.#chain.history(this.account, fromBlock).catch(() => { throw new PublicError("Couldn't load your history. Try again.", "HISTORY"); });
+  /** History in pages of HISTORY_PAGE blocks, newest first, never below `floor`: the first open reads the latest page, a reopen only
+   * the blocks since (none when the request count has not moved), and `older` the page before the oldest read. Receipts are
+   * trial-decrypted in chain order; unmatched ones stay listed as unreadable. `stop()` abandons the read (the page closed). */
+  async loadHistory(floor: bigint, older = false, stop: () => boolean = () => false): Promise<void> {
+    const quit = () => this.#closed || stop();
+    const page = (to: bigint) => ({ from: to - HISTORY_PAGE + 1n > floor ? to - HISTORY_PAGE + 1n : floor, to });
+    try {
+      let scan = this.#scan;
+      if (older && scan) {
+        // Requests older than the oldest block read: the count at the scan's head less those found.
+        const want = scan.total - BigInt(scan.logged.length), range = page(scan.oldest - 1n);
+        if (want > 0n && range.from <= range.to) {
+          const logged = await this.#chain.history(this.account, { ...range, head: scan.head, want }, quit);
+          if (quit()) return;
+          scan = { ...scan, oldest: range.from, logged: [...logged, ...scan.logged] };
+        }
+      } else {
+        const { head, total } = await this.#chain.sent(this.account);
+        // Too long since the last read: start again from the latest page.
+        if (scan && head - scan.head > HISTORY_PAGE) scan = null;
+        const range = scan ? { from: scan.head + 1n, to: head } : page(head), want = scan ? total - scan.total : total;
+        const logged = want > 0n && range.from <= range.to ? await this.#chain.history(this.account, { ...range, head, want }, quit) : [];
+        if (quit()) return;
+        scan = scan ? { head, total, oldest: scan.oldest, logged: [...scan.logged, ...logged] } : { head, total, oldest: range.from, logged };
+      }
+      this.#scan = scan;
+    } catch {
+      if (quit()) return;
+      // A failed read is the network's, never the wallet's.
+      throw new PublicError("Couldn't load your history. Try again.", "HISTORY");
+    }
+    const scan = this.#scan;
+    if (!scan) return;
     const entries: HistoryEntry[] = [];
     let nonce = 0;
-    for (const item of logged) {
+    for (const item of scan.logged) {
       const ids = [syncRequestId(this.account), commandId(this.account, nonce), commandId(this.account, nonce + 1), commandId(this.account, nonce + 2)];
       let body: ReceiptBody | null = null;
       for (const ciphertext of item.ciphertexts) for (const id of ids) {
@@ -595,7 +635,8 @@ export class PrivateAccount {
       if (body?.view) nonce = body.view.nonce;
       entries.unshift({ requestId: item.requestId, block: item.block, txHash: item.txHash, readable: Boolean(body), text: body ? describeReceipt(body) : item.ciphertexts.length ? "Unreadable record" : "No private record" });
     }
-    this.#set({ history: entries });
+    // ponytail: hours from block numbers at Horizen's ~1 s blocks, as the seven-day window is.
+    this.#set({ history: entries, historyMore: scan.oldest > floor && BigInt(scan.logged.length) < scan.total, historyHours: Math.round(Number(scan.head - scan.oldest + 1n) / 3600) });
   }
 }
 
@@ -614,10 +655,18 @@ export function describeReceipt(body: ReceiptBody): string {
 const eventsOf = (book: Book) => ({ app: BigInt(book.application.id), endpoint: book.endpoint.address });
 /** thirdweb answers eth_getLogs over at most 1,000 blocks ("Maximum allowed number of requested blocks is 1000"). */
 const LOG_BLOCKS = 1_000n;
-/** At most four reads in flight (thirdweb's free tier allows 10 requests a second), wave by wave until `stop()` says enough. */
-async function inFours<T>(jobs: (() => Promise<T>)[], stop = () => false): Promise<T[]> {
+/** History's reads per second: the site's Horizen proxy (api/horizen.ts) allows each visitor 300 calls per 10 s, and a public
+ * endpoint far fewer, so a scan stays at a small share of either. */
+const HISTORY_RATE = 5;
+/** Waves of HISTORY_RATE reads, each starting at least a second after the last, until `enough()`; `stop()` abandons the scan. */
+async function paced<T>(jobs: (() => Promise<T>)[], sleep: (ms: number) => Promise<void>, stop: () => boolean, enough = () => false): Promise<T[]> {
   const out: T[] = [];
-  for (let i = 0; i < jobs.length && !stop(); i += 4) out.push(...await Promise.all(jobs.slice(i, i + 4).map((job) => job())));
+  for (let i = 0; i < jobs.length && !enough(); i += HISTORY_RATE) {
+    if (stop()) throw new Error("History read stopped.");
+    const started = Date.now();
+    out.push(...await Promise.all(jobs.slice(i, i + HISTORY_RATE).map((job) => job())));
+    if (i + HISTORY_RATE < jobs.length && !enough()) await sleep(Math.max(0, started + 1_000 - Date.now()));
+  }
   return out;
 }
 const authAbi = [
@@ -625,8 +674,9 @@ const authAbi = [
   { type: "function", name: "getPubSecp521r1", stateMutability: "view", inputs: [], outputs: [{ type: "bytes" }] },
 ] as const;
 
-export function viemChain(client: PublicClient, book: Book, base: PublicClient): Chain {
+export function viemChain(client: PublicClient, book: Book, base: PublicClient, options: { sleep?: (ms: number) => Promise<void> } = {}): Chain {
   const { app, endpoint } = eventsOf(book);
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const auth = book.authenticator.address, c = book.custody;
   const events = { RequestSubmitted: getAbiItem({ abi: endpointAbi, name: "RequestSubmitted" }), RequestCompleted: getAbiItem({ abi: endpointAbi, name: "RequestCompleted" }), UserEvent: getAbiItem({ abi: endpointAbi, name: "UserEvent" }),
     AppEvent: getAbiItem({ abi: endpointAbi, name: "AppEvent" }), Deposited: getAbiItem({ abi: vaultAbi, name: "Deposited" }), Paid: getAbiItem({ abi: vaultAbi, name: "Paid" }) };
@@ -672,32 +722,33 @@ export function viemChain(client: PublicClient, book: Book, base: PublicClient):
       return { requestId, status: done.args.status!, errorCode: done.args.errorCode!, errorMessage: done.args.errorMessage ?? "", txHash: done.transactionHash!, block: done.blockNumber!,
         ciphertexts: ours(receipt.logs, "UserEvent").filter((l) => l.args.requestId === requestId).map((l) => hexToBytes(l.args.encryptedData)), tick: tick?.args.requestId ?? null };
     },
-    async history(account, fromBlock) {
-      const head = await client.getBlockNumber(), sender = getAddress(account);
-      const start = fromBlock > BigInt(book.application.deployBlock) ? fromBlock : BigInt(book.application.deployBlock);
-      // Every request this account has sent: once that many submissions are found, older blocks hold none, so the scan (newest
-      // first) ends at its first request. Requests to another application count too; they only let the scan run on to `start`.
-      const total = await client.readContract({ address: endpoint, abi: endpointAbi, functionName: "facilitatorNonces", args: [sender], blockNumber: head });
+    async sent(account) {
+      const head = await client.getBlockNumber();
+      return { head, total: await client.readContract({ address: endpoint, abi: endpointAbi, functionName: "facilitatorNonces", args: [getAddress(account)], blockNumber: head }) };
+    },
+    async history(account, { from, to, head, want }, stop = () => false) {
+      const sender = getAddress(account), deploy = BigInt(book.application.deployBlock), start = from > deploy ? from : deploy;
       const chunks: [bigint, bigint][] = [];
-      for (let to = head; to >= start; to -= LOG_BLOCKS) chunks.push([to - LOG_BLOCKS + 1n > start ? to - LOG_BLOCKS + 1n : start, to]);
+      for (let top = to; top >= start; top -= LOG_BLOCKS) chunks.push([top - LOG_BLOCKS + 1n > start ? top - LOG_BLOCKS + 1n : start, top]);
+      // Newest first: once `want` submissions are found, older blocks hold none of this account's requests.
       let count = 0n;
-      const found = (await inFours(chunks.map(([fromBlock, toBlock]) => async () => {
+      const found = (await paced(chunks.map(([fromBlock, toBlock]) => async () => {
         const logs = await client.getLogs({ address: endpoint, event: events.RequestSubmitted, args: { applicationId: app, sender }, fromBlock, toBlock });
         count += BigInt(logs.length);
         return { toBlock, fromBlock, logs };
-      }), () => count >= total)).filter((c) => c.logs.length);
+      }), sleep, stop, () => count >= want)).filter((c) => c.logs.length);
       // ponytail: a receipt is read in its request's chunk and the next one (1,000-2,000 blocks); a completion slower than that is
       // listed as "No private record". Topic lists stay at 50 IDs.
       const reads: (() => Promise<{ requestId: Hex; txHash: Hex; data: Hex }[]>)[] = [];
-      for (const { fromBlock: from, toBlock: to, logs } of found) {
-        const ranges: [bigint, bigint][] = to < head ? [[from, to], [to + 1n, to + LOG_BLOCKS < head ? to + LOG_BLOCKS : head]] : [[from, to]];
+      for (const { fromBlock: low, toBlock: high, logs } of found) {
+        const ranges: [bigint, bigint][] = high < head ? [[low, high], [high + 1n, high + LOG_BLOCKS < head ? high + LOG_BLOCKS : head]] : [[low, high]];
         for (let i = 0; i < logs.length; i += 50) {
           const requestId = logs.slice(i, i + 50).map((l) => l.args.requestId!);
           for (const [fromBlock, toBlock] of ranges) reads.push(async () => (await client.getLogs({ address: endpoint, event: events.UserEvent, args: { applicationId: app, requestId }, fromBlock, toBlock }))
             .map((l) => ({ requestId: l.args.requestId!, txHash: l.transactionHash!, data: l.args.encryptedData! })));
         }
       }
-      const receipts = (await inFours(reads)).flat();
+      const receipts = (await paced(reads, sleep, stop)).flat();
       const mine = found.flatMap((c) => c.logs).sort((a, b) => a.blockNumber! === b.blockNumber! ? a.logIndex! - b.logIndex! : a.blockNumber! < b.blockNumber! ? -1 : 1);
       return mine.map((l) => {
         const own = receipts.filter((r) => r.requestId === l.args.requestId);

@@ -1,6 +1,6 @@
 /** The signed-in user's private records: resting orders, positions and history, read from their own decrypted receipts.
  * Nothing here is fetched from ZEDGE; everything comes from the chain and this tab's key. */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowSquareOut, Check } from "@phosphor-icons/react";
 import { formatUnits } from "viem";
 import { parseAtomicAmount, transactionExplorerUrl } from "./networks.ts";
@@ -102,17 +102,29 @@ export function PrivateHistory({ priv, fromBlock }: { priv: PrivateState; fromBl
   const [from] = useState(fromBlock);
   // This read's own outcome, not the shared busy flag and error line: either the failure with Retry or the empty state, never both.
   const [status, setStatus] = useState<"loading" | "done" | "failed">("loading");
-  const load = useCallback(() => { setStatus("loading"); void run((a) => a.loadHistory(from)).then((ok) => setStatus(ok ? "done" : "failed")); }, [run, from]);
-  // A rescan of the last seven days each time the page opens, not on every refresh.
-  useEffect(() => { if (unlocked) load(); }, [unlocked, load]);
-  const entries = priv.snapshot?.history ?? [];
+  // The read in flight: a newer one, closing the page or a new account (this panel remounts) stops it between waves.
+  const job = useRef<{ stopped: boolean; older: boolean } | null>(null);
+  const load = useCallback((older = false) => {
+    if (job.current) job.current.stopped = true;
+    const mine = job.current = { stopped: false, older };
+    setStatus("loading");
+    void run((a) => a.loadHistory(from, older, () => mine.stopped), { quiet: true }).then((ok) => { if (!mine.stopped) setStatus(ok ? "done" : "failed"); });
+  }, [run, from]);
+  // Each time the page opens: the latest page the first time, then only the blocks since (client.ts loadHistory).
+  useEffect(() => {
+    if (unlocked) load();
+    return () => { if (job.current) job.current.stopped = true; };
+  }, [unlocked, load]);
+  const entries = priv.snapshot?.history ?? [], more = Boolean(priv.snapshot?.historyMore), hours = priv.snapshot?.historyHours ?? 0;
   return <div className="chain-private-list">
     <div className="chain-book-columns"><span>Block</span><span>Record</span><span>Transaction</span></div>
     {entries.map((e) => <div className="chain-book-row" key={e.requestId}>
       <span>{e.block.toString()}</span><span>{e.text}</span>
       <span><a href={transactionExplorerUrl(26514, e.txHash)} target="_blank" rel="noreferrer">View <ArrowSquareOut size={12} /></a></span>
     </div>)}
-    {status === "failed" ? <p className="chain-error" role="alert">Couldn’t load your history. <button className="chain-text-button" onClick={load}>Retry</button></p>
-      : entries.length === 0 && (status === "loading" ? <p className="chain-copy" role="status">Reading your records…</p> : <div className="chain-empty chain-book-empty"><h3>No records in the last seven days</h3></div>)}
+    {status === "failed" ? <p className="chain-error" role="alert">Couldn’t load your history. <button className="chain-text-button" onClick={() => load(job.current?.older)}>Retry</button></p>
+      : status === "loading" ? <p className="chain-copy" role="status">Reading your records…</p>
+      : entries.length === 0 && <div className="chain-empty chain-book-empty"><h3>{more ? `No records in the last ${hours} hours` : "No records in the last seven days"}</h3></div>}
+    {more && status === "done" && <button className="button" onClick={() => load(true)}>Load older</button>}
   </div>;
 }

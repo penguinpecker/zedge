@@ -227,7 +227,8 @@
 .chain-private-list > .button, .chain-private-list > p, .chain-private-list > form, .chain-private-list > dl { margin: 16px 22px; }
 .chain-drawer select { padding: 13px; width: 100%; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; color: var(--text); }
 .chain-deposit-address { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px; align-items: start; margin: 0 0 18px; }
-.chain-deposit-address code { display: block; overflow-wrap: anywhere; margin-bottom: 6px; }
+/* The whole address, so every character can be checked before money is sent (a 0x1234…abcd form passes lookalike addresses). */
+.chain-deposit-address code { display: block; word-break: break-all; margin-bottom: 6px; }
 .chain-qr { display: block; width: 120px; height: 120px; border-radius: 6px; background: #fff; }
 @media (max-width: 420px) { .chain-deposit-address { grid-template-columns: 1fr; } }
 .chain-ticket label { display: block; margin: 0 0 6px; font-size: 11px; color: var(--muted); }

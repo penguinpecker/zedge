@@ -4,7 +4,7 @@ const check = (condition, label) => {
   if (!condition) throw new Error(label);
   checks.push({ check: label, passed: true });
 };
-await page.open("http://127.0.0.1:4188/");
+await page.open("http://127.0.0.1:4188/?mode=demo");
 await page.wait("#review-order");
 check(
   await page.eval(

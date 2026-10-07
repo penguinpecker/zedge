@@ -21,6 +21,8 @@ type Props = {
   /** Why private features are locked, when a check failed (not when they are simply not open yet). */
   orderbookReason: string;
   priv: PrivateState;
+  /** Sign in through Privy: closes this popup (Privy's window cannot sit under it) and opens the wallet once the session exists. */
+  onSignIn: () => void;
 };
 
 /** The user's Base deposit address as a QR code (drawn in this tab; the address never leaves it). */
@@ -105,7 +107,7 @@ function SetupProgress({ actions }: { actions: ActionState[] }) {
   return <p className="chain-copy" role="status">Setting up your account · {step}<span aria-hidden="true"> · {Math.max(0, Math.round((now - since) / 1000))} s</span></p>;
 }
 
-export default function AccountDrawer({ onClose, network, wallet, orderbook, orderbookReason, priv }: Props) {
+export default function AccountDrawer({ onClose, network, wallet, orderbook, orderbookReason, priv, onSignIn }: Props) {
   const dialog = useRef<HTMLDialogElement>(null);
   const titleId = useId();
   const [funds, setFunds] = useState("");
@@ -139,6 +141,8 @@ export default function AccountDrawer({ onClose, network, wallet, orderbook, ord
   const failed = !unlocked && !settingUp && setup?.phase === "failed", locked = !unlocked && !settingUp && !failed;
   const unlock = () => void priv.run((a) => a.unlock());
   const depositing = Boolean(snap?.actions.some((a) => a.action === "Deposit"));
+  // A deposit still on its way (this page may have stopped waiting): no second one until it lands.
+  const moving = snap?.actions.find((a) => a.action === "Deposit")?.final === false;
   return (
     <dialog ref={dialog} className="chain-drawer chain-popup" aria-labelledby={titleId} onCancel={(event) => { event.preventDefault(); onClose(); }} onClick={(event) => { if (event.target === dialog.current) onClose(); }}>
       <div className="chain-drawer-heading">
@@ -147,22 +151,22 @@ export default function AccountDrawer({ onClose, network, wallet, orderbook, ord
       </div>
       <div className="chain-drawer-content">
         {!wallet.session ? <>
-          {/* Closed first: the popup sits in the top layer, above Privy's sign-in window. */}
-          <button className="button primary chain-full" disabled={!wallet.configured || wallet.pending} onClick={() => { onClose(); wallet.connect(); }}><Wallet />{wallet.pending ? "Loading…" : "Sign in with Google or X"}</button>
+          {/* Closed first (by onSignIn): the popup sits in the top layer, above Privy's sign-in window. */}
+          <button className="button primary chain-full" disabled={!wallet.configured || wallet.pending} onClick={onSignIn}><Wallet />{wallet.pending ? "Loading…" : "Sign in with Google or X"}</button>
           {!wallet.configured && <p className="chain-copy">{SIGN_IN_NOT_SET_UP}</p>}
         </> : <>
           {!live ? <p className="chain-copy">{orderbookReason || "Deposits open shortly."}</p> : <>
             <dl className="chain-account-values"><div><dt>On Base</dt><dd>{snap?.wallet == null ? "Checking…" : usdc(snap.wallet)}</dd></div><div><dt>Trading</dt><dd>{unlocked ? usdc(cash) : settingUp ? "Setting up…" : failed ? "—" : <><LockKey size={12} /> Locked</>}</dd></div></dl>
             {settingUp && <SetupProgress actions={snap?.actions ?? []} />}
             {locked && <button className="button chain-full" disabled={!snap || priv.busy} onClick={unlock}><LockKeyOpen /> Unlock</button>}
-            {address && <div className="chain-deposit-address"><div><h3>Send USDC on Base to</h3><code title={address}>{address.slice(0, 6)}…{address.slice(-4)}</code>
+            {address && <div className="chain-deposit-address"><div><h3>Send USDC on Base to</h3><code>{address}</code>
               <button className="chain-text-button" onClick={copy}><Copy size={13} /> {copied ? "Copied" : "Copy"}</button></div><AddressQr address={address} /></div>}
             {limits && deposit && <>
               {!cash && !depositing && <p className="chain-copy">Send USDC on Base to this address, then press Deposit.</p>}
               <div className="chain-deposit-row">
                 <input id="chain-funds-amount" aria-label="Deposit amount in USDC" inputMode="decimal" value={funds} onChange={(event) => setFunds(event.target.value)} aria-invalid={Boolean(deposit.error)} placeholder={deposit.atoms ? usdc(deposit.atoms).replace(" USDC", "") : "Amount"} autoComplete="off" />
-                <button className="button primary" disabled={!snap || sending || deposit.atoms === 0n}
-                  onClick={() => { setSending(true); void priv.run((a) => a.depositFromBase(deposit.atoms)).then((ok) => ok && setFunds("")).finally(() => setSending(false)); }}>{sending ? "Depositing…" : deposit.atoms ? `Deposit ${usdc(deposit.atoms)}` : "Deposit"}</button>
+                <button className="button primary" disabled={!snap || sending || moving || deposit.atoms === 0n}
+                  onClick={() => { setSending(true); void priv.run((a) => a.depositFromBase(deposit.atoms), { quiet: true }).then((ok) => ok && setFunds("")).finally(() => setSending(false)); }}>{sending ? "Depositing…" : deposit.atoms ? `Deposit ${usdc(deposit.atoms)}` : "Deposit"}</button>
               </div>
               {deposit.error ? <p className="chain-error">{deposit.error === "format" ? "Enter an amount like 2.5" : `${usdc(BigInt(limits.minDeposit))} to ${usdc(BigInt(limits.maxDeposit))}, up to your balance`}</p>
                 : deposit.short && !funds && snap?.wallet != null && <p className="chain-copy">You have {usdc(snap.wallet)} on Base. Deposits start at {usdc(BigInt(limits.minDeposit))}.</p>}

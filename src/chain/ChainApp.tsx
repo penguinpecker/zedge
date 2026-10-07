@@ -9,7 +9,8 @@ import { BASE_RPC, DEFAULT_NETWORK, isNetworkId, NETWORKS, parseAtomicAmount, ty
 import { useChainWallet, WalletBoundary, type ChainWallet } from "./privy.tsx";
 import { buyLimit, fairUp, realizedSigma, sellLimit, stakeRoom } from "./fair.ts";
 import { checkDeployment, checkOrderbook, loadManifest, loadOrderbook, observationPrice, exactObservationPrice, PHASES, priceCaptions, readChain, readRound, type ChainSnapshot, type RoundRead, type RoundState } from "./gateway.ts";
-import { askCents, clockPhase, countdownLine, type RoundTimes } from "./market-view.ts";
+import { askCents, clockPhase, countdownLine, ORDER_MARGIN, versus, type RoundTimes } from "./market-view.ts";
+import { createPriceFeed } from "./price-feed.ts";
 import { engineRound, LOT, OPERATOR_KEYS_CHANGED, type OrderbookManifest, type VerifiedOrderbook } from "./orderbook-manifest.ts";
 import { usePrivate, type PrivateState } from "./private/use-private.ts";
 import { ActionLine, DepositSteps, PrivateHistory, PrivateOrders, PrivatePortfolio, shares, usdc } from "./PrivatePanels.tsx";
@@ -96,7 +97,7 @@ function Ticket({ priv, orderbook, wallet, round, now, up, outcome, onOutcome, l
   const room = book && roundId ? view ? stakeRoom(view, roundId, outcome, cap) : cap : 0;
   const wanted = limit && pay > 0 ? sharesFor(pay, limit) : 0, quantity = Math.min(wanted, room);
   const toCutoff = round ? round.cutoff - now : null;
-  const trading = Boolean(book && unlocked && round && toCutoff !== null && toCutoff > 15 && !priv.busy);
+  const trading = Boolean(book && unlocked && round && toCutoff !== null && toCutoff > ORDER_MARGIN && !priv.busy);
   const held = view && roundId ? view.holdings.find((h) => h.roundId === roundId) : undefined;
   const free = (side: Side) => Math.floor((side === "up" ? held?.up ?? 0 : held?.down ?? 0) / LOT) * LOT;
   const name = outcome === "up" ? "Up" : "Down";
@@ -105,13 +106,19 @@ function Ticket({ priv, orderbook, wallet, round, now, up, outcome, onOutcome, l
   // Until the buy deposits for itself: the stake, from the wallet's USDC on Base, in one click (within the vault's deposit limits).
   const limits = book?.custody.vault.limits, least = BigInt(limits?.minDeposit ?? 0), most = limits && onBase !== null ? onBase < BigInt(limits.maxDeposit) ? onBase : BigInt(limits.maxDeposit) : 0n;
   const want = pay > 0 ? BigInt(pay) : least, offer = limits && most > 0n && most >= least ? want < least ? least : want > most ? most : want : null;
-  const deposit = () => { if (!offer) return; setDepositing(true); void priv.run((a) => a.depositFromBase(offer)).finally(() => setDepositing(false)); };
+  // Quiet: a deposit can wait for minutes and reports on its own line (DepositSteps), so it holds neither Close nor Cancel.
+  const deposit = () => { if (!offer) return; setDepositing(true); void priv.run((a) => a.depositFromBase(offer), { quiet: true }).finally(() => setDepositing(false)); };
+  // The latest deposit while it is on its way (this page may have stopped waiting): no second stake until it lands.
+  const dep = priv.snapshot?.actions.find((a) => a.action === "Deposit"), moving = Boolean(dep && !dep.final);
   const [label, action, enabled] = !wallet.session ? ["Sign in to trade", onAccount, wallet.configured && !wallet.pending]
     : !book ? [loading ? "Loading…" : "Trading is not open yet", onAccount, false]
     : !unlocked ? [priv.busy ? "Unlocking your account…" : "Unlock your account", () => void priv.run((a) => a.unlock()), !priv.busy]
-    : cash === 0 ? offer ? [depositing ? "Depositing…" : `Deposit ${usdc(offer)} to trade`, deposit, !priv.busy] : ["Deposit to trade", onFunds, true]
+    : cash === 0 ? depositing || moving ? [depositing ? "Depositing…" : "Deposit on its way…", deposit, false]
+      // Credited, but the sync after it failed: the balance is short, so read it again rather than offer another deposit.
+      : priv.snapshot?.behind ? ["Refresh balance", () => void priv.run((a) => a.sync()), !priv.busy]
+      : offer ? [`Deposit ${usdc(offer)} to trade`, deposit, true] : ["Deposit to trade", onFunds, true]
     : !round ? ["Waiting for the next round", buy, false]
-    : toCutoff !== null && toCutoff <= 15 ? ["This round no longer takes orders", buy, false]
+    : toCutoff !== null && toCutoff <= ORDER_MARGIN ? ["This round no longer takes orders", buy, false]
     : limit === null ? ["Price unavailable", buy, false]
     : [`Buy ${name} · up to ${limit}¢`, buy, trading && quantity > 0 && pay <= cash] as const;
   const short = unlocked && cash > 0 && pay > cash;
@@ -255,7 +262,8 @@ function ChainMarkets() {
           orderbook: next.orderbook ?? (keysChanged ? null : stillFresh(keep?.orderbook)) };
       });
       setRefreshing(false);
-      if (failed) retry = setTimeout(() => void update(), Math.max(cooldownRemaining(network), Math.min(30_000, 3_000 * 2 ** (fails - 1))));
+      // Plus up to 2 s of this tab's own, so tabs that failed together do not retry together.
+      if (failed) retry = setTimeout(() => void update(), Math.max(cooldownRemaining(network), Math.min(30_000, 3_000 * 2 ** (fails - 1))) + Math.random() * 2_000);
     };
     pollNow.current = () => void update();
     void update();
@@ -267,10 +275,12 @@ function ChainMarkets() {
   useEffect(() => { checksExpire.current = Math.min(active?.verification?.expiresAt ?? Infinity, active?.orderbook?.expiresAt ?? Infinity); }, [active]);
 
   // Re-read at each round end +1 s, +12 s and +35 s (the registry records the opening about 32 s in): with the 30 s poll alone the
-  // old round stayed up to 20 s past its end and the new price to beat came up to a minute late.
+  // old round stayed up to 20 s past its end and the new price to beat came up to a minute late. Each tab adds its own 0-3 s, so
+  // open tabs do not all read at the same chain second.
   const slotStart = Math.floor(now / market.duration) * market.duration;
+  const [jitter] = useState(() => Math.random() * 3_000);
   useEffect(() => {
-    const timers = [1, 12, 35].map((d) => (slotStart + d) * 1000 - (Date.now() + skew)).filter((ms) => ms > 0).map((ms) => setTimeout(() => pollNow.current(), ms));
+    const timers = [1, 12, 35].map((d) => (slotStart + d) * 1000 - (Date.now() + skew)).filter((ms) => ms > 0).map((ms) => setTimeout(() => pollNow.current(), ms + jitter));
     return () => timers.forEach(clearTimeout);
     // Scheduled once per round; `skew` only refines when.
   }, [slotStart]);
@@ -315,8 +325,11 @@ function ChainMarkets() {
       // A failed re-read keeps the last read of this same round. Retry after 3 s, 6 s, 12 s…; say so from the third failure in a row.
       const count = ++roundFails.current.count;
       if (count >= 3) setRoundError("Unable to load this round. Try refreshing.");
-      retry = setTimeout(() => setRoundAttempt((n) => n + 1), Math.min(30_000, 3_000 * 2 ** (count - 1)));
+      retry = setTimeout(() => setRoundAttempt((n) => n + 1), Math.min(30_000, 3_000 * 2 ** (count - 1)) + Math.random() * 2_000);
     });
+    // While another round is shown, the current one is read too, at each block: the ticket, the market card and Portfolio trade it.
+    // A failed read is left to the next block.
+    if (roundOffset !== 0) void readRound(verified, snapshot, market.assetId, market.duration, 0).then((read) => { if (!cancelled) setLiveRead({ key: keyOf(snapshot, 0), read }); }, () => undefined);
     return () => { cancelled = true; clearTimeout(retry); };
     // `keyOf` reads only network and market, listed here.
   }, [verified, snapshot, network, market.assetId, market.duration, market.id, roundOffset, roundAttempt]);
@@ -347,28 +360,28 @@ function ChainMarkets() {
   const slotAt = (offset: number): RoundTimes => { const start = slotStart + offset * market.duration; return { start, cutoff: start + market.duration - 30, end: start + market.duration }; };
   const times = round?.round ? timesOf(round.round) : slotAt(roundOffset);
   const shownPhase = round ? clockPhase(round.phase, times, now) : null;
-  const phase = round ? round.phase === 0 && now < times.end ? now < times.start ? "Upcoming" : "Starting…" : PHASES[shownPhase ?? 0]
+  const phase = round ? round.phase === 0 && now < times.start ? "Upcoming" : PHASES[shownPhase ?? 0]
     : roundError && verified ? "Read unavailable" : verified ? "Loading round…" : loading ? "Loading…" : "Unavailable";
   const line = countdownLine(times, now);
-  // A slot the keeper has not scheduled yet is a round to come, not a missing one.
-  const captions = loading ? { opening: "Loading…", closing: "Loading…" } : round?.phase === 0 && now < times.end ? { opening: "Awaiting opening observation", closing: "Awaiting resolution" } : priceCaptions(round, Boolean(verified), Boolean(roundError));
+  // A slot the keeper has not scheduled yet is a round to come, not a missing one; once its start has passed it can never be
+  // scheduled (the registry refuses a start in the past), so it reads Not scheduled.
+  const captions = loading ? { opening: "Loading…", closing: "Loading…" } : round?.phase === 0 && now < times.start ? { opening: "Awaiting opening observation", closing: "Awaiting resolution" } : priceCaptions(round, Boolean(verified), Boolean(roundError));
   const openingExact = round?.round?.openedAt ? exactObservationPrice(round.round.opening.price, round.round.opening.decimals) : null;
   const openingPrice = round?.round?.openedAt ? observationPrice(round.round.opening.price, -round.round.opening.decimals) : null;
   const closing = round?.round?.resolvedAt && round.round.outcome !== 3 ? round.round.closing : null;
   const result = round?.round?.outcome === 1 ? "Up wins" : round?.round?.outcome === 2 ? "Down wins" : round?.round?.outcome === 3 ? "Round voided" : null;
-  // To the cent, so a tie (which resolves Up) reads as Up.
-  const versus = (value: number | null) => value === null || openingExact === null ? null : Math.round((value - Number(openingExact)) * 100) / 100;
+  // Signed by the exact difference (market-view.ts versus), as settlement is: a tie reads Up, a Down lead under a cent reads Down.
   const tone = (difference: number | null) => difference === null ? "" : difference >= 0 ? "up" : "down";
   const signed = (difference: number) => `${difference >= 0 ? "▲" : "▼"} $${price(Math.abs(difference))}`;
-  const closingDelta = closing ? versus(Number(exactObservationPrice(closing.price, closing.decimals))) : null;
+  const closingDelta = closing ? versus(Number(exactObservationPrice(closing.price, closing.decimals)), openingExact) : null;
 
   // The live chart keeps the last read of this same offset while the next round loads, so it never remounts mid-round.
   const chartRound = verified && streams && loadedRoundKey.startsWith(`${network}:${market.id}:${roundOffset}:`) && roundRead?.round ? roundRead.round : null;
   // With no readable round (Horizen halted or busy, or not scheduled yet) the current slot still shows its prices, without a price to beat.
   const chartTimes = chartRound ? timesOf(chartRound) : roundOffset === 0 ? times : null;
 
-  // The round being traded: the last read of the current round, open by the clock.
-  const live = verified && liveRead?.key.startsWith(`${network}:${market.id}:0:`) ? liveRead.read : null;
+  // The round being traded: the read of the current round (the block's, never an earlier round's), open by the clock.
+  const live = verified && snapshot && liveRead?.key === keyOf(snapshot, 0) ? liveRead.read : null;
   const liveTimes = live?.round ? timesOf(live.round) : slotAt(0);
   const openRound = live?.round && clockPhase(live.phase, liveTimes, now) === 3 ? { start: Number(live.start), cutoff: Number(live.round.cutoff) } : null;
   const ticketRound = openRound && live?.round ? { ...openRound, end: Number(live.round.end), opening: live.round.openedAt ? exactObservationPrice(live.round.opening.price, live.round.opening.decimals) : null } : null;
@@ -379,9 +392,23 @@ function ChainMarkets() {
   let up: number | null = null;
   try { if (spot && spotLive && feed && ticketRound?.opening) up = fairUp(spot.p, Number(ticketRound.opening), realizedSigma(feed.closes), ticketRound.end - chainNow); } catch { up = null; }
   const askOf = (side: Side) => up === null ? null : askCents(side === "up" ? up : 1 - up);
-  const nowDelta = versus(spot?.p ?? null);
+  const nowDelta = versus(spot?.p ?? null, openingExact);
   const liveLine = countdownLine(liveTimes, now);
   const onMarket = (next: MarketFeed) => setFeed((last) => last?.spot?.t === next.spot?.t && last?.closes.length === next.closes.length && last?.status === (next as { status?: string }).status ? last : next);
+  // The chart reports the price only when it reaches the present (the current or next round). Otherwise (an earlier round shown,
+  // or a next round with no chart) a feed of the current round keeps the ticket's and the market card's prices live.
+  const chartLive = chartTimes !== null && roundOffset >= 0;
+  useEffect(() => {
+    if (chartLive || page !== "markets") return;
+    const feed = createPriceFeed((liveTimes.start - 300) * 1000, liveTimes.end * 1000);
+    let seen = -1;
+    const timer = setInterval(() => { if (feed.version !== seen) { seen = feed.version; onMarket({ spot: feed.last(), closes: feed.closes(), status: feed.status }); } }, 500);
+    const visibility = () => document.visibilityState === "hidden" ? feed.pause() : feed.resume();
+    visibility();
+    document.addEventListener("visibilitychange", visibility);
+    return () => { feed.pause(); clearInterval(timer); document.removeEventListener("visibilitychange", visibility); };
+    // onMarket only sets state.
+  }, [chartLive, page, liveTimes.start, liveTimes.end]);
 
   const pins = verified ? Object.entries(verified.manifest.contracts).map(([name, pin]) => ({ name, ...pin, chainId: "chainId" in pin ? pin.chainId : network })) : [];
   if (streams) {
@@ -405,6 +432,8 @@ function ChainMarkets() {
     </div></header>
     <main id="chain-main" className="app-main" tabIndex={-1}>
       {page !== "markets" && <div className="page-heading trading-heading"><div><h1>{page === "portfolio" ? <>Your positions<span>.</span></> : <>Your history<span>.</span></>}</h1></div></div>}
+      {/* Privy's sign-in errors: every sign-in path closes the account popup first, so they show here, under the header's Sign in. */}
+      {!wallet.session && wallet.error && <div className="chain-status-banner warn" role="alert"><Warning size={21} /><div><strong>{wallet.error}</strong></div></div>}
       {(connectionError || (!verified && (planned || offline))) && <div className={`chain-status-banner ${connectionError ? "warn" : ""}`}>{connectionError ? <Warning size={21} /> : <Info size={21} />}<div><strong>{connectionError ? "Market checks unavailable" : planned ? "Public markets not available yet" : "Public markets unavailable"}</strong><p>{connectionError || offline}</p></div><button className="icon-button" aria-label="Refresh markets" disabled={refreshing || cooldownRemaining(network) > 0} onClick={refreshMarkets}><ArrowsClockwise size={20} /></button></div>}
       {page === "markets" ? <>
         <section className="chain-market-cards" aria-label="Choose a market">{MARKETS.map((item, index) => <button className={`chain-market-card ${marketIndex === index ? "selected" : ""}`} key={item.id} aria-pressed={marketIndex === index} onClick={() => chooseMarket(index)}><span className="chain-card-heading"><span className={`coin ${item.asset.toLowerCase()} small`}><CurrencyBtc weight="bold" /></span><strong>{item.name}</strong><span className="chain-duration">{item.duration / 60}m</span></span><span className="chain-card-question">Higher or lower?</span>
@@ -423,7 +452,7 @@ function ChainMarkets() {
                   : <div className={`chain-countdown ${line.urgent ? "urgent" : ""}`} role="timer"><span>{line.label}</span><strong>{line.time}</strong><div className="chain-track"><i style={{ transform: `scaleX(${1 - line.progress})` }} /></div></div>}
               </div>
               {chartTimes ? <Suspense fallback={<div className="chain-chart-empty" />}><LiveChart start={chartTimes.start} cutoff={chartTimes.cutoff} end={chartTimes.end} priceToBeat={chartRound?.openedAt ? exactObservationPrice(chartRound.opening.price, chartRound.opening.decimals) : null}
-                onMarket={roundOffset >= 0 ? onMarket : undefined} /></Suspense> : <div className="chain-chart-empty">{result && round?.round?.outcome !== 3 ? <Trophy size={30} /> : <ChartLine size={30} />}<strong>{round?.phase === 0 ? "No round scheduled for this time" : result ?? "Settlement observations"}</strong><p className="chain-copy">{round?.phase === 0 ? "The registry has no market in this time slot. Check the adjacent rounds or refresh." : "Opening and closing observations determine the outcome."}</p>{streams && <small>Chainlink Data Streams · Base → Horizen</small>}</div>}
+                offset={roundOffset} onMarket={roundOffset >= 0 ? onMarket : undefined} /></Suspense> : <div className="chain-chart-empty">{result && round?.round?.outcome !== 3 ? <Trophy size={30} /> : <ChartLine size={30} />}<strong>{round?.phase === 0 ? "No round scheduled for this time" : result ?? "Settlement observations"}</strong><p className="chain-copy">{round?.phase === 0 ? "The registry has no market in this time slot. Check the adjacent rounds or refresh." : "Opening and closing observations determine the outcome."}</p>{streams && <small>Chainlink Data Streams · Base → Horizen</small>}</div>}
               {round?.round && <details className="chain-details"><summary>Round rules & exact observations</summary><dl className="chain-account-values"><div><dt>Trading cutoff</dt><dd>{utc(round.round.cutoff)} UTC{alsoLocal(round.round.cutoff)}</dd></div><div><dt>Opening deadline</dt><dd>{utc(round.round.openingDeadline)} UTC{alsoLocal(round.round.openingDeadline)}</dd></div>{round.round.voidableAfter !== null ? <div><dt>Closing price timeout</dt><dd>{utcDate(round.round.voidableAfter)} UTC</dd></div> : round.round.resolutionDeadline !== null && <div><dt>Resolution deadline</dt><dd>{utc(round.round.resolutionDeadline)} UTC{alsoLocal(round.round.resolutionDeadline)}</dd></div>}<div><dt>Exact opening</dt><dd>{round.round.openedAt ? `$${exactObservationPrice(round.round.opening.price, round.round.opening.decimals)}` : "Not recorded"}</dd></div><div><dt>Exact closing</dt><dd>{closing ? `$${exactObservationPrice(closing.price, closing.decimals)}` : "Not recorded"}</dd></div></dl><p className="chain-copy">A tie resolves Up. {round.round.voidableAfter !== null ? "After the round ends it can be resolved whenever its closing price has been delivered; there is no deadline. It can be voided only if no opening price was recorded by the opening deadline, or after the closing price timeout while no closing price has been delivered. Anyone can block price delivery until that timeout at a small cost in network fees, so a trader holding the losing side can force a void." : "If its opening or closing price is not recorded by the deadline, the round can be voided."} Prices shown above are rounded to cents for display; settlement compares the exact values.</p></details>}
               {round && <details className="chain-details"><summary>Round identity</summary><code>{round.roundId}</code><p className="chain-copy">{round.phase === 0 ? "Canonical ID for this unscheduled time slot." : "Read from the verified registry at the displayed block."}</p></details>}
               {roundError && verified && <p className="chain-error" role="alert">{roundError} <button className="chain-text-button" onClick={() => setRoundAttempt((n) => n + 1)}>Retry</button></p>}
@@ -438,6 +467,6 @@ function ChainMarkets() {
       <SiteFooter mode="chain" status={<span>ZEDGE · {network === 2651420 ? "Testnet" : "Mainnet"}</span>} action={<button onClick={() => openAccount("security")}>Account security</button>} />
     </main>
     {page === "markets" && <div className="chain-mobile-bar">{(["up", "down"] as const).map((side) => <button key={side} className={side} onClick={() => pick(side)}>{side === "up" ? "Up" : "Down"} <b>{cents(askOf(side))}</b></button>)}</div>}
-    {drawer && <AccountDrawer view={drawer} onView={setDrawer} onClose={() => setDrawer(null)} network={network} wallet={wallet} orderbook={fundingBook} orderbookReason={active?.orderbookError ?? ""} priv={priv} />}
+    {drawer && <AccountDrawer view={drawer} onView={setDrawer} onClose={() => setDrawer(null)} network={network} wallet={wallet} orderbook={fundingBook} orderbookReason={active?.orderbookError ?? ""} priv={priv} onSignIn={signIn} />}
   </div>;
 }
