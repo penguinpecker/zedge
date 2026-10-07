@@ -34,8 +34,9 @@ export interface Chain {
   context(sender: Address): Promise<AuthContext>;
   /** Where a signed request went, at the latest block: its submission (a submitRequestFor carrying `signature`, since `fromBlock`)
    * once the sender's request nonce moved past `nonce`; "absent" once it can never be submitted (the nonce unchanged in a block past
-   * the deadline, or used by another signature well past it); "pending" before either. Never decided from a relayer's answer. */
-  settle(sender: Address, signature: Hex, nonce: bigint, deadline: bigint, fromBlock: bigint): Promise<Submission | "pending" | "absent">;
+   * the deadline, or used by another signature well past it); "pending" before either. Never decided from a relayer's answer:
+   * `txHash`, the transaction the relayer named, is only read first, as where to look. */
+  settle(sender: Address, signature: Hex, nonce: bigint, deadline: bigint, fromBlock: bigint, txHash?: Hex): Promise<Submission | "pending" | "absent">;
   completion(requestId: Hex, fromBlock: bigint): Promise<Completion | null>;
   /** Requests the account has sent, to any application, as of the latest block, and that block's number. */
   sent(account: Address): Promise<{ head: bigint; total: bigint }>;
@@ -69,6 +70,8 @@ export type Phase = "signing" | "sending" | "submitted" | "waiting" | "staged" |
 /** `chain` names where `tx` is: Horizen unless it is a Base transaction. */
 export type ActionState = { id: number; action: string; phase: Phase; text: string; tx?: Hex; chain?: 8453 | 26514; /** Deposit only: stages done of Sent on Base, Reached Horizen, Credited. */ stage?: 1 | 2 | 3; startedAt: number; final: boolean };
 type Step = (phase: Phase, text: string, tx?: Hex, chain?: 8453 | 26514, stage?: 1 | 2 | 3) => void;
+/** A request the chain shows submitted: its line, where it went, and the context it was signed with. */
+type Submitted = { step: Step; submission: Submission; ctx: AuthContext };
 export type HistoryEntry = { requestId: Hex; block: bigint; txHash: Hex; text: string; readable: boolean };
 export type Order = { roundStart: number; outcome: "up" | "down"; side: "buy" | "sell"; price: number; quantity: number; tif: "ioc" | "gtc"; expiry: number };
 
@@ -254,22 +257,35 @@ export class PrivateAccount {
     await this.sync();
   }
 
-  async #sync(label: string): Promise<ReceiptBody> {
+  async #sync(label: string): Promise<ReceiptBody> { return this.#syncDone(await this.#sendSync(label)); }
+  /** A sync signed and relayed; `ctx`: signed right behind another request of this account (see #submit). */
+  async #sendSync(label: string, ctx?: AuthContext) {
     const id = syncRequestId(this.account);
-    const done = await this.#send(label, PROCESS, toHex(await this.#session.encryptCommand(id, padBody(this.#session, id, syncBody()))));
-    const { body } = await this.#open(done.completion, [id]);
+    return this.#submit(label, PROCESS, toHex(await this.#session.encryptCommand(id, padBody(this.#session, id, syncBody()))), ctx);
+  }
+  /** A relayed sync's completion and the view in its receipt. */
+  async #syncDone(sent: Submitted): Promise<ReceiptBody> {
+    const done = await this.#finish(sent);
+    const { body } = await this.#open(done.completion, [syncRequestId(this.account)]);
     done.step("done", "Up to date");
     return body;
   }
 
   /** Signs and relays one request, then waits for the operator. A FAILED completion throws its public error. */
   async #send(label: string, requestType: typeof PROCESS | typeof ASSOCIATEKEY, payload: Hex) {
+    return this.#finish(await this.#submit(label, requestType, payload));
+  }
+
+  /** Signs and relays one request, and follows it until the chain shows it submitted. `given`: the context of this account's
+   * request just submitted, with the nonce after it, so a request can follow another without a new read. */
+  #submit(label: string, requestType: typeof PROCESS | typeof ASSOCIATEKEY, payload: Hex, given?: AuthContext) {
     const step = this.#action(label);
-    try {
+    return this.#failing(step, async () => {
       step("signing", "Signing");
       // A busy RPC (a 429 and this page's cooldown) is waited out, as #landed does; nothing is signed before the read succeeds.
-      const ctx = await this.#poll(() => this.#chain.context(this.account), this.#now() + 90_000);
+      const ctx = given ?? await this.#poll(() => this.#chain.context(this.account), this.#now() + 90_000);
       if (!ctx) throw new PublicError(NETWORK_DOWN, "NETWORK_BUSY");
+      this.#alive();
       // The operator keys are read in the same batch as the nonce: a changed executor key stops every signature.
       if (ctx.teeSigner.toLowerCase() !== this.#book.authenticator.teeSigner || ctx.enclaveKey.toLowerCase() !== this.#book.authenticator.enclavePublicKey) throw new PublicError(OPERATOR_KEYS_CHANGED);
       const deadline = ctx.timestamp + DEADLINE_SECONDS;
@@ -279,8 +295,15 @@ export class PrivateAccount {
       const answer = await this.#relay.post({ kind: "request", sender: this.account, requestType, payload, tokenAddress: ZERO_ADDRESS, assetAmount: "0", deadline: deadline.toString(), signature, permit: "0x" });
       if (refusedBeforeSending(answer)) throw new PublicError(relayText(answer, this.#now()), answer.code, answer.retryAfter);
       if (!answer.ok) step("sending", OUTCOME_UNKNOWN);
-      const submission = await this.#landed(ctx, signature, deadline, step);
+      const submission = await this.#landed(ctx, signature, deadline, step, answer.txHash);
       step("submitted", `Submitted · ${submission.txHash.slice(0, 10)}…`, submission.txHash);
+      return { step, submission, ctx };
+    });
+  }
+
+  /** Waits for the operator on a submitted request. A FAILED completion throws its public error. */
+  #finish({ step, submission }: Submitted) {
+    return this.#failing(step, async () => {
       const completion = await this.#completion(submission.requestId, submission.block, step);
       if (completion.status !== 0) {
         // PUB_KEY_NOT_REGISTERED: the one public failure the client recovers from, by registering its key.
@@ -288,7 +311,13 @@ export class PrivateAccount {
         throw new PublicError(`Failed: ${completion.errorMessage || "the operator refused the request"}`, "FAILED");
       }
       return { completion, step, submission };
-    } catch (error) {
+    });
+  }
+
+  /** A request's failure, on its own line and as a PublicError. */
+  async #failing<T>(step: Step, work: () => Promise<T>): Promise<T> {
+    try { return await work(); }
+    catch (error) {
       if (!(error instanceof PublicError)) console.warn("ZEDGE request failed", error);
       const message = error instanceof PublicError ? error.message : "The request could not complete.";
       if (!(error instanceof PublicError && error.code === "NO_KEY")) step("failed", message);
@@ -306,12 +335,14 @@ export class PrivateAccount {
   }
 
   /** Where the signed request went, from the chain alone, whatever the relayer answered (or did not): its submission, or proof that
-   * it never will be. Nothing is signed again here, and a failed read is waited out. */
-  async #landed(ctx: AuthContext, signature: Hex, deadline: bigint, step: (phase: Phase, text: string) => void): Promise<Submission> {
+   * it never will be. Nothing is signed again here, and a failed read is waited out. `txHash`, the relayer's transaction, is
+   * read first, once: only where to look. */
+  async #landed(ctx: AuthContext, signature: Hex, deadline: bigint, step: (phase: Phase, text: string) => void, txHash?: Hex): Promise<Submission> {
     const started = this.#now();
     for (;;) {
       this.#alive();
-      const found = await this.#chain.settle(this.account, signature, ctx.nonce, deadline, ctx.block).catch(() => null);
+      const found = await this.#chain.settle(this.account, signature, ctx.nonce, deadline, ctx.block, txHash).catch(() => null);
+      txHash = undefined;
       if (found === "absent") throw new PublicError(NOT_SUBMITTED, "NOT_SUBMITTED");
       if (found && found !== "pending") return found;
       if (this.#now() - started > 1_800_000) throw new PublicError("Whether the request was submitted is still unknown. Check History before trying again.");
@@ -332,7 +363,8 @@ export class PrivateAccount {
       const elapsed = this.#now() - started;
       if (elapsed > limit) throw new PublicError(STILL_WAITING);
       step("waiting", busy ? NETWORK_BUSY : elapsed > 300_000 ? STILL_WAITING : `Waiting for the operator · ${Math.round(elapsed / 1000)}s`);
-      await this.#sleep(elapsed < 30_000 ? 2_000 : elapsed < 120_000 ? 3_000 : 5_000);
+      // Every second at first: an operator transition takes about 3 s and blocks come every second.
+      await this.#sleep(elapsed < 30_000 ? 1_000 : elapsed < 120_000 ? 3_000 : 5_000);
     }
   }
 
@@ -388,16 +420,25 @@ export class PrivateAccount {
         const capture = (o: Outcome) => { outcome = o; };
         if (book) this.#awaiting.set(c.id, capture);
         try {
-          const done = await this.#send(label, PROCESS, toHex(await this.#session.encryptCommand(c.id, padBody(this.#session, c.id, commandBody(c)))));
+          const sent = await this.#submit(label, PROCESS, toHex(await this.#session.encryptCommand(c.id, padBody(this.#session, c.id, commandBody(c)))));
+          // A book command's collect sync goes out as soon as the command is submitted, at the next request nonce: the operator
+          // serves ticks first, so it runs the command, its tick and the sync back to back, and the sync's receipt brings the result.
+          // A sync that cannot go out now leaves the collection to after the tick, as before.
+          // Simplification: if the command's own wait fails, the piped sync is not waited for; its receipt is then not read here.
+          let piped: Promise<Submitted | null> | null = book ? this.#sendSync("Collect result", { ...sent.ctx, nonce: sent.ctx.nonce + 1n }).catch(() => null) : null;
+          /** The piped sync's receipt, read once; null when none went out. */
+          const collect = async () => { const p = await piped; piped = null; return p && this.#syncDone(p); };
+          const done = await this.#finish(sent);
           let { body } = await this.#open(done.completion, [c.id]);
           // The one automatic retry: a nonce the sweep spent. A fresh signature, never a resend.
           if (!outcome && body.status === "rejected" && attempt === 0 && /replayed, conflicting or out-of-order nonce/.test(body.reason ?? "")) {
             done.step("refused", "Refused: nonce out of date, signing again");
-            body = await this.#sync("Sync");
+            body = await collect() ?? await this.#sync("Sync");
             if (!outcome) continue;
           }
           if (!outcome && (!book || body.status !== "staged")) {
             done.step(body.status === "rejected" ? "refused" : "done", body.status === "rejected" ? `Refused: ${body.reason ?? "no reason given"}` : body.status === "retry" ? "Applied (already applied)" : "Applied");
+            await collect().catch(() => null);
             return body;
           }
           if (!outcome) {
@@ -406,7 +447,9 @@ export class PrivateAccount {
             // A tick that never completes (the endpoint drops a trigger that reverts) is not waited on for long: the collect sync's own tick activates the command.
             if (done.completion.tick) await this.#completion(done.completion.tick, done.completion.block, (_phase, text) => done.step("matching", text === "Waiting for the operator" ? "Matching" : text), 120_000).catch(() => undefined);
             done.step("collecting", "Collecting result");
-            for (let i = 0; i < 2 && !outcome; i++) body = await this.#sync("Collect result");
+            // At most two collect syncs, the piped one included.
+            body = await collect() ?? await this.#sync("Collect result");
+            if (!outcome) body = await this.#sync("Collect result");
           }
           if (!outcome) {
             // Still staged, or collected by another session: never shown as applied. It finishes this line when it comes back.
@@ -417,6 +460,8 @@ export class PrivateAccount {
           const o: Outcome = outcome;
           const final = describeOutcome(o.receipt || o.status !== "applied" || c.op !== "place_order" ? o : { ...o, receipt: inferReceipt(before, this.#state.view, c) }, quantity);
           done.step(final.phase, final.text);
+          // A result that came with the command's own receipt leaves the piped sync unread: it still brings the newer view.
+          await collect().catch(() => null);
           return { ...body, outcome: o };
         } finally {
           // Nobody reads `outcome` past here: a result that comes later gets a line of its own.
@@ -591,7 +636,8 @@ export class PrivateAccount {
 
   /** History in pages of HISTORY_PAGE blocks, newest first, never below `floor`: the first open reads the latest page, a reopen only
    * the blocks since (none when the request count has not moved), and `older` the page before the oldest read. Receipts are
-   * trial-decrypted in chain order; unmatched ones stay listed as unreadable. `stop()` abandons the read (the page closed). */
+   * decrypted once each, under any request ID of this account (display only); unmatched ones stay listed as unreadable. `stop()`
+   * abandons the read (the page closed). */
   async loadHistory(floor: bigint, older = false, stop: () => boolean = () => false): Promise<void> {
     const quit = () => this.#closed || stop();
     const page = (to: bigint) => ({ from: to - HISTORY_PAGE + 1n > floor ? to - HISTORY_PAGE + 1n : floor, to });
@@ -623,16 +669,12 @@ export class PrivateAccount {
     const scan = this.#scan;
     if (!scan) return;
     const entries: HistoryEntry[] = [];
-    let nonce = 0;
     for (const item of scan.logged) {
-      const ids = [syncRequestId(this.account), commandId(this.account, nonce), commandId(this.account, nonce + 1), commandId(this.account, nonce + 2)];
       let body: ReceiptBody | null = null;
-      for (const ciphertext of item.ciphertexts) for (const id of ids) {
-        if (body) break;
-        const r = await this.#session.decryptReceipt(ciphertext, id);
-        if (r.status === "readable") body = r.envelope.body as ReceiptBody;
+      for (const ciphertext of item.ciphertexts) {
+        const r = await this.#session.openReceipt(ciphertext);
+        if (r.status === "readable") { body = r.envelope.body as ReceiptBody; break; }
       }
-      if (body?.view) nonce = body.view.nonce;
       entries.unshift({ requestId: item.requestId, block: item.block, txHash: item.txHash, readable: Boolean(body), text: body ? describeReceipt(body) : item.ciphertexts.length ? "Unreadable record" : "No private record" });
     }
     // Simplification: hours from block numbers at Horizen's ~1 s blocks, as the seven-day window is.
@@ -699,7 +741,16 @@ export function viemChain(client: PublicClient, book: Book, base: PublicClient, 
       ]);
       return { block: block.number, nonce, timestamp: block.timestamp, teeSigner, enclaveKey };
     },
-    async settle(sender, signature, nonce, deadline, fromBlock) {
+    async settle(sender, signature, nonce, deadline, fromBlock, txHash) {
+      // The relayer's transaction and its receipt in one batch, instead of the four reads below: it counts only if its calldata carries
+      // the signature and it logged this application's RequestSubmitted for this sender. Anything else reads the nonce as before.
+      const named = txHash && await Promise.all([client.getTransaction({ hash: txHash }), client.getTransactionReceipt({ hash: txHash })]).catch(() => null);
+      if (named) {
+        const [tx, receipt] = named;
+        const own = receipt.status === "success" && receipt.blockNumber >= fromBlock && tx.input.toLowerCase().includes(signature.slice(2).toLowerCase())
+          ? ours(receipt.logs, "RequestSubmitted").find((l) => l.args.sender.toLowerCase() === sender.toLowerCase()) : undefined;
+        if (own) return { requestId: own.args.requestId, block: receipt.blockNumber, txHash: receipt.transactionHash };
+      }
       const block = await client.getBlock({ blockTag: "latest" });
       const next = await client.readContract({ address: endpoint, abi: endpointAbi, functionName: "facilitatorNonces", args: [sender], blockNumber: block.number });
       // submitRequestFor reverts past the deadline, and blocks only move forward: an unused nonce there stays unused by this signature.

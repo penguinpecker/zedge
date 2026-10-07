@@ -1,12 +1,12 @@
 import { strict as assert } from "node:assert";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
-import { encodeAbiParameters, hexToBytes, keccak256, parseAbiParameters, recoverTypedDataAddress, toHex, type Address, type Hex, type PublicClient } from "viem";
+import { encodeAbiParameters, encodeEventTopics, hexToBytes, keccak256, parseAbiParameters, recoverTypedDataAddress, toHex, type Address, type Hex, type PublicClient } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { decrypt, encrypt, exportPublicKeyToHex, generateKeyPair, importPublicKeyFromHex } from "@horizen/vela-common-ts";
-import { KEY_CHALLENGE_START, engineRound, parseOrderbookManifest, requestTypedData, signable, type VerifiedOrderbook } from "../orderbook-manifest.ts";
+import { KEY_CHALLENGE_START, endpointAbi, engineRound, parseOrderbookManifest, requestTypedData, signable, type VerifiedOrderbook } from "../orderbook-manifest.ts";
 import { usdcPermitTypedData } from "../vault.ts";
-import { HISTORY_PAGE, KEY_CHANGED, NOT_SUBMITTED, PrivateAccount, PublicError, describeOutcome, fetchRelay, readView, relayText, sharesFor, viemChain, type Chain, type Completion, type Relay, type RelayBody, type Settled, type Signer, type Snapshot, type Submission } from "./client.ts";
+import { HISTORY_PAGE, KEY_CHANGED, NOT_SUBMITTED, PrivateAccount, PublicError, describeOutcome, fetchRelay, readView, relayText, sharesFor, viemChain, type Chain, type Completion, type Logged, type Relay, type RelayBody, type Settled, type Signer, type Snapshot, type Submission } from "./client.ts";
 
 const RELAYER: Address = "0x5555555555555555555555555555555555555555";
 const fixture = JSON.parse(await readFile(new URL("../testdata/orderbook-configured.json", import.meta.url), "utf8"));
@@ -268,6 +268,22 @@ test("a book order goes Signing, Sending, Submitted, Waiting, Staged, Matching, 
   assert.throws(() => account.placeOrder({ roundStart: ROUND, outcome: "up", side: "buy", price: 50, quantity: 1000, tif: "gtc", expiry: ROUND + 871 }), /cutoff/);
 });
 
+test("a book order's collect sync goes out as soon as the order is submitted, before the operator runs it: two requests, then its fills", async () => {
+  const s = await stack(), signer = wallet();
+  let t = 0;
+  // Polls wait a real turn of the event loop, so the sync can be signed and sent while the order is waited on.
+  const account = new PrivateAccount(s.book, signer, s.chain, s.relay, { hints: memory(), now: () => (t += 1000), sleep: () => new Promise((resolve) => setImmediate(resolve)) });
+  await account.unlock();
+  s.fund(account.account, 10_000_000);
+  const before = s.sent.length, completion = s.chain.completion;
+  // The operator runs nothing of this order, neither it nor its tick, until its collect sync is on chain.
+  s.chain.completion = async (id, from) => s.sent.length - before < 2 ? null : completion(id, from);
+  const result = await account.placeOrder(ORDER);
+  assert.deepEqual([s.sent.length - before, s.log.slice(-2)], [2, ["place_order", "sync"]], "the order and its one collect sync");
+  assert.equal(result.outcome?.receipt?.status, "filled");
+  assert.equal(account.snapshot.actions.find((a) => a.action === "Buy Up")?.text, "Filled");
+});
+
 test("a nonce the sweep spent is re-signed once with a fresh authorization; a refusal is shown as such", async () => {
   const s = await stack(), signer = wallet();
   const { account, phases } = open(s, signer);
@@ -281,6 +297,28 @@ test("a nonce the sweep spent is re-signed once with a fresh authorization; a re
   assert.notEqual((mints[0] as { signature: Hex }).signature, (mints[2] as { signature: Hex }).signature, "a new signature, not a resend");
   assert.equal(phases("Mint").at(-1), "Applied");
   assert.equal(s.views.get(account.account)!.up, 1_000_000);
+});
+
+test("a book order whose nonce the sweep spent is re-signed from its collect sync's view, with no extra sync; History reads every receipt whatever its nonce", async () => {
+  const s = await stack(), { account, phases } = open(s, wallet());
+  await account.unlock();
+  s.fund(account.account, 10_000_000);
+  const logged: Logged[] = [], completion = s.chain.completion;
+  s.chain.completion = async (id, from) => {
+    const c = await completion(id, from);
+    if (c?.ciphertexts.length && !logged.some((x) => x.requestId === id)) logged.push({ requestId: id, block: c.block, txHash: c.txHash, ciphertexts: c.ciphertexts });
+    return c;
+  };
+  s.views.get(account.account)!.nonce = 40; // the settlement sweep redeemed in this account's name
+  const before = s.log.length;
+  await account.placeOrder(ORDER);
+  assert.deepEqual(s.log.slice(before), ["place_order", "sync", "place_order", "sync"]);
+  assert.equal(phases("Buy Up").at(-1), "Filled");
+  // A History page that starts at the re-signed order (nonce 41, its receipt's ID): each receipt opens under its own ID.
+  s.chain.sent = async () => ({ head: 1_000n, total: 2n });
+  s.chain.history = async () => logged.slice(-2);
+  await account.loadHistory(0n);
+  assert.deepEqual(account.snapshot.history.map((h) => h.text), ["Order result · Filled", "Order staged"]);
 });
 
 test("one-click withdrawal: the whole balance to this address on Base, Requested, Approved, Paid on Base", async () => {
@@ -471,7 +509,7 @@ test("an earlier attempt that turns out applied stops the automatic re-sign: one
   s.chain.settle = settle;
   await account.placeOrder({ ...ORDER, price: 70 }); // the user tries again, at another price
   assert.equal(s.log.filter((x) => x === "place_order").length, 2, "the second was refused for its nonce and not signed again");
-  assert.equal(s.log.at(-1), "place_order", "nor synced: the refusal itself brought the first order's result");
+  assert.deepEqual(s.log.slice(-2), ["place_order", "sync"], "nor synced again: the refusal itself brought the first order's result, and only the collect sync sent with the order followed");
   assert.equal(s.views.get(account.account)!.nonce, 1);
   assert.equal(phases("Buy Up").at(-1), "Filled");
 });
@@ -597,6 +635,29 @@ test("settling from the chain: the request nonce first, then the calldata that c
   assert.equal(await settle(), "absent");
   logs.push({ args: { requestId: ours }, blockNumber: 21n, transactionHash: ours });
   assert.deepEqual(await settle(), { requestId: ours, block: 21n, txHash: ours });
+});
+
+test("settling on the relayer's transaction: it and its receipt in one batch, used only when they prove the submission", async () => {
+  const s = await stack(), mine = `0x${"ab".repeat(65)}` as Hex, tx = keccak256(toHex("tx")), requestId = keccak256(toHex("req"));
+  const submitted = (sender: Address) => ({ address: s.book.endpoint.address, data: encodeAbiParameters(parseAbiParameters("address"), [RELAYER]), blockNumber: 21n, logIndex: 0, transactionHash: tx,
+    topics: encodeEventTopics({ abi: endpointAbi, eventName: "RequestSubmitted", args: { applicationId: BigInt(s.book.application.id), requestId, sender } }) });
+  const proof = { input: `0x9a1b2c3d00${mine.slice(2)}00`, status: "success", sender: RELAYER, fromBlock: 10n, mined: true };
+  let it = proof;
+  const calls: string[] = [];
+  const client = {
+    getTransaction: async () => { calls.push("tx"); return { input: it.input }; },
+    getTransactionReceipt: async () => { calls.push("receipt"); if (!it.mined) throw new Error("not found"); return { status: it.status, blockNumber: 21n, transactionHash: tx, logs: [submitted(it.sender)] }; },
+    getBlock: async () => { calls.push("block"); return { number: 50n, timestamp: 1_000n }; },
+    readContract: async () => { calls.push("nonce"); return 3n; },
+  } as unknown as PublicClient;
+  const settle = () => viemChain(client, s.book, client).settle(RELAYER, mine, 3n, 1_100n, it.fromBlock, tx);
+  assert.deepEqual(await settle(), { requestId, block: 21n, txHash: tx });
+  assert.deepEqual(calls, ["tx", "receipt"], "no block, nonce or log reads");
+  for (const change of [{ input: "0x9a1b2c3d" }, { status: "reverted" }, { sender: `0x${"66".repeat(20)}` as Address }, { fromBlock: 22n }, { mined: false }]) {
+    it = { ...proof, ...change }; calls.length = 0;
+    assert.equal(await settle(), "pending", Object.keys(change)[0]);
+    assert.deepEqual(calls.slice(2), ["block", "nonce"], "the nonce path decides");
+  }
 });
 
 test("History reads 1,000-block ranges at most five a second, stops at the account's first request, and can be stopped", async () => {
