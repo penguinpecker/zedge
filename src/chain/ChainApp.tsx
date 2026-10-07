@@ -298,11 +298,11 @@ function ChainMarkets() {
   }, [slotStart]);
 
   // The page's one /v1/live read every 2 s while the tab is visible (the price feeds and round results share it: read-api.ts liveNow).
-  // A failed read keeps the last answer.
+  // A failed read keeps the last answer, and so does a late one older than it (the shared read can have two in flight).
   const [indexed, setIndexed] = useState<Live | null>(null);
   useEffect(() => {
     let on = true;
-    const read = () => { if (document.visibilityState !== "hidden") void liveNow().then((x) => { if (on && x) setIndexed(x); }); };
+    const read = () => { if (document.visibilityState !== "hidden") void liveNow().then((x) => { if (on && x) setIndexed((held) => held && held.head.block > x.head.block ? held : x); }); };
     read();
     const timer = setInterval(read, 2_000);
     return () => { on = false; clearInterval(timer); };

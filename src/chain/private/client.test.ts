@@ -859,4 +859,15 @@ test("held rounds' results come from the shared live read; the chain is read onl
   assert.equal(reads, 1, "the chain fallback keeps today's 5 s");
   t += 1; assert.deepEqual(await indexed.settled([id(3)], 0n), [{ roundId: id(3), outcome: 1 }]);
   assert.equal(reads, 2);
+  // A stuck or catching-up indexer (head over 30 s behind) answers "no result yet" for a round the chain has settled: the chain.
+  live = { head: { block: 1, time: 1 }, price: null, rounds: [{ start: 0, registryRoundId: id(1), open: null, settle: null }] as ApiRound[] };
+  t = 32_000;
+  assert.deepEqual(await indexed.settled([id(1)], 0n), [{ roundId: id(3), outcome: 1 }]);
+  assert.equal(reads, 3);
+  // Its newest History page would leave out the latest requests: the chain scan. An older page does not depend on the head.
+  const page: AccountPage = { head: { block: 1, time: 1 }, more: false, requests: [] }, who = "0x00000000000000000000000000000000000000aa" as Address;
+  const paged = indexedChain(chain, { account: async () => page, live: async () => live }, () => t);
+  assert.equal(await paged.requests!(who), null);
+  assert.equal(await paged.requests!(who, { block: 5, logIndex: 0 }), page);
+  t = 31_000; assert.equal(await paged.requests!(who), page, "30 s behind is still fresh");
 });

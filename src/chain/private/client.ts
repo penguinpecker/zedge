@@ -9,7 +9,7 @@ import { commandBody, commandId, syncBody, syncRequestId, type EngineCommand, ty
 import { padBody } from "../../../adapters/vela/crypto/pad.ts";
 import { ASSOCIATEKEY, LOT, OPERATOR_KEYS_CHANGED, PROCESS, ZERO_ADDRESS, endpointAbi, engineRound, normalizeSignature, requestTypedData, type VerifiedOrderbook } from "../orderbook-manifest.ts";
 import { SUBTYPES, decodeCredit, decodePayout, decodeSettle, inboxAbi, usdcAbi, usdcPermitTypedData, vaultAbi } from "../vault.ts";
-import type { AccountPage, Live } from "../read-api.ts";
+import type { AccountPage, Head, Live } from "../read-api.ts";
 
 export type Book = VerifiedOrderbook["manifest"];
 export type TypedData = ReturnType<typeof requestTypedData> | ReturnType<typeof usdcPermitTypedData>;
@@ -784,17 +784,23 @@ const authAbi = [
   { type: "function", name: "getPubSecp521r1", stateMutability: "view", inputs: [], outputs: [{ type: "bytes" }] },
 ] as const;
 
+/** An API answer indexed this far behind the clock (seconds) comes from a stuck or catching-up indexer (it alerts at 30 blocks): its
+ * "no result yet" or short newest page would hold back the chain read, so the chain is read instead. */
+const API_STALE_S = 30;
+
 /** `chain` with the read API first where only display depends on it: History and the cached Portfolio (`requests`, POST /v1/account)
  * and held rounds' results (`settled`, from the page's shared /v1/live read). Every money path and every request in flight still
- * reads the chain. A failed API read falls back to the chain read, which for results runs at most every 5 s, as before. */
+ * reads the chain. A failed or stale API read falls back to the chain read, which for results runs at most every 5 s, as before. */
 export function indexedChain(chain: Chain, api: { account: NonNullable<Chain["requests"]>; live: () => Promise<Live | null> }, now: () => number = Date.now): Chain {
   let fallback: { at: number; key: string; answer: Promise<Settled[]> } | null = null;
+  const fresh = (head: Head) => now() / 1000 - head.time <= API_STALE_S;
   return {
     ...chain,
-    requests: (account, before, limit) => api.account(account, before, limit),
+    // An older page ("Load older") does not depend on how far the indexer has read.
+    requests: async (account, before, limit) => { const page = await api.account(account, before, limit); return page && (before || fresh(page.head)) ? page : null; },
     async settled(roundIds, fromBlock) {
       const wanted = roundIds.map((id) => id.toLowerCase() as Hex), live = await api.live();
-      const rounds = new Map((live?.rounds ?? []).map((r) => [r.registryRoundId, r]));
+      const rounds = new Map((live && fresh(live.head) ? live.rounds : []).map((r) => [r.registryRoundId, r]));
       // /v1/live holds the previous, current and next rounds: the only ones whose result the client reads.
       if (wanted.every((id) => rounds.has(id))) return wanted.flatMap((id) => { const s = rounds.get(id)!.settle; return s ? [{ roundId: id, outcome: s.outcome }] : []; });
       const key = wanted.join(), t = now();

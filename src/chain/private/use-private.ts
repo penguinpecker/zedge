@@ -76,7 +76,7 @@ export function usePrivate(wallet: ChainWallet, orderbook: VerifiedOrderbook | n
   }, [key]);
 
   // Round results: while the account holds shares, look every 2 s for the public result of any held round that ended (the page's
-  // shared /v1/live read; the chain at most every 5 s when that fails). One look at a time, none while the tab is hidden; the client
+  // shared /v1/live read; the chain at most every 5 s when that fails or lags). One look at a time, none while the tab is hidden; the client
   // spaces out looks after a failed read.
   const unlocked = Boolean(snapshot?.unlocked), holds = Boolean(snapshot?.view?.holdings.length);
   useEffect(() => {
