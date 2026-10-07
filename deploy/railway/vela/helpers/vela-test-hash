@@ -1,0 +1,2 @@
+#!/bin/sh
+sha256sum /tmp/vela-test.bin | cut -c1-64

@@ -1,0 +1,5 @@
+#!/bin/sh
+# Moves the verified incoming copy into place and marks it verified; any earlier live copy is kept aside, never deleted.
+set -e; [ -d /vela/incoming/data ] && [ -d /vela/incoming/shared-data ] || { echo "nothing incoming"; exit 1; }
+t=$(date +%s); for n in data shared-data; do [ ! -e /vela/$n ] || mv /vela/$n /vela/$n.prev.$t; mv /vela/incoming/$n /vela/$n; done
+rm -f /vela/.rehearsal; : > /vela/.copy-verified; vela-hash-live

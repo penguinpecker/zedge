@@ -1,0 +1,2 @@
+#!/bin/sh
+echo "data $(vela-hash-dir /vela/incoming/data) shared-data $(vela-hash-dir /vela/incoming/shared-data)"

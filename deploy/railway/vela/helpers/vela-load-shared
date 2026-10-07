@@ -1,0 +1,3 @@
+#!/bin/sh
+# stdin: base64 of a tar of the Mac's zedge-vela_manager-shared volume -> /vela/incoming/shared-data. Prints a file count only.
+set -e; d=/vela/incoming/shared-data; rm -rf "$d"; mkdir -p "$d"; base64 -d | tar -xf - -C "$d"; echo "shared-data: $(find "$d" -type f | wc -l) files"

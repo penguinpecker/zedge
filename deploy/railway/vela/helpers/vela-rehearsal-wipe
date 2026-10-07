@@ -1,0 +1,4 @@
+#!/bin/sh
+# Rehearsal only: removes the rehearsal's database. Refuses unless /vela/.rehearsal marks it as a rehearsal.
+set -e; [ -f /vela/.rehearsal ] || { echo "refusing: /vela is not a rehearsal database"; exit 1; }
+rm -rf /vela/data /vela/shared-data /vela/logs /vela/incoming /vela/.copy-verified /vela/.rehearsal; echo "rehearsal: wiped"

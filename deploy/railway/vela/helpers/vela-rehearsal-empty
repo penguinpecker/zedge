@@ -1,0 +1,4 @@
+#!/bin/sh
+# Rehearsal only: an empty database marked verified, so the wrapper starts the manager. Refuses if any live copy exists.
+set -e; [ ! -e /vela/data ] && [ ! -e /vela/shared-data ] || { echo "refusing: /vela already holds a database"; exit 1; }
+mkdir -p /vela/data /vela/shared-data; : > /vela/.rehearsal; : > /vela/.copy-verified; echo "rehearsal: empty database marked"

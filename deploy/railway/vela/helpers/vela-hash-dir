@@ -1,0 +1,4 @@
+#!/bin/sh
+# One line: the sha256 of every file's sha256 and path under $1, sorted (the Mac computes the same over its docker volume).
+cd "$1" 2>/dev/null || { echo "missing $1"; exit 1; }
+find . -type f -exec sha256sum {} + | LC_ALL=C sort -k2 | sha256sum | cut -c1-64
