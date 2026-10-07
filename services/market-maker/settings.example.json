@@ -1,0 +1,11 @@
+{
+  "halfSpreadCents": 3,
+  "quoteShares": 10,
+  "mintSets": 40,
+  "maxStakeUsdc": 100,
+  "quoteLifetimeSeconds": 180,
+  "requoteDriftCents": 8,
+  "minEthWei": "200000000000000",
+  "maxRpcPerRound": 300,
+  "pollSeconds": 10
+}

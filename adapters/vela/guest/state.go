@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	StateVersion   = 3
+	StateVersion   = 4
 	MaxParamsBytes = 16 << 10
 	// MaxStateBytes is the largest state the guest serves, and the largest
 	// buffer the wasm layer hands the host. It is a measured bound, not the
@@ -44,6 +44,8 @@ const (
 	MaxSweeps        = 16 // settlement redeems per tick
 	MaxArchives      = 4  // rounds archived per tick
 	MaxRecords       = 16 // registry records in one trusted payload
+	MaxDeposits      = 8  // Base deposit records in one trusted payload
+	MaxUnconfirmed   = 8  // rounds settled from reports and not yet confirmed by the registry
 	// MaxStagedBytes bounds a staged command's canonical JSON. Every book
 	// command the engine could accept is at most 519 bytes; without the bound
 	// 32 accounts could each park an 8 KiB command in the state until its tick.
@@ -57,6 +59,8 @@ const (
 	// measured sum of block-time lag and submission-to-commit wait (README
 	// section 9, Cutoff).
 	MinPublicCutoffBuffer = 30
+	// BaseMainnet is the chain of the custody vault (README section 6).
+	BaseMainnet = 8453
 )
 
 // DeployParams are the constructor parameters. Engine.Domain.ApplicationID
@@ -69,6 +73,33 @@ type DeployParams struct {
 	Epoch                  string        `json:"epoch"`
 	Markets                []Market      `json:"markets"`
 	StakeLimits            StakeLimits   `json:"stakeLimits"`
+	Chainlink              Chainlink     `json:"chainlink"`
+	Custody                Custody       `json:"custody"`
+}
+
+// Custody names where the money is: Base USDC in the vault, whose deposit
+// records reach Horizen through the inbox (README section 6). The engine's
+// collateral stays the token the registry rules commit to; it only labels
+// the engine's atoms.
+type Custody struct {
+	ChainID uint64 `json:"chainId"` // 8453
+	Vault   string `json:"vault"`   // BaseCustodyVault proxy on Base
+	Inbox   string `json:"inbox"`   // HorizenDepositInbox proxy on Horizen
+	USDC    string `json:"usdc"`    // the token the vault holds and pays
+}
+
+func (c Custody) valid(e engine.Config) bool {
+	return c.ChainID == BaseMainnet && isAddress(c.Vault) && isAddress(c.Inbox) && isAddress(c.USDC) && c.Vault != c.Inbox &&
+		c.Vault != e.Authority && c.Vault != e.Domain.Endpoint && c.Inbox != e.Authority && c.Inbox != e.Domain.Endpoint
+}
+
+// Unconfirmed is a round the guest settled from a Chainlink report, kept until
+// the registry's own record of it arrives and is compared (README section 10).
+type Unconfirmed struct {
+	Round   string `json:"round"`             // registry round ID
+	Opening string `json:"opening"`           // report hash the engine opened it with
+	Closing string `json:"closing,omitempty"` // report hash the engine resolved it with; empty while open
+	Outcome uint64 `json:"outcome,omitempty"` // 1 Up, 2 Down; 0 while open
 }
 
 // StakeLimits bound what can ride on round outcomes, in collateral atoms
@@ -103,14 +134,6 @@ type Outcome struct {
 	Reason    string `json:"reason,omitempty"` // rejected only
 }
 
-// Notice counts the receipts an account was sent that carry no command ID: in
-// this build, its deposit receipts. The count is the last number used in
-// "<account>:notice:<n>".
-type Notice struct {
-	Account string `json:"account"`
-	Count   uint64 `json:"count"`
-}
-
 // State is the whole application state the host stores between calls.
 type State struct {
 	Version                uint32        `json:"version"`
@@ -119,16 +142,20 @@ type State struct {
 	Epoch                  string        `json:"epoch"`
 	Markets                []Market      `json:"markets"`
 	StakeLimits            StakeLimits   `json:"stakeLimits"`
-	Salt                   string        `json:"salt"`        // 32 random bytes drawn at deploy; keeps the public state root unguessable
-	Clock                  uint64        `json:"clock"`       // block.timestamp of the last accepted tick, 0 before the first
-	Block                  uint64        `json:"block"`       // block.number that tick reported; recorded, never compared
-	TickSeq                uint64        `json:"tickSeq"`     // ticks requested so far
-	LastTick               uint64        `json:"lastTick"`    // highest tick applied
-	Staged                 []Staged      `json:"staged"`      // ascending tick, at most one per account
-	Outcomes               []Outcome     `json:"outcomes"`    // sorted by account, at most one per account
-	Deposits               uint64        `json:"deposits"`    // credited deposits; the next one's ordinal is +1
-	Withdrawals            uint64        `json:"withdrawals"` // withdrawals handed to the endpoint
-	Notices                []Notice      `json:"notices"`     // sorted by account
+	Chainlink              Chainlink     `json:"chainlink"`
+	Custody                Custody       `json:"custody"`
+	Salt                   string        `json:"salt"`         // 32 random bytes drawn at deploy; keeps the public state root unguessable
+	Clock                  uint64        `json:"clock"`        // block.timestamp of the last accepted tick, 0 before the first
+	Block                  uint64        `json:"block"`        // block.number that tick reported; recorded, never compared
+	TickSeq                uint64        `json:"tickSeq"`      // ticks requested so far
+	LastTick               uint64        `json:"lastTick"`     // highest tick applied
+	Staged                 []Staged      `json:"staged"`       // ascending tick, at most one per account
+	Outcomes               []Outcome     `json:"outcomes"`     // sorted by account, at most one per account
+	Deposits               uint64        `json:"deposits"`     // Base deposits credited to the engine (one evidence ID each)
+	DepositsSeen           uint64        `json:"depositsSeen"` // the last Base deposit index processed, credited or refunded
+	Withdrawals            uint64        `json:"withdrawals"`  // withdrawals the engine exported (two evidence IDs each)
+	Payouts                uint64        `json:"payouts"`      // the last payout ordinal: withdrawals and refunds
+	Unconfirmed            []Unconfirmed `json:"unconfirmed"`  // oldest first
 	Engine                 *engine.State `json:"engine"`
 
 	taken *outcomeReceipt // the outcome this request's receipt hands back; never stored
@@ -361,7 +388,7 @@ func (s *State) validate() error {
 		return err
 	}
 	e := s.Engine
-	if !s.StakeLimits.valid(e.Config) {
+	if !s.StakeLimits.valid(e.Config) || !s.Chainlink.valid(e.Config) || !s.Custody.valid(e.Config) || !s.reportsFit() {
 		return errors.New("invalid adapter identity")
 	}
 	// The trigger reads the registry in the block whose timestamp it reports,
@@ -408,20 +435,46 @@ func (s *State) validate() error {
 		}
 	}
 	// Every evidence ID in the engine is one this adapter derived: one per
-	// deposit, two per withdrawal. No withdrawal outlives its transition.
+	// credited deposit, two per withdrawal. No withdrawal outlives its
+	// transition. Every Base deposit index seen was either credited or
+	// refunded, and every payout is a withdrawal or a refund.
 	if s.Deposits > maxEvidence || s.Withdrawals > maxEvidence || uint64(len(e.ExternalEvidence)) != s.Deposits+2*s.Withdrawals ||
-		e.Claimable != 0 || len(e.Withdrawals) != 0 {
+		e.Claimable != 0 || len(e.Withdrawals) != 0 || s.DepositsSeen > engine.MaxAtoms || s.Deposits > s.DepositsSeen ||
+		s.Payouts > engine.MaxAtoms || s.Payouts != s.Withdrawals+s.DepositsSeen-s.Deposits {
 		return errors.New("custody bookkeeping mismatch")
 	}
-	if s.Notices == nil || len(s.Notices) > MaxSliceAccounts {
-		return errors.New("invalid notices")
+	if s.Unconfirmed == nil || len(s.Unconfirmed) > MaxUnconfirmed {
+		return errors.New("invalid unconfirmed rounds")
 	}
-	for i, n := range s.Notices {
-		if !isAddress(n.Account) || n.Count == 0 || n.Count > engine.MaxAtoms || i > 0 && s.Notices[i-1].Account >= n.Account {
-			return errors.New("invalid notices")
+	for i, u := range s.Unconfirmed {
+		if !hash32(u.Round) || !hash32(u.Opening) || (u.Closing == "") != (u.Outcome == 0) || u.Closing != "" && !hash32(u.Closing) || u.Outcome > 2 ||
+			slices.IndexFunc(s.Unconfirmed[:i], func(v Unconfirmed) bool { return v.Round == u.Round }) >= 0 {
+			return errors.New("invalid unconfirmed rounds")
 		}
 	}
 	return nil
+}
+
+// reportsFit reports whether a report request for every pinned config fits
+// RequestBytes with this deployment's own domain, the longest request ID and
+// the most signatures the config needs: one that cannot fit could never be
+// submitted, and the deployment would depend on the registry alone.
+func (s *State) reportsFit() bool {
+	f := uint64(0)
+	for _, d := range s.Chainlink.Configs {
+		f = max(f, d.F)
+	}
+	n := 7*32 + 32 + blobBytes + 2*(32+32*(int(f)+1))
+	who := "0x" + strings.Repeat("f", 40)
+	id := who + ":report:" + strconv.FormatUint(MaxClock, 10)
+	e := requestEnvelope{1, s.domain(), who, s.Epoch, id, "command", requestBody{Type: "report", Report: strings.Repeat("A", (n+2)/3*4)}}
+	b, _ := json.Marshal(e)
+	return len(b) <= RequestBytes
+}
+
+// hash32 is a 0x-prefixed lowercase 32-byte hex string other than zero.
+func hash32(s string) bool {
+	return len(s) == 66 && s[:2] == "0x" && isHex(s[2:], 64) && s[2:] != zeroSalt
 }
 
 func (s *State) encode() ([]byte, error) {
@@ -476,17 +529,10 @@ func (s *State) evidence(kind string, ordinal uint64) string {
 	return hex.EncodeToString(h[:])
 }
 
-// nextNotice returns the request ID for the next unsolicited receipt to account.
-func (s *State) nextNotice(account string) string {
-	i := 0
-	for i < len(s.Notices) && s.Notices[i].Account < account {
-		i++
-	}
-	if i == len(s.Notices) || s.Notices[i].Account != account {
-		s.Notices = append(s.Notices, Notice{})
-		copy(s.Notices[i+1:], s.Notices[i:])
-		s.Notices[i] = Notice{Account: account}
-	}
-	s.Notices[i].Count++
-	return account + ":notice:" + strconv.FormatUint(s.Notices[i].Count, 10)
+// baseEvidence derives the ID the engine deduplicates for the Base deposit
+// with this vault index: a chain event, so the engine refuses a second credit
+// of the same deposit even if the adapter's own counter were wrong.
+func (s *State) baseEvidence(index uint64) string {
+	h := sha256.Sum256([]byte("ZEDGE_VELA_V1:BASE_DEPOSIT:" + strconv.FormatUint(s.Custody.ChainID, 10) + ":" + s.Custody.Vault + ":" + s.Engine.Config.Domain.ApplicationID + ":" + strconv.FormatUint(index, 10)))
+	return hex.EncodeToString(h[:])
 }

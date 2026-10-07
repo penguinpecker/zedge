@@ -1,6 +1,7 @@
 package guest
 
 import (
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -35,13 +36,14 @@ func open(appID uint64, state []byte) (*State, string) {
 	return s, ""
 }
 
-// commit encodes the new state with its effects.
-func (s *State) commit(events []Event, appEvents []AppEvent, withdrawals []Withdrawal) []byte {
+// commit encodes the new state with its effects. No result carries a Vela
+// withdrawal: the endpoint holds no custody (README section 7).
+func (s *State) commit(events []Event, appEvents []AppEvent) []byte {
 	b, err := s.encode()
 	if err != nil {
 		return failure(ErrInternal)
 	}
-	return Result{State: b, Events: events, AppEvents: appEvents, Withdrawals: withdrawals}.bytes()
+	return Result{State: b, Events: events, AppEvents: appEvents}.bytes()
 }
 
 func address(raw []byte) (string, bool) {
@@ -57,7 +59,7 @@ func (s *State) user(sender string) engine.AuthenticatedContext {
 }
 
 // system applies a command the adapter itself built (deposit credit,
-// withdrawal export and claim credit, checkpoint) as the configured authority
+// withdrawal export and claim credit, checkpoint, rounds) as the configured authority
 // at the last trusted clock. Nothing a client sends can reach System: true.
 func (s *State) system(e *engine.State, c engine.Command) (*engine.State, engine.Receipt, error) {
 	cfg := e.Config
@@ -112,7 +114,7 @@ func Deploy(appID uint64, params, salt []byte) []byte {
 		return failure(ErrInternal)
 	}
 	s := &State{Version: StateVersion, ApplicationFingerprint: p.ApplicationFingerprint, Origin: p.Origin, Epoch: p.Epoch, Markets: p.Markets, StakeLimits: p.StakeLimits,
-		Salt: hex.EncodeToString(salt), Staged: []Staged{}, Outcomes: []Outcome{}, Notices: []Notice{}, Engine: e}
+		Chainlink: p.Chainlink, Custody: p.Custody, Salt: hex.EncodeToString(salt), Staged: []Staged{}, Outcomes: []Outcome{}, Unconfirmed: []Unconfirmed{}, Engine: e}
 	b, err := s.encode()
 	if err != nil {
 		return failure(ErrConfig)
@@ -123,61 +125,14 @@ func Deploy(appID uint64, params, salt []byte) []byte {
 // LoadModule is v0.2.0's cache warm-up call. Its result is discarded.
 func LoadModule(uint64) []byte { return Result{}.bytes() }
 
-// Deposit credits the sender with collateral the endpoint already holds. A
-// sender the engine has never seen is registered first, with the one register
-// command that account could have sent itself. Any failure is an error result,
-// which makes the endpoint refund the deposit as a claim.
-func Deposit(appID uint64, sender, token, value, state []byte) []byte {
-	s, problem := open(appID, state)
-	if problem != "" {
-		return failure(problem)
-	}
-	who, ok := address(sender)
-	if !ok {
-		return failure(ErrSender)
-	}
-	if t, ok := address(token); !ok || t != s.Engine.Config.Collateral {
-		return failure(ErrToken)
-	}
-	for len(value) > 0 && value[0] == 0 {
-		value = value[1:]
-	}
-	if len(value) == 0 || len(value) > 8 {
-		return failure(ErrAmount)
-	}
-	var word [8]byte
-	copy(word[8-len(value):], value)
-	amount := binary.BigEndian.Uint64(word[:])
-	if amount > engine.MaxAtoms {
-		return failure(ErrAmount)
-	}
-	if s.Clock == 0 {
-		return failure(ErrClock)
-	}
-	if s.stagedBy(who) >= 0 {
-		return failure(ErrDeposit) // frozen until its staged command is activated (section 9, S3)
-	}
-	s.take(who)
-	next, unknown := s.Engine, account(s.Engine, who) == nil
-	if unknown {
-		c := engine.Command{Domain: next.Config.Domain, ID: engine.CommandID(who, 1), Nonce: 1, Op: engine.Register, Account: who}
-		var err error
-		if next, _, err = engine.Apply(next, c, s.user(who)); err != nil || len(next.Accounts) > MaxSliceAccounts {
-			return failure(ErrDeposit)
-		}
-	}
-	ordinal := s.Deposits + 1
-	next, r, err := s.system(next, engine.Command{Op: engine.Deposit, Account: who, Amount: amount, Evidence: s.evidence("DEPOSIT", ordinal)})
-	if err != nil || !exitReserved(next) {
-		return failure(ErrDeposit)
-	}
-	s.Engine, s.Deposits = next, ordinal
-	p, _ := engine.ProjectReceipt(r, who)
-	return s.commit([]Event{s.receipt(who, s.nextNotice(who), receiptBody{Type: "deposit", Status: "credited", Receipt: &p, Deposit: ordinal, Registered: unknown})}, nil, nil)
-}
+// Deposit refuses every Vela deposit: the money is in the Base vault, and the
+// engine learns of it only from the inbox through a tick (README section 6).
+// The endpoint refunds what it took as a claim.
+func Deposit(uint64, []byte, []byte, []byte, []byte) []byte { return failure(ErrToken) }
 
 // ProcessRequest handles the decrypted plaintext of a PROCESS request: the
-// envelope session.ts produced, carrying an engine command or a sync request.
+// envelope session.ts produced, carrying an engine command, a sync request or
+// a Chainlink report.
 func ProcessRequest(appID uint64, sender []byte, requestType int32, payload, state []byte) []byte {
 	if requestType != requestTypeProcess {
 		return failure(ErrRequestType)
@@ -203,11 +158,20 @@ func ProcessRequest(appID uint64, sender []byte, requestType int32, payload, sta
 	s.take(who)
 	switch env.Body.Type {
 	case "sync":
-		if env.Body.Command != "" || env.RequestID != who+":sync" {
+		if env.Body.Command != "" || env.Body.Report != "" || env.RequestID != who+":sync" {
 			return failure(ErrEnvelope)
 		}
 		return s.reply(who, env.RequestID, receiptBody{Type: "sync", Status: "requested"}, nil)
+	case "report":
+		full, err := base64.StdEncoding.DecodeString(env.Body.Report)
+		if env.Body.Command != "" || err != nil || base64.StdEncoding.EncodeToString(full) != env.Body.Report || !strings.HasPrefix(env.RequestID, who+":report:") {
+			return failure(ErrEnvelope)
+		}
+		return s.report(who, env.RequestID, full)
 	case "command":
+		if env.Body.Report != "" {
+			return failure(ErrEnvelope)
+		}
 		// engine.DecodeCommand looks for trailing input by decoding into an
 		// interface, which recurses once per nesting level. Only bytes already
 		// known to be one canonical command may reach it.
@@ -231,29 +195,31 @@ func ProcessRequest(appID uint64, sender []byte, requestType int32, payload, sta
 	return failure(ErrEnvelope)
 }
 
-// reply ends every accepted process_request the same way, so that a request's
+// reply ends every accepted command or sync the same way, so that a request's
 // public shape says nothing about what it was: one receipt of fixed size to the
-// sender and one request for a tick (a public app event carrying the new tick
-// number as a 32-byte big-endian word). A sync is the reply and nothing else.
-func (s *State) reply(who, requestID string, body receiptBody, withdrawals []Withdrawal) []byte {
+// sender and one request for a tick (README section 8). A sync is the reply and
+// nothing else; an accepted withdrawal adds its public payout record.
+func (s *State) reply(who, requestID string, body receiptBody, payout []AppEvent) []byte {
 	ask, ok := s.ask()
 	if !ok {
 		return failure(ErrInternal)
 	}
 	body.Tick = s.TickSeq
-	return s.commit([]Event{s.receipt(who, requestID, body)}, []AppEvent{ask}, withdrawals)
+	return s.commit([]Event{s.receipt(who, requestID, body)}, append([]AppEvent{ask}, payout...))
 }
 
-// ask requests the next tick: a public app event whose data is the new tick
-// number, then, for the round mirror (section 10), the number of rounds the
-// engine holds as scheduled and as open and their registry round IDs in that
-// order, all as 32-byte words.
+// ask requests the next tick: a public app event whose data is, as 32-byte
+// words, the new tick number, the next Base deposit index wanted, the number
+// of rounds the engine holds as scheduled, as open, and of settled rounds the
+// registry has still to confirm, then their registry round IDs in that order
+// (README sections 8 and 10).
 func (s *State) ask() (AppEvent, bool) {
 	if s.TickSeq >= engine.MaxAtoms {
 		return AppEvent{}, false
 	}
 	s.TickSeq++
-	var scheduled, open []byte
+	var scheduled, open, confirm []byte
+	held := map[string]bool{}
 	for _, m := range s.rounds() {
 		id, _ := hex.DecodeString(m.Spec.RegistryRoundID[2:])
 		switch m.Status {
@@ -262,9 +228,18 @@ func (s *State) ask() (AppEvent, bool) {
 		case "open":
 			open = append(open, id...)
 		}
+		held[m.Spec.RegistryRoundID] = m.Status == "scheduled" || m.Status == "open"
 	}
-	data := append(words(s.TickSeq, uint64(len(scheduled)/32), uint64(len(open)/32)), scheduled...)
-	return AppEvent{EventSubType: TickSubType, Data: append(data, open...)}, true
+	// An open round is asked about as open already; the rest wait for the
+	// registry's outcome as confirmations.
+	for _, u := range s.Unconfirmed {
+		if !held[u.Round] {
+			id, _ := hex.DecodeString(u.Round[2:])
+			confirm = append(confirm, id...)
+		}
+	}
+	data := append(words(s.TickSeq, s.DepositsSeen+1, uint64(len(scheduled)/32), uint64(len(open)/32), uint64(len(confirm)/32)), scheduled...)
+	return AppEvent{EventSubType: TickSubType, Data: append(append(data, open...), confirm...)}, true
 }
 
 // words is its arguments as 32-byte big-endian words.
@@ -345,8 +320,9 @@ func (s *State) command(who string, c engine.Command) []byte {
 		}
 		s.Staged = append(s.Staged, Staged{Tick: s.TickSeq + 1, Command: c})
 		return staged()
-	case c.Op == engine.RequestWithdrawal && (c.Destination == cfg.Domain.Endpoint || c.Destination == cfg.Authority):
-		// A claim credited to the endpoint or to the trigger never reaches a user.
+	case c.Op == engine.RequestWithdrawal && (c.Destination == cfg.Domain.Endpoint || c.Destination == cfg.Authority || c.Destination == s.Custody.Vault):
+		// A payout to the vault itself, or to an address that is not a user's
+		// (the endpoint, the trigger), never reaches anyone.
 		return refuse("withdrawal destination not allowed")
 	}
 	// A book command that is not the account's next one reaches the engine
@@ -366,11 +342,11 @@ func (s *State) command(who string, c engine.Command) []byte {
 		return s.reply(who, c.ID, receiptBody{Type: "command", Status: "retry", Receipt: &p}, nil)
 	}
 	body := receiptBody{Type: "command", Status: "applied", Receipt: &p}
-	var withdrawals []Withdrawal
+	var payout []AppEvent
 	if c.Op == engine.RequestWithdrawal {
 		// One transition carries the request, the export and the claim credit:
-		// the endpoint moves custody into pendingClaims in the same call that
-		// accepts this state root, so no withdrawal is ever left half done.
+		// the public payout record it publishes is what the payout signer pays
+		// on Base (README section 7), so no withdrawal is ever left half done.
 		ordinal := s.Withdrawals + 1
 		var x engine.Receipt
 		if next, x, err = s.system(next, engine.Command{Op: engine.ExportWithdrawal, WithdrawalID: r.WithdrawalID, Evidence: s.evidence("WITHDRAWAL", ordinal)}); err == nil {
@@ -385,22 +361,253 @@ func (s *State) command(who string, c engine.Command) []byte {
 		if err != nil {
 			return refuse(err.Error())
 		}
-		withdrawals = []Withdrawal{{TokenAddress: cfg.Collateral, DestinationAddress: x.PublicWithdrawal.Destination, Amount: "0x" + strconv.FormatUint(x.PublicWithdrawal.Amount, 16)}}
-		s.Withdrawals, body.Withdrawal = ordinal, ordinal
+		s.Withdrawals = ordinal
+		w := x.PublicWithdrawal
+		payout = []AppEvent{s.payout(payoutWithdrawal, w.Account, w.Destination, amountWord(w.Amount))}
+		body.Withdrawal = s.Payouts
 	}
 	s.Engine = next
-	return s.reply(who, c.ID, body, withdrawals)
+	return s.reply(who, c.ID, body, payout)
 }
 
-// tick is a trusted payload from the trigger contract. Version 1 is six
-// 32-byte words, abi.encode(uint256 1, uint256 chainId, address endpoint,
-// uint256 blockNumber, uint256 blockTimestamp, uint256 tick) (section 8).
-// Version 2 has the same words with version 2, then n <= MaxRecords and n
-// registry records of 19 words each (section 10).
+// Payout kinds and settle sources (README section 11).
+const (
+	payoutWithdrawal, payoutRefund                = 1, 2
+	settleOpen, settleResolve, settleVoid         = 1, 2, 3
+	sourceReport, sourceRegistry, sourceOwnVoid   = 1, 2, 3
+	confirmDisagree, confirmAgree, confirmDropped = 0, 1, 2
+	creditCredited, creditRefunded                = 1, 2
+)
+
+// payout takes the next payout ordinal and returns its public record: the
+// vault on Base pays it once, by (applicationId, ordinal), to a signature the
+// payout signer makes from this record alone.
+func (s *State) payout(kind uint64, account, to string, amount []byte) AppEvent {
+	s.Payouts++
+	app, _ := strconv.ParseUint(s.Engine.Config.Domain.ApplicationID, 10, 64)
+	data := append(words(app, s.Payouts, kind), addressWord(account)...)
+	return AppEvent{EventSubType: PayoutSubType, Data: append(append(data, addressWord(to)...), amount...)}
+}
+
+func addressWord(a string) []byte {
+	b := make([]byte, 32)
+	hex.Decode(b[12:], []byte(a[2:]))
+	return b
+}
+
+func amountWord(v uint64) []byte { return words(v) }
+
+// report applies a Chainlink report for a round boundary B straight from its
+// DON signatures (README section 12): at T = max(clock, B), it resolves the
+// round that ends at B, redeems every holder of it, opens the round that
+// starts at B, archives and creates the next rounds, all in this one
+// transition. The sender gets one receipt and the chain the settle records;
+// no tick is asked for: the clock already moved.
+func (s *State) report(who, requestID string, full []byte) []byte {
+	if s.Clock == 0 {
+		return failure(ErrClock)
+	}
+	o, reason := s.Chainlink.verify(full)
+	b := uint64(o.ObservationsTimestamp)
+	if reason == "" && requestID != who+":report:"+strconv.FormatUint(b, 10) {
+		return failure(ErrContext)
+	}
+	if reason == "" && b%s.Markets[0].Duration != 0 {
+		reason = "report: not a boundary report"
+	}
+	answer := func(status, reason string, events []AppEvent) []byte {
+		return s.commit([]Event{s.receipt(who, requestID, receiptBody{Type: "report", Status: status, Reason: reason})}, events)
+	}
+	// Only a round this report can open or resolve is worth an engine call. A
+	// round is not opened past its opening deadline: the registry can no longer
+	// open it and will void it, so the book would disagree with the record.
+	opens := func(m engine.Round) bool {
+		return m.Spec.Start == b && m.Status == "scheduled" && max(s.Clock, b) <= m.Spec.OpeningDeadline
+	}
+	due := slices.ContainsFunc(s.Engine.Rounds, func(m engine.Round) bool {
+		return m.Spec.End == b && m.Status == "open" || opens(m)
+	})
+	if reason == "" && !due {
+		reason = "report: nothing to apply"
+		for _, m := range s.Engine.Rounds {
+			if m.Opening != nil && m.Opening.ReportHash == o.ReportHash || m.Closing != nil && m.Closing.ReportHash == o.ReportHash {
+				reason = "report: already applied"
+			}
+		}
+	}
+	if reason != "" {
+		return answer("rejected", reason, nil)
+	}
+	before, clock := s.Engine, s.Clock
+	s.Clock = max(s.Clock, b)
+	if !s.checkpoint() {
+		return failure(ErrInternal)
+	}
+	var events []AppEvent
+	for _, m := range s.rounds() {
+		if m.Spec.End == b && m.Status == "open" {
+			if e, ok := s.settle(m, engine.ResolveRound, &o, b, sourceReport); ok {
+				events = append(append(events, e), s.unconfirm(m.Spec.RegistryRoundID)...)
+				n := -1
+				s.redeemRound(m.ID, &n)
+			}
+		}
+	}
+	for _, m := range s.rounds() {
+		if opens(m) {
+			if e, ok := s.settle(m, engine.OpenRound, &o, b, sourceReport); ok {
+				events = append(append(events, e), s.unconfirm(m.Spec.RegistryRoundID)...)
+			}
+		}
+	}
+	if len(events) == 0 {
+		// A round was due, but the engine refused it (an opening past its
+		// deadline in a test configuration, say): nothing changes.
+		s.Engine, s.Clock = before, clock
+		return answer("rejected", "report: refused by the engine", nil)
+	}
+	events = append(events, s.archive()...)
+	events = append(events, s.upkeep()...)
+	return answer("applied", "", events)
+}
+
+// checkpoint applies the engine's checkpoint at the clock, which releases
+// expired orders.
+func (s *State) checkpoint() bool {
+	next, _, err := s.system(s.Engine, engine.Command{Op: engine.Checkpoint})
+	if err == nil {
+		s.Engine = next
+	}
+	return err == nil
+}
+
+// settle opens, resolves or voids round m as the authority and returns its
+// public settle record. A resolution's outcome is the engine's own.
+func (s *State) settle(m engine.Round, op engine.Operation, o *engine.StreamsObservation, registryTime, source uint64) (AppEvent, bool) {
+	c := engine.Command{Op: op, RoundID: m.ID, RegistryTime: registryTime}
+	if o != nil {
+		x := *o
+		x.FeedID = m.Spec.Feed
+		c.Observation, c.Evidence = &x, x.ReportHash[2:]
+	} else {
+		c.Evidence = m.Spec.RegistryRoundID[2:]
+	}
+	next, _, err := s.system(s.Engine, c)
+	if err != nil {
+		return AppEvent{}, false
+	}
+	s.Engine = next
+	kind := map[engine.Operation]uint64{engine.OpenRound: settleOpen, engine.ResolveRound: settleResolve, engine.VoidRound: settleVoid}[op]
+	var outcome uint64
+	price, at, hash := make([]byte, 32), uint64(0), make([]byte, 32)
+	for _, n := range next.Rounds {
+		if n.ID == m.ID {
+			outcome = outcomeNumber(n.Outcome)
+		}
+	}
+	if o != nil {
+		p, _ := new(big.Int).SetString(o.Price, 10)
+		p.FillBytes(price)
+		at = uint64(o.ObservationsTimestamp)
+		hex.Decode(hash, []byte(o.ReportHash[2:]))
+	}
+	id, _ := hex.DecodeString(m.Spec.RegistryRoundID[2:])
+	data := append(append(append(append(id, words(kind, outcome)...), price...), words(at)...), hash...)
+	return AppEvent{EventSubType: SettleSubType, Data: append(data, words(source)...)}, true
+}
+
+func outcomeNumber(o engine.Outcome) uint64 {
+	return map[engine.Outcome]uint64{engine.Up: 1, engine.Down: 2, engine.Void: 3}[o]
+}
+
+// unconfirm records what the engine settled round id with, from the engine
+// itself, until the registry's own record arrives. Past MaxUnconfirmed the
+// oldest is given up, publicly.
+func (s *State) unconfirm(id string) (events []AppEvent) {
+	var m engine.Round
+	for _, n := range s.Engine.Rounds {
+		if n.Spec.RegistryRoundID == id {
+			m = n
+		}
+	}
+	u := Unconfirmed{Round: id, Opening: m.Opening.ReportHash}
+	if m.Closing != nil {
+		u.Closing, u.Outcome = m.Closing.ReportHash, outcomeNumber(m.Outcome)
+	}
+	if i := slices.IndexFunc(s.Unconfirmed, func(v Unconfirmed) bool { return v.Round == id }); i >= 0 {
+		s.Unconfirmed[i] = u
+		return nil
+	}
+	if len(s.Unconfirmed) == MaxUnconfirmed {
+		events = append(events, confirmation(s.Unconfirmed[0], confirmDropped, 0, ""))
+		s.Unconfirmed = s.Unconfirmed[1:]
+	}
+	s.Unconfirmed = append(s.Unconfirmed, u)
+	return events
+}
+
+// confirmation is the public record of a comparison with the registry:
+// roundId, agree, engine outcome, registry outcome, engine closing hash,
+// registry closing hash.
+func confirmation(u Unconfirmed, agree, registryOutcome uint64, registryClosing string) AppEvent {
+	h := func(x string) []byte {
+		b := make([]byte, 32)
+		if x != "" {
+			hex.Decode(b, []byte(x[2:]))
+		}
+		return b
+	}
+	data := append(append(h(u.Round), words(agree, u.Outcome, registryOutcome)...), h(u.Closing)...)
+	return AppEvent{EventSubType: ConfirmSubType, Data: append(data, h(registryClosing)...)}
+}
+
+// upkeep voids the scheduled rounds that never opened, once nobody could
+// open them any more, and creates the rounds of the next two slots of every
+// market after the clock (README section 10).
+func (s *State) upkeep() (events []AppEvent) {
+	grace := s.Engine.Config.Oracle.VoidGrace
+	for _, m := range s.rounds() {
+		if m.Status == "scheduled" && s.Clock > m.Spec.OpeningDeadline+grace {
+			if e, ok := s.settle(m, engine.VoidRound, nil, s.Clock, sourceOwnVoid); ok {
+				events = append(events, e)
+			}
+		}
+	}
+	for _, k := range s.Markets {
+		first := (s.Clock/k.Duration + 1) * k.Duration
+		for _, start := range []uint64{first, first + k.Duration} {
+			spec, err := engine.NewRoundSpec(s.Engine.Config, k.Asset, k.Duration, start)
+			if err != nil || len(s.Engine.Rounds) >= MaxSliceRounds || slices.ContainsFunc(s.Engine.Rounds, func(m engine.Round) bool { return m.Spec.RegistryRoundID == spec.RegistryRoundID }) {
+				continue
+			}
+			if next, _, err := s.system(s.Engine, engine.Command{Op: engine.CreateRound, Round: &spec}); err == nil {
+				s.Engine = next
+			}
+		}
+	}
+	return events
+}
+
+// tick is a trusted payload from the trigger contract, version 3: the words
+// 3, chainId, endpoint, blockNumber, blockTimestamp, tick, n, d, then n <=
+// MaxRecords registry records of 19 words each (section 10) and d <=
+// MaxDeposits Base deposit records of 3 words each (section 6).
 type tick struct {
 	version, chainID, block, timestamp, number uint64
 	endpoint                                   string
 	records                                    []record
+	deposits                                   []deposit
+}
+
+// deposit is one inbox record: the vault's deposit index, the depositor and
+// the amount in Base USDC atoms. ok is false if the record does not decode as
+// the inbox writes it; processing stops there and waits.
+type deposit struct {
+	index   uint64
+	account string
+	amount  []byte // the 32-byte word as the inbox stored it
+	atoms   uint64 // the amount, if the engine can hold it; else 0
+	ok      bool
 }
 
 // record is one registry round as getRound read it in the block at the tick's
@@ -434,22 +641,37 @@ func decodeTick(p []byte) (t tick, ok bool) {
 	}
 	ok = true
 	all := ^uint64(0)
-	t = tick{version: word(p, 0, 2, &ok), chainID: word(p, 1, all, &ok), block: word(p, 3, all, &ok), timestamp: word(p, 4, all, &ok), number: word(p, 5, all, &ok)}
+	t = tick{version: word(p, 0, 3, &ok), chainID: word(p, 1, all, &ok), block: word(p, 3, all, &ok), timestamp: word(p, 4, all, &ok), number: word(p, 5, all, &ok)}
 	for _, b := range p[64:76] {
 		ok = ok && b == 0
 	}
 	t.endpoint = "0x" + hex.EncodeToString(p[76:96])
-	switch {
-	case t.version == 1:
-		ok = ok && n == 6
-	case t.version == 2 && n >= 7:
-		count := word(p, 6, MaxRecords, &ok)
-		ok = ok && n == 7+19*int(count)
-		for i := 0; ok && i < int(count); i++ {
-			t.records = append(t.records, decodeRecord(p[32*(7+19*i):32*(26+19*i)]))
+	if !ok || t.version != 3 || n < 8 {
+		return t, false
+	}
+	count, deposits := int(word(p, 6, MaxRecords, &ok)), int(word(p, 7, MaxDeposits, &ok))
+	ok = ok && n == 8+19*count+3*deposits
+	for i := 0; ok && i < count; i++ {
+		t.records = append(t.records, decodeRecord(p[32*(8+19*i):32*(27+19*i)]))
+	}
+	for i, at := 0, 8+19*count; ok && i < deposits; i, at = i+1, at+3 {
+		d := deposit{ok: true, amount: p[32*(at+2) : 32*(at+3)]}
+		d.index = word(p, at, engine.MaxAtoms, &d.ok)
+		for _, b := range p[32*(at+1) : 32*(at+1)+12] {
+			d.ok = d.ok && b == 0
 		}
-	default:
-		ok = false
+		d.account = "0x" + hex.EncodeToString(p[32*(at+1)+12:32*(at+2)])
+		// The inbox stores at most a uint96 and never zero.
+		big96, atoms := true, true
+		v := word(p, at+2, engine.MaxAtoms, &atoms)
+		for _, b := range d.amount[:20] {
+			big96 = big96 && b == 0
+		}
+		if atoms {
+			d.atoms = v
+		}
+		d.ok = d.ok && big96 && isAddress(d.account) && new(big.Int).SetBytes(d.amount).Sign() > 0
+		t.deposits = append(t.deposits, d)
 	}
 	return t, ok
 }
@@ -474,14 +696,17 @@ func observation(p []byte, ok *bool) engine.StreamsObservation {
 		ReportHash: "0x" + hex.EncodeToString(p[128:160]), Decimals: uint8(word(p, 5, 255, ok))}
 }
 
-// TrustedRequest applies a tick at the block timestamp T the trigger reported:
-// it moves the trusted clock to T, checkpoints the engine (releasing expired
-// orders), mirrors the registry records, activates staged book commands,
-// sweeps settled shares and archives finished rounds, all at T (sections 8 to
-// 10). It publishes what it applied (tick, block, timestamp, records applied,
-// records skipped, the payload's Keccak-256) under ClockSubType and each archive record under
-// ArchiveSubType. It sends no receipt to anyone. It asks for another tick only
-// when staged commands it was due to activate are left over.
+// TrustedRequest applies a tick at T = max(clock, the block timestamp the
+// trigger reported): a Chainlink report may already have moved the clock past
+// Horizen's block time, and a tick behind it must still run. It sets the
+// trusted clock, checkpoints the engine (releasing expired orders), credits
+// the Base deposits in index order, mirrors the registry records and compares
+// those of rounds it settled itself, voids and creates its own rounds,
+// activates staged book commands, sweeps settled shares and archives finished
+// rounds, all at T (sections 6 to 10). It publishes what it applied under
+// ClockSubType, then the credit, payout, settle, confirm and archive records.
+// It sends no receipt to anyone. It asks for another tick only when staged
+// commands it was due to activate are left over.
 func TrustedRequest(appID uint64, payload, state []byte) []byte {
 	s, problem := open(appID, state)
 	if problem != "" {
@@ -490,7 +715,7 @@ func TrustedRequest(appID uint64, payload, state []byte) []byte {
 	t, ok := decodeTick(payload)
 	d := s.Engine.Config.Domain
 	// A timestamp above MaxClock is not a time in seconds any round could use,
-	// and accepting one would leave every later tick behind the clock for good.
+	// and accepting one would move the clock past every round for good.
 	if !ok || t.chainID != d.ChainID || t.endpoint != d.Endpoint || t.timestamp == 0 || t.timestamp > MaxClock || t.block > engine.MaxAtoms {
 		return failure(ErrTrusted)
 	}
@@ -499,16 +724,13 @@ func TrustedRequest(appID uint64, payload, state []byte) []byte {
 	}
 	// The block number is recorded, not compared: the engine never reads it,
 	// and a second ordering rule would only be a second way to stop the clock.
-	if t.timestamp < s.Clock {
-		return failure(ErrTime)
-	}
-	s.Clock, s.Block, s.LastTick = t.timestamp, t.block, t.number
-	next, _, err := s.system(s.Engine, engine.Command{Op: engine.Checkpoint})
-	if err != nil {
+	s.Clock, s.Block, s.LastTick = max(s.Clock, t.timestamp), t.block, t.number
+	if !s.checkpoint() {
 		return failure(ErrInternal)
 	}
-	s.Engine = next
-	applied := s.mirror(t.records)
+	events, credited := s.credit(t.deposits)
+	settled, applied := s.mirror(t.records)
+	events = append(append(events, settled...), s.upkeep()...)
 	s.activate(t.number)
 	s.sweep()
 	// The payload's Keccak-256 is what the endpoint put into this trusted
@@ -516,8 +738,8 @@ func TrustedRequest(appID uint64, payload, state []byte) []byte {
 	// provable from the chain, records included (section 8.4).
 	k := sha3.NewLegacyKeccak256()
 	k.Write(payload)
-	clock := append(words(s.LastTick, s.Block, s.Clock, uint64(applied), uint64(len(t.records)-applied)), k.Sum(nil)...)
-	events := append([]AppEvent{{EventSubType: ClockSubType, Data: clock}}, s.archive()...)
+	clock := append(words(s.LastTick, s.Block, s.Clock, uint64(applied), uint64(len(t.records)-applied), uint64(credited)), k.Sum(nil)...)
+	events = append(append([]AppEvent{{EventSubType: ClockSubType, Data: clock}}, events...), s.archive()...)
 	if len(s.Staged) > 0 && s.Staged[0].Tick <= t.number {
 		// Left over by MaxActivations: the trigger answers this request too,
 		// and the next tick carries on where this one stopped.
@@ -527,33 +749,106 @@ func TrustedRequest(appID uint64, payload, state []byte) []byte {
 		}
 		events = append(events, ask)
 	}
-	return s.commit(nil, events, nil)
+	return s.commit(nil, events)
+}
+
+// credit applies the inbox's deposit records in index order, exactly once
+// each: an index already seen is skipped, a gap or an undecodable record
+// stops it, and the next index is either credited to its depositor's engine
+// account (registering the account first, as its own nonce-1 register) with
+// the Base deposit as evidence, or, if the engine or the adapter's caps refuse
+// it, refunded in full through a payout. Each publishes one credit record.
+// It returns the records and the number of deposits processed.
+func (s *State) credit(deposits []deposit) (events []AppEvent, n int) {
+	for _, d := range deposits {
+		if !d.ok || d.index > s.DepositsSeen+1 {
+			break
+		}
+		if d.index <= s.DepositsSeen {
+			continue
+		}
+		next, ok := s.Engine, d.atoms != 0
+		if ok && account(next, d.account) == nil {
+			c := engine.Command{Domain: next.Config.Domain, ID: engine.CommandID(d.account, 1), Nonce: 1, Op: engine.Register, Account: d.account}
+			var err error
+			next, _, err = engine.Apply(next, c, s.user(d.account))
+			ok = err == nil && len(next.Accounts) <= MaxSliceAccounts
+		}
+		if ok {
+			var err error
+			next, _, err = s.system(next, engine.Command{Op: engine.Deposit, Account: d.account, Amount: d.atoms, Evidence: s.baseEvidence(d.index)})
+			ok = err == nil && exitReserved(next)
+		}
+		s.DepositsSeen, n = d.index, n+1
+		data := append(append(words(d.index), addressWord(d.account)...), d.amount...)
+		if ok {
+			s.Engine, s.Deposits = next, s.Deposits+1
+			events = append(events, AppEvent{EventSubType: CreditSubType, Data: append(data, words(creditCredited, 0)...)})
+			continue
+		}
+		refund := s.payout(payoutRefund, d.account, d.account, d.amount)
+		events = append(events, AppEvent{EventSubType: CreditSubType, Data: append(data, words(creditRefunded, s.Payouts)...)}, refund)
+	}
+	return events, n
 }
 
 // mirror applies the registry records in (start, asset, duration) order and
-// returns how many changed the engine. For each record it applies the first
-// rule that fits and looks again, until none fits or the engine refuses.
-func (s *State) mirror(records []record) (applied int) {
+// returns their settle records and how many changed the engine. For each
+// record it applies the first rule that fits and looks again, until none fits
+// or the engine refuses. Then every record with an outcome for a round the
+// guest settled from a report is compared with what the guest did, and the
+// comparison published: the engine's result stands either way (section 10).
+func (s *State) mirror(records []record) (events []AppEvent, applied int) {
 	sort.SliceStable(records, func(i, j int) bool {
 		a, b := records[i], records[j]
 		return earlier(a.start, a.asset, a.duration, b.start, b.asset, b.duration)
 	})
 	for _, r := range records {
 		moved := false
-		for r.ok && s.mirrorStep(r) {
-			moved = true
+		for r.ok {
+			e, ok := s.mirrorStep(r)
+			if !ok {
+				break
+			}
+			moved, events = true, append(events, e...)
 		}
 		if moved {
 			applied++
 		}
 	}
-	return applied
+	for _, r := range records {
+		i := slices.IndexFunc(s.Unconfirmed, func(u Unconfirmed) bool { return u.Round == r.id })
+		if !r.ok || r.outcome == 0 || i < 0 {
+			continue
+		}
+		u := s.Unconfirmed[i]
+		for _, m := range s.Engine.Rounds {
+			if m.Spec.RegistryRoundID == u.Round {
+				u.Closing, u.Outcome = "", outcomeNumber(m.Outcome)
+				if m.Closing != nil {
+					u.Closing = m.Closing.ReportHash
+				}
+			}
+		}
+		closing := r.closing.ReportHash
+		if !hash32(closing) {
+			closing = ""
+		}
+		agree := uint64(confirmDisagree)
+		if u.Opening == r.opening.ReportHash && u.Closing == closing && u.Outcome == r.outcome {
+			agree = confirmAgree
+		}
+		events = append(events, confirmation(u, agree, r.outcome, closing))
+		s.Unconfirmed = slices.Delete(s.Unconfirmed, i, i+1)
+	}
+	return events, applied
 }
 
 // mirrorStep applies one engine command for the record, as the authority at
-// the tick's time T. registryTime is always the registry's own recorded block
-// timestamp, never T; a void is mirrored only from a recorded outcome.
-func (s *State) mirrorStep(r record) bool {
+// the tick's time T, and returns the settle record it made, if any.
+// registryTime is always the registry's own recorded block timestamp, never T;
+// an open round is voided only from a recorded outcome.
+func (s *State) mirrorStep(r record) ([]AppEvent, bool) {
 	e := s.Engine
 	var m *engine.Round
 	for i := range e.Rounds {
@@ -561,44 +856,41 @@ func (s *State) mirrorStep(r record) bool {
 			m = &e.Rounds[i]
 		}
 	}
-	observed := func(o engine.StreamsObservation) *engine.StreamsObservation { o.FeedID = m.Spec.Feed; return &o }
-	var c engine.Command
 	switch {
 	case m == nil:
 		// Created by the tick that also created the registry round. The engine
 		// refuses a round whose start has passed: it never exists here.
 		if !slices.Contains(s.Markets, Market{r.asset, r.duration}) || len(e.Rounds) >= MaxSliceRounds {
-			return false
+			return nil, false
 		}
 		spec, err := engine.NewRoundSpec(e.Config, r.asset, r.duration, r.start)
 		if err != nil || spec.RegistryRoundID != r.id {
-			return false
+			return nil, false
 		}
-		c = engine.Command{Op: engine.CreateRound, Round: &spec}
+		next, _, err := s.system(e, engine.Command{Op: engine.CreateRound, Round: &spec})
+		if err != nil {
+			return nil, false
+		}
+		s.Engine = next
+		return nil, true
 	case m.Status == "scheduled" && r.openedAt != 0:
-		c = engine.Command{Op: engine.OpenRound, RoundID: m.ID, Evidence: r.opening.ReportHash[2:], RegistryTime: r.openedAt, Observation: observed(r.opening)}
+		x, ok := s.settle(*m, engine.OpenRound, &r.opening, r.openedAt, sourceRegistry)
+		return []AppEvent{x}, ok
 	case m.Status == "open" && (r.outcome == 1 || r.outcome == 2):
-		c = engine.Command{Op: engine.ResolveRound, RoundID: m.ID, Evidence: r.closing.ReportHash[2:], RegistryTime: r.resolvedAt, Observation: observed(r.closing)}
-	case (m.Status == "scheduled" || m.Status == "open") && r.outcome == 3:
-		c = engine.Command{Op: engine.VoidRound, RoundID: m.ID, Evidence: r.id[2:], RegistryTime: r.resolvedAt}
-	default:
-		return false
-	}
-	next, _, err := s.system(e, c)
-	if err != nil {
-		return false
-	}
-	if c.Op == engine.ResolveRound {
 		// The engine decides the outcome itself; it must be the registry's.
-		want := map[uint64]engine.Outcome{1: engine.Up, 2: engine.Down}[r.outcome]
-		for _, n := range next.Rounds {
-			if n.ID == m.ID && n.Outcome != want {
-				return false
+		before := s.Engine
+		x, ok := s.settle(*m, engine.ResolveRound, &r.closing, r.resolvedAt, sourceRegistry)
+		for _, n := range s.Engine.Rounds {
+			if ok && n.ID == m.ID && outcomeNumber(n.Outcome) != r.outcome {
+				s.Engine, ok = before, false
 			}
 		}
+		return []AppEvent{x}, ok
+	case (m.Status == "scheduled" || m.Status == "open") && r.outcome == 3:
+		x, ok := s.settle(*m, engine.VoidRound, nil, r.resolvedAt, sourceRegistry)
+		return []AppEvent{x}, ok
 	}
-	s.Engine = next
-	return true
+	return nil, false
 }
 
 // activate applies staged commands due by tick k in tick order, at most
@@ -644,33 +936,40 @@ func (s *State) activate(k uint64) {
 	}
 }
 
-// sweep redeems settled shares, oldest round first, in the name of each
-// account that still holds some and has nothing staged: the one redeem
-// command the account could have sent itself, with its next nonce, at T. At
-// most MaxSweeps attempts per tick. Without it, one lot left in each round by
-// an account that never returns would hold every round slot for good.
+// sweep redeems settled shares, oldest round first, at most MaxSweeps
+// attempts per tick. Without it, one lot left in each round by an account
+// that never returns would hold every round slot for good.
 func (s *State) sweep() {
-	n := 0
+	n := MaxSweeps
 	for _, m := range s.rounds() {
-		if m.Status != "resolved" && m.Status != "void" {
-			continue
-		}
-		for i := range s.Engine.Accounts {
-			a := s.Engine.Accounts[i]
-			j := slices.IndexFunc(a.Holdings, func(h engine.Holding) bool { return h.RoundID == m.ID })
-			if j < 0 || a.Holdings[j].Up == 0 && a.Holdings[j].Down == 0 || s.stagedBy(a.ID) >= 0 {
-				continue
-			}
-			if n == MaxSweeps {
-				return
-			}
-			n++
-			c := engine.Command{Domain: s.Engine.Config.Domain, ID: engine.CommandID(a.ID, a.Nonce+1), Nonce: a.Nonce + 1, Op: engine.Redeem, Account: a.ID, RoundID: m.ID}
-			if next, _, err := engine.Apply(s.Engine, c, s.user(a.ID)); err == nil {
-				s.Engine = next
-			}
+		if (m.Status == "resolved" || m.Status == "void") && !s.redeemRound(m.ID, &n) {
+			return
 		}
 	}
+}
+
+// redeemRound redeems the shares of settled round id in the name of each
+// account that still holds some and has nothing staged: the one redeem
+// command the account could have sent itself, with its next nonce, at the
+// clock. Each attempt spends one of *budget; a negative budget never runs
+// out. It returns false once the budget is spent.
+func (s *State) redeemRound(id string, budget *int) bool {
+	for i := range s.Engine.Accounts {
+		a := s.Engine.Accounts[i]
+		j := slices.IndexFunc(a.Holdings, func(h engine.Holding) bool { return h.RoundID == id })
+		if j < 0 || a.Holdings[j].Up == 0 && a.Holdings[j].Down == 0 || s.stagedBy(a.ID) >= 0 {
+			continue
+		}
+		if *budget == 0 {
+			return false
+		}
+		*budget--
+		c := engine.Command{Domain: s.Engine.Config.Domain, ID: engine.CommandID(a.ID, a.Nonce+1), Nonce: a.Nonce + 1, Op: engine.Redeem, Account: a.ID, RoundID: id}
+		if next, _, err := engine.Apply(s.Engine, c, s.user(a.ID)); err == nil {
+			s.Engine = next
+		}
+	}
+	return true
 }
 
 // archive removes settled rounds that hold nothing any more, oldest first, at

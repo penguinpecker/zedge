@@ -1,0 +1,10 @@
+/* One-minute candles drawn by Lightweight Charts on a canvas; the round's START, CUTOFF and END lines are HTML over it. */
+.live-chart { padding-top: 22px; }
+.live-chart-frame { position: relative; height: 240px; margin: 0 18px; }
+.live-chart-canvas { position: absolute; inset: 0; }
+.live-chart-wait { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); font-size: 11px; margin: 0; pointer-events: none; }
+.live-chart-mark { position: absolute; top: 0; bottom: 28px; border-left: 1px dashed rgba(143, 154, 134, 0.45); pointer-events: none; }
+.live-chart-mark span { position: absolute; top: -16px; left: 4px; white-space: nowrap; font: 8px var(--mono); letter-spacing: 0.4px; color: #a1b393; }
+.live-chart-mark.cutoff span { left: auto; right: 4px; }
+.live-chart-closed { position: absolute; top: 0; bottom: 28px; background: rgba(255, 255, 255, 0.025); pointer-events: none; }
+.live-chart-source { display: flex; align-items: center; gap: 8px; padding: 12px 24px 18px; color: var(--muted); font-size: 10px; line-height: 1.6; }

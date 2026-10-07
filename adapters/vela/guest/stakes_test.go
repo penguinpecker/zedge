@@ -304,7 +304,8 @@ func mainnetParams() DeployParams {
 		Oracle: engine.RegistryConfig{ChainID: HorizenMainnet, Registry: "0x4dd4aacdb7e8d2e6d06c5af38238f3deab836744", Oracle: "0xc800c3f18d35d492ae6b07655d7f31bfe98a4b6b",
 			BTCFeedID: engine.BTCStreamsFeed, ETHFeedID: engine.ETHStreamsFeed, Decimals: 18, ObservationWindow: 60, OpeningGrace: 150, VoidGrace: 300, CutoffBuffer: 30}}
 	c.Oracle.RulesHash, _ = engine.RegistryRulesHash(c)
-	return DeployParams{Engine: c, ApplicationFingerprint: fingerprint, Origin: "https://zedge.example", Epoch: epoch, Markets: []Market{{"BTC", 900}}, StakeLimits: testLimits}
+	return DeployParams{Engine: c, ApplicationFingerprint: fingerprint, Origin: "https://zedge-markets.vercel.app", Epoch: epoch, Markets: []Market{{"BTC", 900}}, StakeLimits: testLimits,
+		Chainlink: testChainlink(), Custody: testCustody}
 }
 
 func TestHorizenMainnetDeployment(t *testing.T) {

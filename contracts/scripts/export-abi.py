@@ -12,6 +12,7 @@ names = (
     "ChainlinkStreamsBoundaryOracle", "IStreamsBoundaryOracle",
     "BaseStreamsPublisher", "HorizenStreamsOracle", "StreamsRoundRegistry",
     "CollateralizedOutcomeVault", "IOutcomeSettlementRegistry",
+    "BaseCustodyVault", "HorizenDepositInbox",
 )
 for name in names:
     artifact = json.loads((root / "out" / f"{name}.sol" / f"{name}.json").read_text())

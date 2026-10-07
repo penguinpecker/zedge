@@ -8,13 +8,14 @@ The wrapper binds key derivation to the origin, account, chain, endpoint, applic
 
 `encryptCommand()` produces an encrypted, versioned envelope. A guest integration must validate that envelope and the command authorization. `decryptReceipt()` checks its context and returns an explicit unreadable/locked result; callers must first verify the event's canonical chain provenance. Decryption is not finality or attestation. Historical records require their original account and enclave key epochs.
 
-`guest.ts` is the client side of `adapters/vela/guest`: the canonical engine-command encoder, the two envelope bodies that guest accepts and the request IDs its receipts carry. The protocol is `../guest/README.md`. `guest.test.ts` reads `../guest/testdata/vectors.json`, which the guest's Go tests write and check, so both sides must reproduce the same bytes.
+`guest.ts` is the client side of `adapters/vela/guest`: the canonical engine-command encoder, the three envelope bodies that guest accepts (`commandBody`, `syncBody`, and `reportBody` for a Chainlink full report in 0x hex), the request IDs its receipts carry (`commandId`, `syncRequestId`, `reportRequestId`), and `SUBTYPES` with decoders for its public records (`decodeClock`, `decodeSettle`, `decodeCredit`, `decodePayout`, `decodeConfirm`). The protocol is `../guest/README.md`. `guest.test.ts` reads `../guest/testdata/vectors.json`, which the guest's Go tests write and check, so both sides must reproduce the same bytes.
 
 The guest accepts only requests of one length, 2,048 bytes of plaintext, and refuses any other (guest README §4). `pad.ts` adds the zeros: every body goes through `padBody` before `encryptCommand`, for a command and for a sync alike:
 
 ```ts
 session.encryptCommand(command.id, padBody(session, command.id, commandBody(command)));
 session.encryptCommand(syncRequestId(account), padBody(session, syncRequestId(account), syncBody()));
+session.encryptCommand(reportRequestId(account, ts), padBody(session, reportRequestId(account, ts), reportBody(fullReportHex)));
 ```
 
 `pad.test.ts` checks every request vector in `../guest/testdata/vectors.json`, padded and encrypted, against the exact plaintext the guest accepts.

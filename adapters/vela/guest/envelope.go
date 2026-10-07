@@ -19,8 +19,9 @@ type envelopeDomain struct {
 	Origin                 string `json:"origin"`
 }
 type requestBody struct {
-	Type    string `json:"type"`              // "command" or "sync"
+	Type    string `json:"type"`              // "command", "sync" or "report"
 	Command string `json:"command,omitempty"` // canonical engine command JSON
+	Report  string `json:"report,omitempty"`  // standard base64 of a Chainlink full report
 	Pad     string `json:"pad"`               // zeros, so that the envelope is RequestBytes long
 }
 type requestEnvelope struct {
@@ -57,20 +58,18 @@ type receiptAt struct {
 }
 
 // receiptBody is what an account is told. Type "command" answers the account's
-// own command, "sync" its own sync, "deposit" reports a credit. Every receipt
-// is produced by a request of the account it goes to.
+// own command, "sync" its own sync, "report" its own Chainlink report. Every
+// receipt is produced by a request of the account it goes to.
 type receiptBody struct {
 	Type       string                  `json:"type"`
-	Status     string                  `json:"status"`               // applied, retry, rejected, staged, credited, requested
+	Status     string                  `json:"status"`               // applied, retry, rejected, staged, requested
 	Reason     string                  `json:"reason,omitempty"`     // rejected only
 	Receipt    *engine.PrivateReceipt  `json:"receipt,omitempty"`    // engine.ProjectReceipt for this account
-	Deposit    uint64                  `json:"deposit,omitempty"`    // ordinal of the credited deposit
-	Registered bool                    `json:"registered,omitempty"` // this deposit registered the account; its nonce is now 1
-	Withdrawal uint64                  `json:"withdrawal,omitempty"` // ordinal of the withdrawal handed to the endpoint
+	Withdrawal uint64                  `json:"withdrawal,omitempty"` // payout ordinal of the accepted withdrawal
 	Outcome    *outcomeReceipt         `json:"outcome,omitempty"`    // what a tick did with this account's staged command
 	View       *engine.AccountSnapshot `json:"view,omitempty"`       // the account after this request; absent if it is not registered
 	At         receiptAt               `json:"at"`
-	Tick       uint64                  `json:"tick,omitempty"` // the tick this request asked for
+	Tick       uint64                  `json:"tick,omitempty"` // the tick this request asked for; absent on a report
 	Pad        string                  `json:"pad"`            // zeros, to the size class
 }
 
@@ -94,14 +93,17 @@ type receiptEnvelope struct {
 // One constant subtype for every user event, so a subtype never names a
 // recipient or a kind of receipt (unless the recipient registered a subtype
 // seed with Vela: the executor then replaces it); one for the public request
-// for a tick; one for the public record of the tick that was applied; and one
-// for the public record of an archived round. The trigger answers the second
-// and must ignore the other two.
+// for a tick; and one for each public record (README section 11). The
+// trigger answers the tick request and must ignore every other subtype.
 var (
 	ReceiptSubType = sha256.Sum256([]byte("zedge.vela.receipt.v1"))
 	TickSubType    = sha256.Sum256([]byte("zedge.vela.tick.v1"))
 	ClockSubType   = sha256.Sum256([]byte("zedge.vela.clock.v1"))
 	ArchiveSubType = sha256.Sum256([]byte("zedge.vela.archive.v1"))
+	SettleSubType  = sha256.Sum256([]byte("zedge.vela.settle.v1"))
+	CreditSubType  = sha256.Sum256([]byte("zedge.vela.credit.v1"))
+	PayoutSubType  = sha256.Sum256([]byte("zedge.vela.payout.v1"))
+	ConfirmSubType = sha256.Sum256([]byte("zedge.vela.confirm.v1"))
 )
 
 func (s *State) domain() envelopeDomain {

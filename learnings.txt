@@ -1007,3 +1007,48 @@ not been started (it needs report access and its own wallet).
   that account lands at new addresses.
 - The production website still runs the 2026-10-04 build that reads the
   retired registry until the new build is published.
+
+
+Current approach: private order book, deposit once on Base, settle on Horizen — 2026-10-07
+-------------------------------------------------------------------------------------------
+This section supersedes the plans above where they differ.
+
+Decided by the owner:
+- Product: BTC 15-minute Up/Down private order book on Vela (our self-hosted
+  Vela on Horizen mainnet). Of Horizen's builder pillars (Vela, zkVerify,
+  PureFi) only Vela is used; zero-knowledge proof of correct settlement through
+  zkVerify is a possible later addition, not planned now.
+- Money flow like a perps venue: users deposit native USDC on Base once into a
+  ZEDGE vault, trade from an internal private balance, and withdraw once.
+  Deposit records reach Horizen through Horizen's native Base-to-Horizen
+  messenger; withdrawals are signed by the operator and paid by the Base vault.
+  Users trust the operator for custody, as they already do for the order book.
+- Resolution as fast as possible: the engine verifies the Chainlink report
+  itself and pays winners at once; the on-chain registry remains the public
+  record and must agree. On the public Horizen endpoint (operator polling every
+  10 s) the target is about 10-15 s after the round end; about 3 s needs a
+  private endpoint.
+- Sign-in through Privy (social logins, embedded wallet), signatures made in
+  the user's browser without prompts, gas paid by our relayer, one click to
+  enter, close and withdraw.
+
+Rejected after measurement:
+- Moving everything to Base.
+- Bridging each deposit through Stargate between Base and Horizen: LayerZero's
+  minimum charge for delivering to Horizen became $1.50 per transfer on
+  2026-09-01 (from about $0.03); Base-to-Horizen delivery took about 85 s and
+  Horizen-to-Base about 80 s; the Horizen-to-Base route's credit was
+  800.74 USDC on 2026-10-06 and a 1,000 USDC transfer simulated as refused.
+
+Operational lessons from the first live day:
+- Horizen's public endpoint limits bandwidth per client address. An operator
+  polling every second, plus the keeper and a watchdog on the same machine, was
+  cut off for 15-minute periods ("Bandwidth limit exceeded", Retry-After 900)
+  and the first rounds could not open. Polling every 10 s and moving the
+  keeper's Horizen reads to a second public gateway fixed it.
+- The default Base endpoint answered a two-call JSON-RPC batch with three
+  entries. viem pairs batch answers by position after sorting by id, so a block
+  read received a transaction. The keeper now keeps one answer per id.
+- Live timing over 20 BTC 15-minute boundaries: report available +3.5 s, Base
+  publication +5 s, price in the Horizen cache +28 s, round opened +32 s,
+  previous round resolved +35 s (median).

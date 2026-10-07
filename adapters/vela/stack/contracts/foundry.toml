@@ -1,8 +1,9 @@
-# EVALUATION ONLY. Contracts for the local Vela slice (chain 31337): the clock
-# trigger and a 6-decimal test token. Kept out of contracts/ so that production
-# contract CI never builds them. Build output goes to build/ (git-ignored).
-# The tests also compile the round registry and its unsigned fixture oracle
-# from contracts/ (read-only), so the trigger is tested against the real one.
+# Contracts of the Vela book: BookClockTrigger (the book's clock trigger, UUPS),
+# and, for the local evaluation slice, EvaluationClockTrigger and a 6-decimal
+# test token. Kept out of contracts/ so that the registry's contract CI never
+# builds them. Build output goes to build/ (git-ignored). The tests also compile
+# the round registry, its unsigned fixture oracle and the deposit inbox from
+# contracts/ (read-only), so the triggers are tested against the real ones.
 [profile.default]
 src = "src"
 test = "test"
@@ -25,6 +26,7 @@ bytecode_hash = "none"
 remappings = [
   "forge-std/=../../../../contracts/lib/forge-std/src/",
   "@openzeppelin/contracts/=../../../../contracts/node_modules/@openzeppelin/contracts/",
+  "@openzeppelin/contracts-upgradeable/=../../../../contracts/node_modules/@openzeppelin/contracts-upgradeable/",
   "zedge-contracts/=../../../../contracts/",
 ]
 

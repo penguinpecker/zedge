@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "kind": "zedge-custody",
+  "status": "planned",
+  "deployer": "0x279173ac297ad146bc92f877552c8c2b78334d07",
+  "owner": "0x279173ac297ad146bc92f877552c8c2b78334d07",
+  "signer": "0x0000000000000000000000000000000000000000",
+  "plannedFrom": {
+    "base": {
+      "nonce": 5,
+      "block": 52267927
+    },
+    "horizen": {
+      "nonce": 16,
+      "block": 27927918
+    }
+  },
+  "limits": {
+    "minDeposit": "1000000",
+    "maxDeposit": "500000000",
+    "maxPayout": "1000000000",
+    "dailyPayoutCap": "10000000000"
+  },
+  "eip712": {
+    "name": "ZEDGE Vault",
+    "version": "1"
+  },
+  "minGasLimit": 100000,
+  "base": {
+    "chainId": 8453,
+    "usdc": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+    "messenger": "0x9f5e33f901ad50b50d6a27f63adabea4c81e953c",
+    "vault": {
+      "proxy": "0xf07b81d96b572007c8ea500db1f8095cf0c73d29",
+      "implementation": "0xfe5298605390519a9fc0264eefa90c395b9b83a6",
+      "implementationCodeHash": "0xe385625743b08e04d7f3300c6e73e8c3c96f85da0069173ea000f2a235233163",
+      "proxyCodeHash": "0x11e207b629c698e2df1db36c1a5400f670db529ea0461174531deb02e9ad5d56"
+    }
+  },
+  "horizen": {
+    "chainId": 26514,
+    "messenger": "0x4200000000000000000000000000000000000007",
+    "inbox": {
+      "proxy": "0x7003baebdb7d60d63a219294f4ebad211bbd441d",
+      "implementation": "0xfb692fb6346f91edfd3f7903e0d36b7be05d7cd7",
+      "implementationCodeHash": "0x730d5dd4fc3d60f135178fecaba63442a8c9125351bdc3e609352d4f25b70eb8",
+      "proxyCodeHash": "0x11e207b629c698e2df1db36c1a5400f670db529ea0461174531deb02e9ad5d56"
+    }
+  }
+}

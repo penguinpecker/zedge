@@ -2,6 +2,7 @@ package guest
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -41,12 +42,13 @@ func TestTimeFreePaths(t *testing.T) {
 		if s.Error != "" && !bytes.Equal(s.before, s.after) {
 			t.Fatalf("%s: a failed step changed the state", s.Name)
 		}
+		if s.Withdrawals != nil {
+			t.Fatalf("%s: a Vela withdrawal", s.Name)
+		}
 	}
 	for name, want := range map[string]string{
-		"deposit before the first tick fails":   ErrClock,
+		"deposit through the endpoint fails":    ErrToken,
 		"command before the first tick fails":   ErrClock,
-		"deposit of another token fails":        ErrToken,
-		"deposit of ETH fails":                  ErrToken,
 		"alice's command from bob fails":        ErrMismatch,
 		"truncated envelope fails":              ErrEnvelope,
 		"deeply nested payload fails":           ErrEnvelope,
@@ -55,8 +57,6 @@ func TestTimeFreePaths(t *testing.T) {
 		"replayed tick fails":                   ErrTick,
 		"tick nobody asked for fails":           ErrTick,
 		"malformed tick fails":                  ErrTrusted,
-		"tick behind the clock fails":           ErrTime,
-		"deposit past the account limit fails":  ErrDeposit,
 		"payload over the allocation cap fails": ErrEnvelope,
 		"tick stamped in milliseconds fails":    ErrTrusted,
 	} {
@@ -66,31 +66,26 @@ func TestTimeFreePaths(t *testing.T) {
 	}
 
 	sync := find(t, steps, "sync asks for tick 1")
-	if len(sync.AppEvents) != 1 || sync.AppEvents[0].EventSubType != TickSubType || !bytes.Equal(sync.AppEvents[0].Data, words(1, 0, 0)) || len(sync.Events) != 1 || sync.Withdrawals != nil {
+	if len(sync.AppEvents) != 1 || sync.AppEvents[0].EventSubType != TickSubType || !bytes.Equal(sync.AppEvents[0].Data, words(1, 1, 0, 0, 0)) || len(sync.Events) != 1 {
 		t.Fatalf("sync: %+v", sync)
 	}
 	if r := body(t, sync.Events[0]); r.Account != keeper || r.RequestID != keeper+":sync" || r.Body.Type != "sync" || r.Body.Status != "requested" || r.Body.Tick != 1 || r.Body.At != (receiptAt{}) || !sameButTick(t, sync.before, sync.after) {
 		t.Fatalf("sync receipt: %+v", r)
 	}
-	tick := find(t, steps, "tick 1 sets the clock")
-	if s := state(t, tick.after); s.Clock != t0 || s.Block != block0 || s.LastTick != 1 || s.Engine.Time != t0 || s.Engine.Sequence != 1 {
+	// The first tick sets the clock, then credits the first Base deposit,
+	// registering its depositor, and creates the next two rounds.
+	tick := find(t, steps, "tick 1 sets the clock and credits alice's first Base deposit, registering her")
+	if s := state(t, tick.after); s.Clock != t0 || s.Block != block0 || s.LastTick != 1 || s.Engine.Time != t0 || s.Engine.Sequence != 5 || s.DepositsSeen != 1 || s.Deposits != 1 ||
+		len(s.Engine.Rounds) != 2 || s.rounds()[0].Spec.Start != s1 {
 		t.Fatalf("tick 1: %+v", s)
 	}
-	// The tick publishes what it applied, and never asks for another tick.
-	if tick.Events != nil || tick.Withdrawals != nil || len(tick.AppEvents) != 1 || tick.AppEvents[0].EventSubType != ClockSubType || !bytes.Equal(tick.AppEvents[0].Data, clockRecord(tick.Payload, 1, block0, t0, 0, 0)) {
-		t.Fatalf("tick 1 effects: %+v", tick)
+	credit := append(append(words(1), addressWord(alice)...), words(200_000_000, creditCredited, 0)...)
+	if tick.Events != nil || len(tick.AppEvents) != 2 || !bytes.Equal(tick.AppEvents[0].Data, clockRecord(tick.Payload, 1, block0, t0, 0, 0, 1)) ||
+		tick.AppEvents[1].EventSubType != CreditSubType || !bytes.Equal(tick.AppEvents[1].Data, credit) {
+		t.Fatalf("tick 1 effects: %+v", tick.AppEvents)
 	}
-
-	deposit := find(t, steps, "first deposit registers and credits alice")
-	if len(deposit.Events) != 1 || deposit.Withdrawals != nil || deposit.AppEvents != nil {
-		t.Fatalf("deposit effects: %+v", deposit)
-	}
-	if r := body(t, deposit.Events[0]); r.Account != alice || r.RequestID != alice+":notice:1" || r.Body.Type != "deposit" || r.Body.Status != "credited" || !r.Body.Registered || r.Body.Deposit != 1 || r.Body.Receipt.Amount != 200_000_000 ||
-		r.Body.At != (receiptAt{1, block0, t0}) || r.Body.Tick != 0 {
-		t.Fatalf("deposit receipt: %+v", r)
-	}
-	if a := state(t, deposit.after).Engine.Accounts[0]; a.ID != alice || a.Cash != 200_000_000 || a.Nonce != 1 {
-		t.Fatalf("alice after deposit: %+v", a)
+	if a := state(t, tick.after).Engine.Accounts[0]; a.ID != alice || a.Cash != 200_000_000 || a.Nonce != 1 {
+		t.Fatalf("alice after her deposit: %+v", a)
 	}
 
 	retry := find(t, steps, "explicit register after a deposit is a retry")
@@ -101,29 +96,31 @@ func TestTimeFreePaths(t *testing.T) {
 		t.Fatalf("bob register: %+v", r)
 	}
 
+	// A withdrawal is a public payout record, which the vault on Base pays.
 	withdraw := find(t, steps, "alice withdraws")
-	if len(withdraw.Withdrawals) != 1 || withdraw.Withdrawals[0] != (Withdrawal{collateral, outside, "0x2faf080"}) || len(withdraw.Events) != 1 {
-		t.Fatalf("withdrawal effects: %+v", withdraw)
+	payout := append(append(append(words(testApp, 1, payoutWithdrawal), addressWord(alice)...), addressWord(outside)...), words(50_000_000)...)
+	if len(withdraw.Events) != 1 || len(withdraw.AppEvents) != 2 || withdraw.AppEvents[1].EventSubType != PayoutSubType || !bytes.Equal(withdraw.AppEvents[1].Data, payout) {
+		t.Fatalf("withdrawal effects: %+v", withdraw.AppEvents)
 	}
 	if r := body(t, withdraw.Events[0]); r.RequestID != alice+":2" || r.Body.Status != "applied" || r.Body.Withdrawal != 1 || r.Body.Receipt.Amount != 50_000_000 || r.Body.Receipt.WithdrawalID != alice+":2" || r.Body.At != (receiptAt{1, block0, t0}) || r.Body.Tick != 4 {
 		t.Fatalf("withdrawal receipt: %+v", r)
 	}
-	if s := state(t, withdraw.after); s.Withdrawals != 1 || s.Engine.Custody != 150_000_000 || s.Engine.PaidOut != 50_000_000 || s.Engine.Time != t0 {
+	if s := state(t, withdraw.after); s.Withdrawals != 1 || s.Payouts != 1 || s.Engine.Custody != 150_000_000 || s.Engine.PaidOut != 50_000_000 || s.Engine.Time != t0 {
 		t.Fatalf("ledger after withdrawal: %+v", s.Engine)
 	}
 
 	again := find(t, steps, "exact retry of the withdrawal has no effect")
-	if r := body(t, again.Events[0]); !sameButTick(t, again.before, again.after) || again.Withdrawals != nil || len(again.Events) != 1 || r.Body.Status != "retry" || r.Body.Withdrawal != 0 {
+	if r := body(t, again.Events[0]); !sameButTick(t, again.before, again.after) || len(again.AppEvents) != 1 || len(again.Events) != 1 || r.Body.Status != "retry" || r.Body.Withdrawal != 0 {
 		t.Fatalf("withdrawal retry emitted an effect: %+v", again)
 	}
 
 	for name, reason := range map[string]string{
 		"overdraft is rejected in private":                     "insufficient available cash",
-		"withdrawal to the endpoint is rejected in private":    "withdrawal destination not allowed",
+		"withdrawal to the vault is rejected in private":       "withdrawal destination not allowed",
 		"authority command from a user is rejected in private": "wrong authorization class",
 	} {
 		s := find(t, steps, name)
-		if !sameButTick(t, s.before, s.after) || s.Withdrawals != nil || len(s.Events) != 1 {
+		if !sameButTick(t, s.before, s.after) || len(s.AppEvents) != 1 || len(s.Events) != 1 {
 			t.Fatalf("%s: a rejection had an effect", name)
 		}
 		if r := body(t, s.Events[0]); r.Account != s.Sender || r.Body.Type != "command" || r.Body.Status != "rejected" || r.Body.Reason != reason || r.Body.Receipt != nil {
@@ -140,78 +137,110 @@ func TestTimeFreePaths(t *testing.T) {
 	if r := body(t, staged.Events[0]); r.Body.Type != "command" || r.Body.Status != "staged" || r.Body.Tick != 8 || r.Body.Receipt != nil {
 		t.Fatalf("staged receipt: %+v", r.Body)
 	}
-	if s := state(t, find(t, steps, "tick 10 checkpoints the engine and skips eight").after); s.Clock != t1 || s.Block != block1 || s.LastTick != 10 || s.TickSeq != 10 || s.Engine.Time != t1 ||
+	// A tick stamped behind the clock applies at the clock: it may not move
+	// it back, and it may not be lost either.
+	if s := state(t, find(t, steps, "tick 9 behind the clock applies at the clock, skipping seven").after); s.Clock != t0 || s.Block != block1 || s.LastTick != 9 || s.TickSeq != 10 || s.Engine.Time != t0 ||
 		len(s.Staged) != 0 || len(s.Outcomes) != 1 || s.Outcomes[0] != (Outcome{alice, alice + ":3", 8, "rejected", "unknown round"}) {
-		t.Fatalf("tick 10: %+v %+v", s.Staged, s.Outcomes)
+		t.Fatalf("tick 9: %+v %+v", s.Staged, s.Outcomes)
 	}
-	if r := body(t, find(t, steps, "bob deposits").Events[0]); r.RequestID != bob+":notice:1" || r.Body.Registered || r.Body.Deposit != 2 {
-		t.Fatalf("bob deposit receipt: %+v", r)
+	if s := state(t, find(t, steps, "tick 10 checkpoints the engine and credits bob's deposit").after); s.Clock != t1 || s.LastTick != 10 || s.DepositsSeen != 2 || account(s.Engine, bob).Cash != 75_000_000 {
+		t.Fatalf("tick 10: %+v", s)
 	}
-	if w := find(t, steps, "bob withdraws everything").Withdrawals; len(w) != 1 || w[0] != (Withdrawal{collateral, bob, "0x47868c0"}) {
-		t.Fatalf("bob withdrawal: %+v", w)
-	}
-
-	extra := uint64(MaxSliceAccounts - 2)
-	end := state(t, find(t, steps, "tick with an earlier block number is accepted").after)
-	if e := end.Engine; len(e.Accounts) != MaxSliceAccounts || e.Deposited != 275_000_000+extra || e.Custody != 150_000_000+extra || e.PaidOut != 125_000_000 ||
-		e.Claimable != 0 || len(e.Withdrawals) != 0 || uint64(len(e.ExternalEvidence)) != 2+extra+4 || end.Deposits != 2+extra || end.Withdrawals != 2 {
-		t.Fatalf("final ledger: deposited=%d custody=%d paidOut=%d accounts=%d", e.Deposited, e.Custody, e.PaidOut, len(e.Accounts))
+	if e := find(t, steps, "bob withdraws everything").AppEvents; len(e) != 2 || !bytes.Equal(e[1].Data, append(append(append(words(testApp, 2, payoutWithdrawal), addressWord(bob)...), addressWord(bob)...), words(75_000_000)...)) {
+		t.Fatalf("bob's payout: %+v", e)
 	}
 	// The block number is recorded as reported; only the timestamp is ordered.
-	if end.Clock != t1+1 || end.Block != block0 || end.LastTick != 11 {
-		t.Fatalf("last tick: clock=%d block=%d tick=%d", end.Clock, end.Block, end.LastTick)
+	if s := state(t, find(t, steps, "tick with an earlier block number is accepted").after); s.Clock != t1+1 || s.Block != block0 || s.LastTick != 11 {
+		t.Fatalf("last tick: clock=%d block=%d tick=%d", s.Clock, s.Block, s.LastTick)
+	}
+
+	// The 33rd account's deposit is refunded in full through a payout.
+	fill := find(t, steps, "tick 15 credits accounts 27 to 32 and refunds the deposit past the account limit")
+	past := fmt.Sprintf("0x%040x", MaxSliceAccounts+1)
+	refund := fill.AppEvents[len(fill.AppEvents)-2:]
+	if refund[0].EventSubType != CreditSubType || !bytes.Equal(refund[0].Data, append(append(words(MaxSliceAccounts+1), addressWord(past)...), words(1, creditRefunded, 3)...)) ||
+		refund[1].EventSubType != PayoutSubType || !bytes.Equal(refund[1].Data, append(append(append(words(testApp, 3, payoutRefund), addressWord(past)...), addressWord(past)...), words(1)...)) {
+		t.Fatalf("refund: %+v", refund)
+	}
+	extra := uint64(MaxSliceAccounts - 2)
+	end := state(t, fill.after)
+	if e := end.Engine; len(e.Accounts) != MaxSliceAccounts || e.Deposited != 275_000_000+extra || e.Custody != 150_000_000+extra || e.PaidOut != 125_000_000 ||
+		e.Claimable != 0 || len(e.Withdrawals) != 0 || uint64(len(e.ExternalEvidence)) != 2+extra+4 || end.Deposits != 2+extra || end.DepositsSeen != 3+extra || end.Withdrawals != 2 || end.Payouts != 3 {
+		t.Fatalf("final ledger: deposited=%d custody=%d paidOut=%d accounts=%d", e.Deposited, e.Custody, e.PaidOut, len(e.Accounts))
 	}
 }
 
-// A request's public shape must not say what it was. Every accepted
-// process_request, whether it applied, was staged, was refused, was a retry or
-// was a sync, gives one receipt of one size to its sender and asks for one
-// tick; a deposit gives one receipt; a tick gives none, publishes the clock it
-// applied, then any archive records, and asks for a tick only to carry on.
+// A request's public shape must not say what it was. Every accepted command
+// or sync, whether it applied, was staged, was refused or was a retry, gives
+// one receipt of one size to its sender and asks for one tick, and a
+// withdrawal adds its payout record; a report gives one receipt and asks for
+// nothing; a tick gives no receipt, publishes the clock it applied first,
+// then only public records, and asks for a tick only to carry on.
 func TestEveryReplyHasOneShape(t *testing.T) {
 	asked, archived := uint64(0), 0
 	for _, s := range run(t, script()) {
-		if s.Error != "" || s.Call == "deploy" || s.Call == "restart" {
+		if s.Error != "" || s.Call == "restart" {
+			continue
+		}
+		if s.Call == "deploy" {
+			asked = 0
 			continue
 		}
 		before, after := state(t, s.before), state(t, s.after)
-		switch s.Call {
-		case "process":
+		switch {
+		case s.Call == "process" && strings.Contains(string(s.Payload), `"type":"report"`):
+			if len(s.Events) != 1 || s.Events[0].UserID != s.Sender || after.TickSeq != before.TickSeq || body(t, s.Events[0]).Body.Type != "report" {
+				t.Fatalf("%s: %d receipts", s.Name, len(s.Events))
+			}
+			for _, e := range s.AppEvents {
+				if e.EventSubType == ArchiveSubType {
+					archived++
+				} else if e.EventSubType != SettleSubType && e.EventSubType != ConfirmSubType {
+					t.Fatalf("%s: app event %x", s.Name, e.EventSubType)
+				}
+			}
+		case s.Call == "process":
 			asked++
-			if len(s.Events) != 1 || s.Events[0].UserID != s.Sender || len(s.AppEvents) != 1 || !asks(t, after, s.AppEvents[0]) || after.TickSeq != asked || len(s.Withdrawals) > 1 {
-				t.Fatalf("%s: %d receipts, %d app events, %d withdrawals", s.Name, len(s.Events), len(s.AppEvents), len(s.Withdrawals))
-			}
-			if r := body(t, s.Events[0]); r.Body.Tick != asked || (len(s.Withdrawals) == 1) != (r.Body.Withdrawal != 0) {
-				t.Fatalf("%s: receipt %s", s.Name, s.Events[0].Data)
-			}
-		case "deposit":
-			if len(s.Events) != 1 || s.Events[0].UserID != s.Sender || s.AppEvents != nil || s.Withdrawals != nil || body(t, s.Events[0]).Body.Type != "deposit" {
+			paid := len(s.AppEvents) == 2 && s.AppEvents[1].EventSubType == PayoutSubType
+			if len(s.Events) != 1 || s.Events[0].UserID != s.Sender || len(s.AppEvents) != 1 && !paid || !asks(t, after, s.AppEvents[0]) || after.TickSeq != asked {
 				t.Fatalf("%s: %d receipts, %d app events", s.Name, len(s.Events), len(s.AppEvents))
 			}
-		case "trusted":
-			if s.Events != nil || s.Withdrawals != nil || len(s.AppEvents) == 0 || s.AppEvents[0].EventSubType != ClockSubType || len(s.AppEvents[0].Data) != 192 ||
-				!bytes.Equal(s.AppEvents[0].Data[:96], words(after.LastTick, after.Block, after.Clock)) || !bytes.Equal(s.AppEvents[0].Data[160:], keccak(s.Payload)) || after.TickSeq != before.TickSeq {
+			if r := body(t, s.Events[0]); r.Body.Tick != asked || paid != (r.Body.Withdrawal != 0) {
+				t.Fatalf("%s: receipt %s", s.Name, s.Events[0].Data)
+			}
+		case s.Call == "trusted":
+			if s.Events != nil || len(s.AppEvents) == 0 || s.AppEvents[0].EventSubType != ClockSubType || len(s.AppEvents[0].Data) != 224 ||
+				!bytes.Equal(s.AppEvents[0].Data[:96], words(after.LastTick, after.Block, after.Clock)) || !bytes.Equal(s.AppEvents[0].Data[192:], keccak(s.Payload)) || after.TickSeq != before.TickSeq {
 				t.Fatalf("%s: %d receipts, %d app events", s.Name, len(s.Events), len(s.AppEvents))
 			}
 			for _, e := range s.AppEvents[1:] {
 				var record engine.RoundArchive
-				if e.EventSubType != ArchiveSubType || !canonical(e.Data, &record) {
+				switch e.EventSubType {
+				case ArchiveSubType:
+					if !canonical(e.Data, &record) {
+						t.Fatalf("%s: archive record %s", s.Name, e.Data)
+					}
+					archived++
+				case SettleSubType, CreditSubType, PayoutSubType, ConfirmSubType:
+				default:
 					t.Fatalf("%s: app event %x", s.Name, e.EventSubType)
 				}
-				archived++
 			}
+		default:
+			t.Fatalf("%s: a %s call succeeded", s.Name, s.Call)
 		}
 	}
-	if asked != 24 || archived != 1 {
-		t.Fatalf("%d requests asked for a tick, want 24; %d rounds archived, want 1", asked, archived)
+	if archived != 2 {
+		t.Fatalf("%d rounds archived, want 2", archived)
 	}
 }
 
 // asks reports whether e is the request for st's latest tick: the tick
-// number, the counts of scheduled and open rounds, then their registry IDs.
+// number, the next deposit index, the counts of scheduled, open and
+// unconfirmed rounds, then their registry IDs.
 func asks(t testing.TB, st *State, e AppEvent) bool {
 	t.Helper()
-	var scheduled, open []byte
+	var scheduled, open, confirm []byte
 	for _, m := range st.rounds() {
 		if m.Status == "scheduled" {
 			scheduled = append(scheduled, raw(m.Spec.RegistryRoundID)...)
@@ -219,7 +248,12 @@ func asks(t testing.TB, st *State, e AppEvent) bool {
 			open = append(open, raw(m.Spec.RegistryRoundID)...)
 		}
 	}
-	want := append(append(words(st.TickSeq, uint64(len(scheduled)/32), uint64(len(open)/32)), scheduled...), open...)
+	for _, u := range st.Unconfirmed {
+		if !bytes.Contains(open, raw(u.Round)) {
+			confirm = append(confirm, raw(u.Round)...)
+		}
+	}
+	want := append(append(append(words(st.TickSeq, st.DepositsSeen+1, uint64(len(scheduled)/32), uint64(len(open)/32), uint64(len(confirm)/32)), scheduled...), open...), confirm...)
 	return e.EventSubType == TickSubType && bytes.Equal(e.Data, want)
 }
 
@@ -229,8 +263,9 @@ func asks(t testing.TB, st *State, e AppEvent) bool {
 // origin and application ID and every number at its cap. A receipt's engine
 // receipt holds fills (an order) or released orders (cancel_all), not both.
 func TestReceiptsAreOneSize(t *testing.T) {
-	s := state(t, run(t, script()[:12])[11].after)
+	s := state(t, find(t, run(t, script()), "exact retry of the withdrawal has no effect").after)
 	s.Origin = "https://" + strings.Repeat("a", 253)
+	s.Engine.Rounds = []engine.Round{} // their IDs commit to the application ID, which changes here
 	s.Engine.Config.Domain.ApplicationID = "18446744073709551615"
 	s.LastTick, s.Block, s.Clock = engine.MaxAtoms, engine.MaxAtoms, MaxClock
 	top, round := uint64(engine.MaxAtoms), strings.Repeat("ab", 32)
@@ -251,14 +286,14 @@ func TestReceiptsAreOneSize(t *testing.T) {
 		"withdraw": {Type: "command", Status: "applied", Receipt: &withdrawn, Withdrawal: top},
 		"rejected": {Type: "command", Status: "rejected", Reason: reason},
 		"staged":   {Type: "command", Status: "staged"},
-		"deposit":  {Type: "deposit", Status: "credited", Receipt: &withdrawn, Deposit: top, Registered: true},
+		"report":   {Type: "report", Status: "rejected", Reason: reason},
 		"sync":     {Type: "sync", Status: "requested"},
 	}
 	longest := 0
 	for name, b := range bodies {
 		for _, o := range []outcomeReceipt{{Outcome{alice, id, top, "applied", ""}, &full}, {Outcome{alice, id, top, "rejected", reason}, nil}} {
 			s.taken = &o
-			data := s.receipt(alice, alice+":notice:"+fmt.Sprint(top), b).Data
+			data := s.receipt(alice, alice+":report:"+fmt.Sprint(uint64(MaxClock)), b).Data
 			var e receiptEnvelope
 			if len(data) != ReceiptBytes || !canonical(data, &e) || strings.Trim(e.Body.Pad, "0") != "" || e.Body.Outcome == nil || e.Body.View == nil {
 				t.Errorf("%s with an %s outcome: %d bytes, want %d", name, o.Status, len(data), ReceiptBytes)
@@ -300,6 +335,7 @@ func TestRequestsAreOneSize(t *testing.T) {
 		"place up sell":   place(engine.Up, engine.Sell),
 		"place down buy":  place(engine.Down, engine.Buy),
 		"place down sell": place(engine.Down, engine.Sell),
+		"report":          reportPayload(alice, chainlinkReport(engine.BTCStreamsFeed, uint32(b1), 0).Report, uint32(b1)),
 	} {
 		if r := result(t, ProcessRequest(testApp, raw(alice), requestTypeProcess, p, h.st)); len(p) != RequestBytes || r.Error != "" {
 			t.Errorf("%s: %d bytes, error %q", name, len(p), r.Error)
@@ -321,6 +357,15 @@ func TestRequestsAreOneSize(t *testing.T) {
 		}
 		longest = max(longest, len(marshal(requestEnvelope{1, d, alice, "9999999999", id, "command", requestBody{Type: "command", Command: string(marshal(c))}})))
 	}
+	// A report fits only with the deployment's own domain, which deploy checks
+	// (TestDeployRejected): here, with f = 5 and the longest request ID.
+	full := make([]byte, 224+32+blobBytes+2*(32+32*6))
+	at := alice + ":report:" + fmt.Sprint(uint64(MaxClock))
+	if n := len(marshal(requestEnvelope{1, testDomain(), alice, epoch, at, "command", requestBody{Type: "report", Report: base64.StdEncoding.EncodeToString(full)}})); n > RequestBytes {
+		t.Fatalf("a report request is %d bytes", n)
+	} else {
+		t.Logf("longest report request before padding: %d of %d bytes", n, RequestBytes)
+	}
 	t.Logf("longest request before padding: %d of %d bytes", longest, RequestBytes)
 	if longest > RequestBytes {
 		t.Fatalf("a request can reach %d bytes; the size class is %d", longest, RequestBytes)
@@ -332,6 +377,7 @@ func TestRequestsAreOneSize(t *testing.T) {
 func spend(s *State, free int) {
 	for int(s.Deposits+2*s.Withdrawals) < maxEvidence-free {
 		s.Withdrawals++
+		s.Payouts++
 		s.Engine.ExternalEvidence = append(s.Engine.ExternalEvidence, sha(fmt.Sprint("spent:", s.Withdrawals, ":a")), sha(fmt.Sprint("spent:", s.Withdrawals, ":b")))
 	}
 	sort.Strings(s.Engine.ExternalEvidence)
@@ -342,52 +388,32 @@ func spend(s *State, free int) {
 // while two IDs remain for every account that holds a balance, and a withdrawal
 // of a whole balance is always taken.
 func TestExitReserve(t *testing.T) {
-	s := state(t, run(t, script()[:30])[29].after) // alice holds 150 tokens, bob nothing
+	s := state(t, find(t, run(t, script()), "bob withdraws everything").after) // alice holds 150 tokens, bob nothing
 	spend(s, 8)
-	st := marshal(s)
-	free := func() int { return maxEvidence - len(state(t, st).Engine.ExternalEvidence) }
-	cash := func(who string) uint64 {
-		for _, a := range state(t, st).Engine.Accounts {
-			if a.ID == who {
-				return a.Cash
-			}
-		}
-		return 0
-	}
-	nonce := map[string]uint64{alice: 2, bob: 2}
-	deposit := func(who string, amount uint64) string {
-		r := result(t, Deposit(testApp, raw(who), raw(collateral), new(big.Int).SetUint64(amount).Bytes(), st))
-		if r.Error == "" {
-			st = r.State
-		}
-		return r.Error
-	}
+	h := &harness{t: t, st: marshal(s), block: 5000}
+	free := func() int { return maxEvidence - len(h.s().Engine.ExternalEvidence) }
+	cash := func(who string) uint64 { return account(h.s().Engine, who).Cash }
 	withdraw := func(who string, amount uint64) (paid bool, reason string) {
-		r := result(t, ProcessRequest(testApp, raw(who), requestTypeProcess, commandPayload(who, nonce[who]+1, engine.Command{Op: engine.RequestWithdrawal, Amount: amount, Destination: who}), st))
-		if r.Error != "" {
-			t.Fatalf("withdrawal by %s failed in public: %s", who, r.Error)
-		}
-		if paid = len(r.Withdrawals) == 1; paid {
-			nonce[who]++
-		} else if !sameButTick(t, st, r.State) {
+		before := h.st
+		b := h.cmd(who, engine.Command{Op: engine.RequestWithdrawal, Amount: amount, Destination: who})
+		if paid = b.Status == "applied"; !paid && !sameButTick(t, before, h.st) {
 			t.Fatalf("a refused withdrawal by %s changed the ledger", who)
 		}
-		st = r.State
-		if !exitReserved(state(t, st).Engine) {
+		if !exitReserved(h.s().Engine) {
 			t.Fatalf("withdrawal by %s left fewer evidence IDs than the funded accounts need", who)
 		}
-		return paid, body(t, r.Events[0]).Body.Reason
+		return paid, b.Reason
 	}
 	const reserve = "exit reserve reached: only a withdrawal of the whole balance is accepted"
 
-	if e := deposit(bob, 500_000_000); e != "" || free() != 7 { // the victim: two accounts now hold a balance
-		t.Fatalf("victim's deposit: %q, %d IDs free", e, free())
+	if !h.credited(bob, 500_000_000) || free() != 7 { // the victim: two accounts now hold a balance
+		t.Fatalf("victim's deposit: %d IDs free", free())
 	}
 	if paid, reason := withdraw(alice, 1); !paid || free() != 5 {
 		t.Fatalf("a partial withdrawal above the reserve must be taken: %q, %d IDs free", reason, free())
 	}
-	if e := deposit(alice, 1); e != "" || free() != 4 {
-		t.Fatalf("a deposit above the reserve must be taken: %q, %d IDs free", e, free())
+	if !h.credited(alice, 1) || free() != 4 {
+		t.Fatalf("a deposit above the reserve must be taken: %d IDs free", free())
 	}
 	// Four IDs left and two funded accounts: nothing but a full exit now.
 	if paid, reason := withdraw(alice, 1); paid || reason != reserve || free() != 4 {
@@ -396,9 +422,10 @@ func TestExitReserve(t *testing.T) {
 	if paid, reason := withdraw(bob, 1); paid || reason != reserve || free() != 4 {
 		t.Fatalf("the victim's partial withdrawal: paid=%v reason=%q, %d IDs free", paid, reason, free())
 	}
+	// A deposit the reserve cannot take is refunded on Base in full.
 	for name, who := range map[string]string{"a funded account": alice, "a new account": keeper} {
-		if e := deposit(who, 1); e != ErrDeposit || free() != 4 {
-			t.Fatalf("deposit by %s: %q, %d IDs free", name, e, free())
+		if h.credited(who, 1) || free() != 4 {
+			t.Fatalf("deposit by %s: %d IDs free", name, free())
 		}
 	}
 	if paid, reason := withdraw(bob, cash(bob)); !paid || cash(bob) != 0 || free() != 2 {
@@ -407,7 +434,7 @@ func TestExitReserve(t *testing.T) {
 	if paid, reason := withdraw(alice, cash(alice)); !paid || cash(alice) != 0 || free() != 0 {
 		t.Fatalf("the attacker's full withdrawal: paid=%v reason=%q, %d IDs free", paid, reason, free())
 	}
-	if e := state(t, st).Engine; e.Custody != 0 || len(e.ExternalEvidence) != maxEvidence {
+	if e := h.s().Engine; e.Custody != 0 || len(e.ExternalEvidence) != maxEvidence {
 		t.Fatalf("custody %d left with %d evidence IDs used", e.Custody, len(e.ExternalEvidence))
 	}
 }
@@ -429,15 +456,22 @@ func TestEngineReplay(t *testing.T) {
 		}
 	}
 	system := func(at uint64, c engine.Command) { t.Helper(); apply(at, trigger, e.AuthorityNonce+1, true, c) }
+	create := func(start uint64) {
+		spec := mustSpec(start)
+		system(t0, engine.Command{Op: engine.CreateRound, Round: &spec})
+	}
 	system(t0, engine.Command{Op: engine.Checkpoint})
 	apply(t0, alice, 1, false, engine.Command{Op: engine.Register, Account: alice})
-	system(t0, engine.Command{Op: engine.Deposit, Account: alice, Amount: 200_000_000, Evidence: sha(fmt.Sprintf("ZEDGE_VELA_V1:DEPOSIT:31337:%s:%d:1", endpoint, testApp))})
+	system(t0, engine.Command{Op: engine.Deposit, Account: alice, Amount: 200_000_000, Evidence: sha(fmt.Sprintf("ZEDGE_VELA_V1:BASE_DEPOSIT:8453:%s:%d:1", testCustody.Vault, testApp))})
+	create(s1)
+	create(s1 + 900)
 	apply(t0, bob, 1, false, engine.Command{Op: engine.Register, Account: bob})
 	apply(t0, alice, 2, false, engine.Command{Op: engine.RequestWithdrawal, Account: alice, Amount: 50_000_000, Destination: outside})
 	system(t0, engine.Command{Op: engine.ExportWithdrawal, WithdrawalID: alice + ":2", Evidence: sha(fmt.Sprintf("ZEDGE_VELA_V1:WITHDRAWAL:31337:%s:%d:1", endpoint, testApp))})
 	system(t0, engine.Command{Op: engine.ConfirmClaim, WithdrawalID: alice + ":2", Evidence: sha(fmt.Sprintf("ZEDGE_VELA_V1:CLAIM:31337:%s:%d:1", endpoint, testApp))})
+	system(t0, engine.Command{Op: engine.Checkpoint}) // tick 9, stamped behind the clock
 	system(t1, engine.Command{Op: engine.Checkpoint})
-	system(t1, engine.Command{Op: engine.Deposit, Account: bob, Amount: 75_000_000, Evidence: sha(fmt.Sprintf("ZEDGE_VELA_V1:DEPOSIT:31337:%s:%d:2", endpoint, testApp))})
+	system(t1, engine.Command{Op: engine.Deposit, Account: bob, Amount: 75_000_000, Evidence: sha(fmt.Sprintf("ZEDGE_VELA_V1:BASE_DEPOSIT:8453:%s:%d:2", testCustody.Vault, testApp))})
 	apply(t1, bob, 2, false, engine.Command{Op: engine.RequestWithdrawal, Account: bob, Amount: 75_000_000, Destination: bob})
 	system(t1, engine.Command{Op: engine.ExportWithdrawal, WithdrawalID: bob + ":2", Evidence: sha(fmt.Sprintf("ZEDGE_VELA_V1:WITHDRAWAL:31337:%s:%d:2", endpoint, testApp))})
 	system(t1, engine.Command{Op: engine.ConfirmClaim, WithdrawalID: bob + ":2", Evidence: sha(fmt.Sprintf("ZEDGE_VELA_V1:CLAIM:31337:%s:%d:2", endpoint, testApp))})
@@ -452,8 +486,7 @@ func TestEngineReplay(t *testing.T) {
 
 // Principal and time come from the host and the last tick, whatever a payload says.
 func TestContextComesFromTheHost(t *testing.T) {
-	steps := run(t, script()[:10])
-	before := steps[9].after // bob registered, clock at t0
+	before := find(t, run(t, script()), "bob registers").after // clock at t0
 	for name, c := range map[string]struct {
 		sender  string
 		payload []byte
@@ -479,14 +512,15 @@ func TestContextComesFromTheHost(t *testing.T) {
 	if r := body(t, out.Events[0]); out.Error != "" || !sameButTick(t, before, out.State) || r.Body.Status != "rejected" || r.Body.Reason != "authority cannot trade" {
 		t.Fatalf("authority registered as a trader: %+v", r)
 	}
-	if got := result(t, Deposit(testApp, raw(trigger), raw(collateral), []byte{1}, before)).Error; got != ErrDeposit {
-		t.Fatalf("deposit by the trigger: %q", got)
+	// Nor can it be credited a Base deposit: that is refunded.
+	h := &harness{t: t, st: before, block: 5000}
+	if h.credited(trigger, 1) || account(h.s().Engine, trigger) != nil || h.s().Payouts != 1 {
+		t.Fatal("a deposit by the trigger was credited")
 	}
 }
 
 func TestEnvelopeRejected(t *testing.T) {
-	steps := run(t, script()[:6])
-	before := steps[5].after
+	before := find(t, run(t, script()), "tick 1 sets the clock and credits alice's first Base deposit, registering her").after
 	good := requestEnvelope{1, testDomain(), bob, epoch, bob + ":1", "command", requestBody{Type: "command", Command: string(marshal(engine.Command{Domain: deployed().Domain, ID: bob + ":1", Nonce: 1, Op: engine.Register, Account: bob}))}}
 	edit := func(f func(*requestEnvelope)) []byte { e := good; f(&e); return padded(e) }
 	text := string(padded(good))
@@ -505,24 +539,37 @@ func TestEnvelopeRejected(t *testing.T) {
 	}
 	// What session.ts encrypts for guest.ts's body without ../crypto/pad.ts:
 	// canonical in every respect but its length.
-	bare := marshal(bareEnvelope{1, good.Domain, bob, epoch, bob + ":1", "command", bareBody{"command", good.Body.Command}})
+	bare := marshal(bareEnvelope{1, good.Domain, bob, epoch, bob + ":1", "command", bareBody{Type: "command", Command: good.Body.Command}})
 	for name, c := range map[string]struct {
 		payload []byte
 		want    string
 	}{
-		"other chain":                 {edit(func(e *requestEnvelope) { e.Domain.ChainID = 84532 }), ErrContext},
-		"other endpoint":              {edit(func(e *requestEnvelope) { e.Domain.Endpoint = outside }), ErrContext},
-		"other application":           {edit(func(e *requestEnvelope) { e.Domain.ApplicationID = "8" }), ErrContext},
-		"other wasm":                  {edit(func(e *requestEnvelope) { e.Domain.ApplicationFingerprint = strings.Repeat("cd", 32) }), ErrContext},
-		"other rules":                 {edit(func(e *requestEnvelope) { e.Domain.RulesHash = strings.Repeat("cd", 32) }), ErrContext},
-		"other origin":                {edit(func(e *requestEnvelope) { e.Domain.Origin = "https://zedge.example" }), ErrContext},
-		"other epoch":                 {edit(func(e *requestEnvelope) { e.Epoch = "2" }), ErrContext},
-		"a receipt":                   {edit(func(e *requestEnvelope) { e.Kind = "receipt" }), ErrContext},
-		"version 2":                   {edit(func(e *requestEnvelope) { e.Version = 2 }), ErrContext},
-		"other account":               {edit(func(e *requestEnvelope) { e.Account = alice }), ErrMismatch},
-		"unknown body type":           {edit(func(e *requestEnvelope) { e.Body.Type = "view" }), ErrEnvelope},
-		"sync with a command":         {edit(func(e *requestEnvelope) { e.Body.Type, e.RequestID = "sync", bob+":sync" }), ErrEnvelope},
-		"sync under another ID":       {edit(func(e *requestEnvelope) { e.Body, e.RequestID = requestBody{Type: "sync"}, bob+":1" }), ErrEnvelope},
+		"other chain":           {edit(func(e *requestEnvelope) { e.Domain.ChainID = 84532 }), ErrContext},
+		"other endpoint":        {edit(func(e *requestEnvelope) { e.Domain.Endpoint = outside }), ErrContext},
+		"other application":     {edit(func(e *requestEnvelope) { e.Domain.ApplicationID = "8" }), ErrContext},
+		"other wasm":            {edit(func(e *requestEnvelope) { e.Domain.ApplicationFingerprint = strings.Repeat("cd", 32) }), ErrContext},
+		"other rules":           {edit(func(e *requestEnvelope) { e.Domain.RulesHash = strings.Repeat("cd", 32) }), ErrContext},
+		"other origin":          {edit(func(e *requestEnvelope) { e.Domain.Origin = "https://zedge.example" }), ErrContext},
+		"other epoch":           {edit(func(e *requestEnvelope) { e.Epoch = "2" }), ErrContext},
+		"a receipt":             {edit(func(e *requestEnvelope) { e.Kind = "receipt" }), ErrContext},
+		"version 2":             {edit(func(e *requestEnvelope) { e.Version = 2 }), ErrContext},
+		"other account":         {edit(func(e *requestEnvelope) { e.Account = alice }), ErrMismatch},
+		"unknown body type":     {edit(func(e *requestEnvelope) { e.Body.Type = "view" }), ErrEnvelope},
+		"sync with a command":   {edit(func(e *requestEnvelope) { e.Body.Type, e.RequestID = "sync", bob+":sync" }), ErrEnvelope},
+		"sync under another ID": {edit(func(e *requestEnvelope) { e.Body, e.RequestID = requestBody{Type: "sync"}, bob+":1" }), ErrEnvelope},
+		"sync with a report":    {edit(func(e *requestEnvelope) { e.Body, e.RequestID = requestBody{Type: "sync", Report: "AAAA"}, bob+":sync" }), ErrEnvelope},
+		"command with a report": {edit(func(e *requestEnvelope) { e.Body.Report = "AAAA" }), ErrEnvelope},
+		"report with a command": {edit(func(e *requestEnvelope) { e.Body.Type, e.Body.Report, e.RequestID = "report", "AAAA", bob+":report:0" }), ErrEnvelope},
+		"report not in base64": {edit(func(e *requestEnvelope) {
+			e.Body, e.RequestID = requestBody{Type: "report", Report: "AA*A"}, bob+":report:0"
+		}), ErrEnvelope},
+		"report in unpadded base64": {edit(func(e *requestEnvelope) {
+			e.Body, e.RequestID = requestBody{Type: "report", Report: "AA"}, bob+":report:0"
+		}), ErrEnvelope},
+		"report in URL base64": {edit(func(e *requestEnvelope) {
+			e.Body, e.RequestID = requestBody{Type: "report", Report: "-_-_"}, bob+":report:0"
+		}), ErrEnvelope},
+		"report under a command ID":   {edit(func(e *requestEnvelope) { e.Body = requestBody{Type: "report", Report: "AAAA"} }), ErrEnvelope},
 		"empty command":               {edit(func(e *requestEnvelope) { e.Body.Command = "" }), ErrCommand},
 		"command with a space":        {edit(func(e *requestEnvelope) { e.Body.Command += " " }), ErrCommand},
 		"command keys reordered":      {edit(func(e *requestEnvelope) { e.Body.Command = `{"id":"x",` + e.Body.Command[1:] }), ErrCommand},
@@ -566,59 +613,77 @@ func TestEnvelopeRejected(t *testing.T) {
 	}
 }
 
-func TestDepositRejected(t *testing.T) {
-	steps := run(t, script()[:6])
-	before := steps[5].after
-	wide := make([]byte, 32)
-	binary.BigEndian.PutUint64(wide[24:], 5)
-	if r := result(t, Deposit(testApp, raw(bob), raw(collateral), wide, before)); r.Error != "" || state(t, r.State).Engine.Deposited != 200_000_005 {
-		t.Fatalf("a 32-byte amount must be accepted: %+v", r.Error)
+// Custody is the Base vault (README section 6): the endpoint's own deposit
+// path is refused whatever it carries, and the inbox's records are credited
+// exactly once each, in index order, or refunded in full.
+func TestBaseDeposits(t *testing.T) {
+	before := find(t, run(t, script()), "tick with an earlier block number is accepted").after // indexes 1 and 2 seen
+	for name, st := range map[string][]byte{"a valid state": before, "no state": nil} {
+		if got := result(t, Deposit(testApp, raw(bob), raw(collateral), []byte{1}, st)).Error; got != ErrToken {
+			t.Errorf("Vela deposit with %s: %q", name, got)
+		}
 	}
-	if r := result(t, Deposit(testApp, raw(bob), raw(collateral), new(big.Int).SetUint64(engine.MaxAtoms-200_000_000).Bytes(), before)); r.Error != "" {
-		t.Fatalf("a deposit up to the lifetime cap must be accepted: %s", r.Error)
+	s := state(t, before)
+	h := &harness{t: t, st: before, block: 5000}
+	tick := func(deposits ...dep) Result {
+		h.sync(keeper)
+		h.block++
+		r := h.ok(result(t, TrustedRequest(testApp, tick3(h.s().TickSeq, h.block, h.s().Clock, nil, deposits), h.st)))
+		h.st = r.State
+		return r
 	}
-	for name, c := range map[string]struct {
-		sender, token, value []byte
-		want                 string
-	}{
-		"zero amount":        {raw(bob), raw(collateral), nil, ErrAmount},
-		"zero bytes":         {raw(bob), raw(collateral), make([]byte, 32), ErrAmount},
-		"above the atom cap": {raw(bob), raw(collateral), new(big.Int).SetUint64(engine.MaxAtoms + 1).Bytes(), ErrAmount},
-		"nine bytes":         {raw(bob), raw(collateral), append([]byte{1}, make([]byte, 8)...), ErrAmount},
-		"past the lifetime":  {raw(bob), raw(collateral), new(big.Int).SetUint64(engine.MaxAtoms).Bytes(), ErrDeposit},
-		"short token":        {raw(bob), raw(collateral)[:19], []byte{1}, ErrToken},
-		"no token":           {raw(bob), nil, []byte{1}, ErrToken},
-		"short sender":       {raw(bob)[:5], raw(collateral), []byte{1}, ErrSender},
-		"zero sender":        {make([]byte, 20), raw(collateral), []byte{1}, ErrSender},
-		"state of another":   {raw(bob), raw(collateral), []byte{1}, ErrApplication},
-		"no state":           {raw(bob), raw(collateral), []byte{1}, ErrState},
-		"truncated state":    {raw(bob), raw(collateral), []byte{1}, ErrState},
-		"state with a space": {raw(bob), raw(collateral), []byte{1}, ErrState},
+	credits := func(r Result) (out []uint64) {
+		for _, e := range r.AppEvents {
+			if e.EventSubType == CreditSubType {
+				out = append(out, new(big.Int).SetBytes(e.Data[:32]).Uint64(), new(big.Int).SetBytes(e.Data[96:128]).Uint64())
+			}
+		}
+		return out
+	}
+	// A gap waits, a repeat is skipped, the rest go in index order.
+	if r := tick(dep{4, bob, 1}); credits(r) != nil || h.s().DepositsSeen != 2 {
+		t.Fatalf("a gap was not waited at: %v", credits(r))
+	}
+	if r := tick(dep{2, bob, 1}, dep{3, bob, 7}, dep{3, bob, 7}, dep{4, carol, 9}, dep{6, bob, 1}); !slices.Equal(credits(r), []uint64{3, 1, 4, 1}) || h.s().DepositsSeen != 4 ||
+		account(h.s().Engine, bob).Cash != 7 || account(h.s().Engine, carol).Cash != 9 || h.s().Engine.Deposited != state(t, before).Engine.Deposited+16 {
+		t.Fatalf("credits %v: seen %d, bob %d, deposited %d", credits(r), h.s().DepositsSeen, account(h.s().Engine, bob).Cash, h.s().Engine.Deposited)
+	}
+	// What the engine cannot take is refunded: past the atom cap (but within
+	// the inbox's uint96), past the lifetime cap.
+	if r := tick(dep{5, bob, engine.MaxAtoms + 1}, dep{6, bob, engine.MaxAtoms - h.s().Engine.Deposited + 1}); !slices.Equal(credits(r), []uint64{5, 2, 6, 2}) || h.s().Payouts != s.Payouts+2 {
+		t.Fatalf("refunds %v", credits(r))
+	}
+	// A record the inbox could not have written stops processing there.
+	for name, edit := range map[string]func([]byte){
+		"an account with high bytes": func(p []byte) { p[len(p)-64] = 1 },
+		"a zero account":             func(p []byte) { copy(p[len(p)-64:len(p)-32], make([]byte, 32)) },
+		"a zero amount":              func(p []byte) { copy(p[len(p)-32:], make([]byte, 32)) },
+		"an amount past uint96":      func(p []byte) { p[len(p)-13] = 1 },
+		"an index past the cap":      func(p []byte) { p[len(p)-96+23] = 1 },
 	} {
-		app, st := testApp, before
-		switch name {
-		case "state of another":
-			app++
-		case "no state":
-			st = nil
-		case "truncated state":
-			st = before[:len(before)-1]
-		case "state with a space":
-			st = append(append([]byte{}, before...), ' ')
+		h.sync(keeper)
+		h.block++
+		p := tick3(h.s().TickSeq, h.block, h.s().Clock, nil, []dep{{7, bob, 1}})
+		edit(p)
+		r := h.ok(result(t, TrustedRequest(testApp, p, h.st)))
+		if h.st = r.State; credits(r) != nil || h.s().DepositsSeen != 6 {
+			t.Fatalf("%s: credited %v", name, credits(r))
 		}
-		if got := result(t, Deposit(app, c.sender, c.token, c.value, st)).Error; got != c.want {
-			t.Errorf("%s: error %q, want %q", name, got, c.want)
-		}
+	}
+	// No more than MaxDeposits records in one payload.
+	h.sync(keeper)
+	if got := result(t, TrustedRequest(testApp, tick3(h.s().TickSeq, h.block+1, h.s().Clock, nil, deps(7, 0x100, MaxDeposits+1, 1)), h.st)).Error; got != ErrTrusted {
+		t.Fatalf("nine deposit records: %q", got)
 	}
 }
 
 func TestTickRejected(t *testing.T) {
-	steps := run(t, script()[:25]) // clock at t0 / block0, ticks 2 to 10 requested
-	before := steps[24].after
+	before := find(t, run(t, script()), "sync asks for tick 10").after // clock at t0 / block0, ticks 2 to 10 requested
 	if s := state(t, before); s.Clock != t0 || s.TickSeq != 10 || s.LastTick != 1 {
 		t.Fatalf("unexpected starting point: %+v", s)
 	}
 	dirty := func(i int) []byte { p := tickPayload(2, block1, t1); p[i] = 1; return p }
+	_ = binary.BigEndian
 	word := func(i int, v uint64) []byte {
 		p := tickPayload(2, block1, t1)
 		binary.BigEndian.PutUint64(p[32*i+24:], v)
@@ -626,6 +691,9 @@ func TestTickRejected(t *testing.T) {
 	}
 	if r := result(t, TrustedRequest(testApp, tickPayload(2, block0, t0), before)); r.Error != "" || r.Events != nil || r.Withdrawals != nil {
 		t.Fatalf("a tick in the same block and second must be accepted: %+v", r)
+	}
+	if r := result(t, TrustedRequest(testApp, tickPayload(2, block0, t0-1), before)); r.Error != "" || state(t, r.State).Clock != t0 {
+		t.Fatalf("a tick behind the clock must apply at the clock: %+v", r.Error)
 	}
 	// The block number is not an ordering rule, and the timestamp cap itself is a time.
 	if r := result(t, TrustedRequest(testApp, tickPayload(2, block0-1, MaxClock), before)); r.Error != "" || state(t, r.State).Block != block0-1 || state(t, r.State).Clock != MaxClock {
@@ -636,9 +704,15 @@ func TestTickRejected(t *testing.T) {
 		want    string
 	}{
 		"empty":                  {nil, ErrTrusted},
-		"one byte short":         {tickPayload(2, block1, t1)[:191], ErrTrusted},
+		"one byte short":         {tickPayload(2, block1, t1)[:255], ErrTrusted},
 		"one byte long":          {append(tickPayload(2, block1, t1), 0), ErrTrusted},
+		"one word long":          {append(tickPayload(2, block1, t1), make([]byte, 32)...), ErrTrusted},
+		"version 1":              {tickPayload(2, block1, t1)[:192], ErrTrusted},
 		"version 2":              {word(0, 2), ErrTrusted},
+		"version 4":              {word(0, 4), ErrTrusted},
+		"a record not sent":      {word(6, 1), ErrTrusted},
+		"a deposit not sent":     {word(7, 1), ErrTrusted},
+		"17 records":             {word(6, MaxRecords+1), ErrTrusted},
 		"other chain":            {word(1, 1), ErrTrusted},
 		"other endpoint":         {dirty(95), ErrTrusted},
 		"dirty address padding":  {dirty(64), ErrTrusted},
@@ -648,7 +722,6 @@ func TestTickRejected(t *testing.T) {
 		"tick already applied":   {word(5, 1), ErrTick},
 		"tick not requested":     {word(5, 11), ErrTick},
 		"timestamp 0":            {word(4, 0), ErrTrusted},
-		"timestamp behind":       {word(4, t0-1), ErrTime},
 		"timestamp past the cap": {word(4, MaxClock+1), ErrTrusted},
 		"timestamp of 10^15":     {word(4, engine.MaxAtoms), ErrTrusted},
 		"block past the cap":     {word(3, engine.MaxAtoms+1), ErrTrusted},
@@ -722,6 +795,34 @@ func TestDeployRejected(t *testing.T) {
 		"house is the trigger":   {edit(func(p *DeployParams) { p.StakeLimits.House = trigger }), ErrConfig}, // the authority can never trade
 		"house is the endpoint":  {edit(func(p *DeployParams) { p.StakeLimits.House = endpoint }), ErrConfig},
 		"house is the token":     {edit(func(p *DeployParams) { p.StakeLimits.House = collateral }), ErrConfig},
+		"no Chainlink config":    {edit(func(p *DeployParams) { p.Chainlink.Configs = nil }), ErrConfig},
+		"another feed":           {edit(func(p *DeployParams) { p.Chainlink.FeedID = engine.ETHStreamsFeed }), ErrConfig},
+		"five digests": {edit(func(p *DeployParams) {
+			for i := 0; i < MaxDigests; i++ {
+				d := p.Chainlink.Configs[0]
+				d.Digest = fmt.Sprintf("0x%064x", i+1)
+				p.Chainlink.Configs = append(p.Chainlink.Configs, d)
+			}
+		}), ErrConfig},
+		"a digest twice":   {edit(func(p *DeployParams) { p.Chainlink.Configs = append(p.Chainlink.Configs, p.Chainlink.Configs[0]) }), ErrConfig},
+		"a zero digest":    {edit(func(p *DeployParams) { p.Chainlink.Configs[0].Digest = "0x" + strings.Repeat("0", 64) }), ErrConfig},
+		"uppercase digest": {edit(func(p *DeployParams) { p.Chainlink.Configs[0].Digest = strings.ToUpper(p.Chainlink.Configs[0].Digest) }), ErrConfig},
+		"f of 0":           {edit(func(p *DeployParams) { p.Chainlink.Configs[0].F = 0 }), ErrConfig},
+		"fewer than 3f+1":  {edit(func(p *DeployParams) { p.Chainlink.Configs[0].Signers = p.Chainlink.Configs[0].Signers[:15] }), ErrConfig},
+		"a signer twice":   {edit(func(p *DeployParams) { p.Chainlink.Configs[0].Signers[1] = p.Chainlink.Configs[0].Signers[0] }), ErrConfig},
+		"a zero signer":    {edit(func(p *DeployParams) { p.Chainlink.Configs[0].Signers[1] = "0x" + strings.Repeat("0", 40) }), ErrConfig},
+		"an uppercase signer": {edit(func(p *DeployParams) {
+			p.Chainlink.Configs[0].Signers[1] = strings.ToUpper(p.Chainlink.Configs[0].Signers[1])
+		}), ErrConfig},
+		"custody on another chain": {edit(func(p *DeployParams) { p.Custody.ChainID = 84532 }), ErrConfig},
+		"no vault":                 {edit(func(p *DeployParams) { p.Custody.Vault = "" }), ErrConfig},
+		"vault is the inbox":       {edit(func(p *DeployParams) { p.Custody.Vault = p.Custody.Inbox }), ErrConfig},
+		"vault is the endpoint":    {edit(func(p *DeployParams) { p.Custody.Vault = endpoint }), ErrConfig},
+		"inbox is the trigger":     {edit(func(p *DeployParams) { p.Custody.Inbox = trigger }), ErrConfig},
+		"custody missing":          {[]byte(strings.Replace(string(good), `,"custody":`+string(marshal(testCustody)), "", 1)), ErrParams},
+		// A report request this deployment could not be sent: its origin is
+		// so long that a report with f+1 = 6 signatures no longer fits.
+		"reports that cannot fit": {edit(func(p *DeployParams) { p.Origin = "https://" + strings.Repeat("a", 200) }), ErrConfig},
 	} {
 		if got := result(t, Deploy(testApp, c.params, testSalt)).Error; got != c.want {
 			t.Errorf("%s: error %q, want %q", name, got, c.want)
@@ -731,8 +832,7 @@ func TestDeployRejected(t *testing.T) {
 
 // A stored state is accepted only in its one canonical, self-consistent form.
 func TestStateRejected(t *testing.T) {
-	steps := run(t, script()[:12])
-	good := steps[11].after // after alice's withdrawal
+	good := find(t, run(t, script()), "exact retry of the withdrawal has no effect").after // after alice's withdrawal
 	edit := func(f func(*State)) []byte {
 		s := state(t, good)
 		f(s)
@@ -773,9 +873,28 @@ func TestStateRejected(t *testing.T) {
 		"outcome of another":       edit(func(s *State) { s.Outcomes = []Outcome{{alice, bob + ":3", 1, "applied", ""}} }),
 		"applied with a reason":    edit(func(s *State) { s.Outcomes = []Outcome{{alice, alice + ":3", 1, "applied", "x"}} }),
 		"rejected without reason":  edit(func(s *State) { s.Outcomes = []Outcome{{alice, alice + ":3", 1, "rejected", ""}} }),
-		"notices null":             edit(func(s *State) { s.Notices = nil }),
-		"notices unsorted":         edit(func(s *State) { s.Notices = []Notice{{alice, 1}, {bob, 1}} }),
-		"notice count 0":           edit(func(s *State) { s.Notices[0].Count = 0 }),
+		"deposit seen twice":       edit(func(s *State) { s.DepositsSeen-- }),
+		"payout from nowhere":      edit(func(s *State) { s.Payouts++ }),
+		"refund without a deposit": edit(func(s *State) { s.DepositsSeen++ }),
+		"unconfirmed null":         edit(func(s *State) { s.Unconfirmed = nil }),
+		"unconfirmed twice": edit(func(s *State) {
+			u := Unconfirmed{"0x" + strings.Repeat("ab", 32), "0x" + strings.Repeat("cd", 32), "", 0}
+			s.Unconfirmed = []Unconfirmed{u, u}
+		}),
+		"unconfirmed outcome without closing": edit(func(s *State) {
+			s.Unconfirmed = []Unconfirmed{{"0x" + strings.Repeat("ab", 32), "0x" + strings.Repeat("cd", 32), "", 1}}
+		}),
+		"unconfirmed void": edit(func(s *State) {
+			s.Unconfirmed = []Unconfirmed{{"0x" + strings.Repeat("ab", 32), "0x" + strings.Repeat("cd", 32), "0x" + strings.Repeat("ef", 32), 3}}
+		}),
+		"nine unconfirmed": edit(func(s *State) {
+			for i := 0; i <= MaxUnconfirmed; i++ {
+				s.Unconfirmed = append(s.Unconfirmed, Unconfirmed{fmt.Sprintf("0x%064x", i+1), "0x" + strings.Repeat("cd", 32), "", 0})
+			}
+		}),
+		"no Chainlink config":      edit(func(s *State) { s.Chainlink = Chainlink{} }),
+		"no custody":               edit(func(s *State) { s.Custody = Custody{} }),
+		"version 3":                edit(func(s *State) { s.Version = 3 }), // the build that held custody in the endpoint
 		"no engine":                edit(func(s *State) { s.Engine = nil }),
 		"clock without a tick":     edit(func(s *State) { s.LastTick = 0 }),
 		"tick never requested":     edit(func(s *State) { s.LastTick = s.TickSeq + 1 }),

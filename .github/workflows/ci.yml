@@ -26,8 +26,12 @@ jobs:
       - run: npm ci
       - run: npm run check
       - run: npm run test:keeper
+      - run: node --test services/market-maker/*.test.mjs
+      - run: node --test services/payout-signer/*.test.mjs
       - run: node --test contracts/scripts/*.test.mjs
-      - run: npm audit --audit-level=low
+      # The Vela SDK in the private-trading chunk retains elliptic/GHSA-848j-6mx2-7j84 (low, no fix exists),
+      # as in the sdk-crypto-evaluation job. See security/README.md. A passing job is not a clean audit claim.
+      - run: npm audit --audit-level=moderate
 
   engine:
     runs-on: ubuntu-latest
@@ -94,7 +98,7 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npm run check && npm test
       # The upstream SDK retains elliptic/GHSA-848j-6mx2-7j84 (low).
-      # Isolated evaluation dependency; not bundled into the frontend.
+      # The frontend also bundles the SDK, in the lazily loaded private-trading chunk (same advisory, same threshold).
       # See security/README.md. A passing job is not a clean audit claim.
       - run: npm audit --audit-level=moderate
 

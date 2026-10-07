@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -162,18 +163,27 @@ func TestGuestSoak(t *testing.T) {
 		return commandPayload(alice, 3, engine.Command{Op: engine.RequestWithdrawal, Amount: amount, Destination: outside})
 	}
 	steps := run(t, script())
-	end := find(t, steps, "tick with an earlier block number is accepted").after // 32 accounts, 31 of them funded
+	end := find(t, steps, "tick 15 credits accounts 27 to 32 and refunds the deposit past the account limit").after // 32 accounts, 31 of them funded
+	trusted := func(name string, payload, st []byte) {
+		calls = append(calls, soakCall{name, "trusted", nil, nil, nil, payload, st, TrustedRequest(testApp, payload, st)})
+	}
+	// A tick that credits a Base deposit of five atoms to who on st, after a
+	// keeper's sync asked for it; and alice's report for b1.
+	credit := func(name, who string, st []byte) {
+		asked := result(t, ProcessRequest(testApp, raw(keeper), requestTypeProcess, syncPayload(keeper), st)).State
+		s := state(t, asked)
+		trusted(name, tick3(s.TickSeq, block1+2, s.Clock, nil, []dep{{s.DepositsSeen + 1, who, 5}}), asked)
+	}
+	report := reportPayload(alice, chainlinkReport(engine.BTCStreamsFeed, uint32(b1), 0).Report, uint32(b1))
 
 	// A state as large as the guest takes, less the most one request adds.
 	full := inflate(t, end, MaxStateBytes-2048)
 	process("withdrawal at the size bound", alice, withdrawal(1), full)
 	process("refusal at the size bound", alice, withdrawal(1<<40), full)
 	process("sync at the size bound", bob, syncPayload(bob), full)
-	five := []byte{5}
-	calls = append(calls, soakCall{"deposit at the size bound", "deposit", raw(bob), raw(collateral), five, nil, full, Deposit(testApp, raw(bob), raw(collateral), five, full)})
-	asked := result(t, ProcessRequest(testApp, raw(bob), requestTypeProcess, syncPayload(bob), full)).State
-	tick := tickPayload(state(t, asked).TickSeq, block1+2, t1+2)
-	calls = append(calls, soakCall{"tick at the size bound", "trusted", nil, nil, nil, tick, asked, TrustedRequest(testApp, tick, asked)})
+	process("report at the size bound", alice, report, full)
+	calls = append(calls, soakCall{"Vela deposit at the size bound", "deposit", raw(bob), raw(collateral), []byte{5}, nil, full, Deposit(testApp, raw(bob), raw(collateral), []byte{5}, full)})
+	credit("Base deposit at the size bound", bob, full)
 	// The largest buffer the guest hands out, filled with something it refuses.
 	process("largest payload", alice, bytes.Repeat([]byte{'['}, MaxStateBytes), full)
 
@@ -183,33 +193,34 @@ func TestGuestSoak(t *testing.T) {
 	closing := marshal(s)
 	process("partial withdrawal into the exit reserve", alice, withdrawal(1), closing)
 	process("full withdrawal from the exit reserve", alice, withdrawal(150_000_000), closing)
+	credit("Base deposit refunded by the exit reserve", alice, closing)
+
+	// A report that resolves a round, pays both holders and opens the next.
+	process("report that settles a round", alice, report, find(t, steps, "reports: tick 5 fills bob against the house").after)
 
 	// The state with every cap reached.
 	placing, cancelling, idle, at := capped(t)
 	nonce := account(state(t, idle).Engine, alice).Nonce + 1
-	trusted := func(name string, st []byte) {
-		calls = append(calls, soakCall{name, "trusted", nil, nil, nil, at, st, TrustedRequest(testApp, at, st)})
-	}
-	deposit := func(name string, st []byte) {
-		calls = append(calls, soakCall{name, "deposit", raw(alice), raw(collateral), five, nil, st, Deposit(testApp, raw(alice), raw(collateral), five, st)})
-	}
 	process("sync at every cap", bob, syncPayload(bob), placing)
 	process("refusal at every cap", alice, commandPayload(alice, nonce, engine.Command{Op: engine.RequestWithdrawal, Amount: 1, Destination: outside}), placing)
-	deposit("deposit refused at every cap", placing)
-	trusted("16 activations refused at every cap", placing)
-	trusted("16 cancel_all activations at every cap", cancelling)
+	process("report at every cap", alice, report, placing)
+	trusted("16 activations refused at every cap", at, placing)
+	trusted("16 cancel_all activations at every cap", at, cancelling)
 	process("withdrawal at every cap", alice, commandPayload(alice, nonce, engine.Command{Op: engine.RequestWithdrawal, Amount: 1, Destination: outside}), idle)
-	deposit("deposit at every cap", idle)
-	trusted("16 sweeps at every cap", idle)
+	credit("Base deposit at every cap", alice, idle)
+	trusted("16 sweeps at every cap", at, idle)
 	heavy, heavyTick := heaviest(t)
-	calls = append(calls, soakCall{"7 resolutions, 16 cancel_all and 16 sweeps at the caps", "trusted", nil, nil, nil, heavyTick, heavy, TrustedRequest(testApp, heavyTick, heavy)})
+	trusted("7 resolutions, 16 cancel_all and 16 sweeps at the caps", heavyTick, heavy)
+	reportState, reportPayload := cappedReport(t)
+	process("a report that pays 32 holders at every cap", alice, reportPayload, reportState)
 
 	for _, c := range calls {
 		r := result(t, c.Expect)
-		paid := len(r.Withdrawals) == 1
-		failed := c.Name == "largest payload" || c.Name == "deposit refused at every cap"
-		if (r.Error != "") != failed || paid != (c.Name == "withdrawal at the size bound" || c.Name == "full withdrawal from the exit reserve" || c.Name == "withdrawal at every cap") || len(r.State) > MaxStateBytes {
-			t.Fatalf("%s: error %q, %d withdrawals, %d-byte state", c.Name, r.Error, len(r.Withdrawals), len(r.State))
+		paid := slices.ContainsFunc(r.AppEvents, func(e AppEvent) bool { return e.EventSubType == PayoutSubType })
+		failed := c.Name == "largest payload" || c.Name == "Vela deposit at the size bound"
+		payout := c.Name == "withdrawal at the size bound" || c.Name == "full withdrawal from the exit reserve" || c.Name == "withdrawal at every cap" || c.Name == "Base deposit refunded by the exit reserve"
+		if (r.Error != "") != failed || paid != payout || len(r.State) > MaxStateBytes {
+			t.Fatalf("%s: error %q, payout %v, %d-byte state", c.Name, r.Error, paid, len(r.State))
 		}
 	}
 	fixture, _ := filepath.Abs("build/soak.json")
@@ -235,7 +246,10 @@ func TestGuestSoak(t *testing.T) {
 func busiest(t testing.TB) []step {
 	_, cancelling, idle, tick := capped(t)
 	heavy, heavyTick := heaviest(t)
+	reportState, report := cappedReport(t)
 	return []step{
+		{Name: "load the state at every cap with a test DON pinned", Call: "load", Payload: reportState},
+		{Name: "a report that pays 32 holders at every cap", Call: "process", Sender: alice, Payload: report},
 		{Name: "load the full book before seven rounds resolve, every account cancelling all", Call: "load", Payload: heavy},
 		{Name: "7 resolutions, 16 cancel_all activations and 16 sweeps at the caps", Call: "trusted", Payload: heavyTick},
 		{Name: "load the state at every cap, every account cancelling all", Call: "load", Payload: cancelling},

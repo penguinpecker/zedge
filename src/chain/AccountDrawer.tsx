@@ -1,21 +1,36 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
-import { ArrowSquareOut, Check, LockKey, Wallet, X } from "@phosphor-icons/react";
-import { formatEther, isHash } from "viem";
+import { ArrowSquareOut, Check, Copy, LockKey, Wallet, X } from "@phosphor-icons/react";
+import { isHash } from "viem";
 import { NETWORKS, parseAtomicAmount, transactionExplorerUrl, type NetworkId } from "./networks.ts";
 import { readTransaction, type TransactionRead } from "./gateway.ts";
-import type { WalletState } from "./wallet.ts";
+import { SIGN_IN_NOT_SET_UP, type ChainWallet } from "./privy.tsx";
+import type { VerifiedOrderbook } from "./orderbook-manifest.ts";
+import type { PrivateState } from "./private/use-private.ts";
+import { ActionLine, usdc } from "./PrivatePanels.tsx";
 
-export type DrawerView = "account" | "funds" | "order" | "security";
+export type DrawerView = "account" | "funds" | "security";
 type Props = {
   view: DrawerView;
   onView: (view: DrawerView) => void;
   onClose: () => void;
   network: NetworkId;
-  wallet: WalletState;
-  gas: bigint | null;
-  market: string;
-  outcome: "Up" | "Down";
+  wallet: ChainWallet;
+  orderbook: VerifiedOrderbook | null;
+  /** Why private features are locked, when a check failed (not when they are simply not open yet). */
+  orderbookReason: string;
+  priv: PrivateState;
 };
+
+/** The user's Base deposit address as a QR code (drawn in this tab; the address never leaves it). */
+function AddressQr({ address }: { address: string }) {
+  const [src, setSrc] = useState("");
+  useEffect(() => {
+    let live = true;
+    void import("qrcode").then((q) => q.toDataURL(address, { margin: 1, width: 168, color: { dark: "#111410", light: "#ffffff" } })).then((url) => { if (live) setSrc(url); }, () => undefined);
+    return () => { live = false; };
+  }, [address]);
+  return src ? <img className="chain-qr" src={src} width={168} height={168} alt="QR code of your deposit address" /> : null;
+}
 
 function TransactionLookup({ network }: { network: NetworkId }) {
   const [hash, setHash] = useState("");
@@ -71,16 +86,30 @@ function TransactionLookup({ network }: { network: NetworkId }) {
   );
 }
 
-export default function AccountDrawer({ view, onView, onClose, network, wallet, gas, market, outcome }: Props) {
+export default function AccountDrawer({ view, onView, onClose, network, wallet, orderbook, orderbookReason, priv }: Props) {
   const dialog = useRef<HTMLDialogElement>(null);
   const titleId = useId();
-  const [fundingTab, setFundingTab] = useState<"deposit" | "withdraw">("deposit");
-  const [amount, setAmount] = useState("");
-  const sameNetwork = wallet.session?.chainId === network;
-  let amountError = "";
-  if (amount) {
-    try { parseAtomicAmount(amount, 6); } catch { amountError = "Use a positive decimal amount without separators."; }
+  const [funds, setFunds] = useState("");
+  const [copied, setCopied] = useState(false);
+  const snap = priv.snapshot, unlocked = Boolean(snap?.unlocked), cash = snap?.view?.cash ?? 0, live = Boolean(orderbook);
+  const book = orderbook?.manifest, limits = book?.custody.vault.limits;
+  const address = wallet.session?.address;
+  // One click: the default deposit is all of the wallet's USDC up to the largest deposit; a typed amount replaces it.
+  const fallback = limits && snap?.wallet ? (snap.wallet < BigInt(limits.maxDeposit) ? snap.wallet : BigInt(limits.maxDeposit)) : 0n;
+  let depositAtoms = fallback, fundsError = "";
+  if (funds) {
+    try { depositAtoms = parseAtomicAmount(funds, 6); } catch { depositAtoms = 0n; fundsError = "Use a positive decimal amount without separators."; }
   }
+  const outOfRange = limits && depositAtoms > 0n && (depositAtoms < BigInt(limits.minDeposit) || depositAtoms > BigInt(limits.maxDeposit) || (snap?.wallet !== null && snap?.wallet !== undefined && depositAtoms > snap.wallet));
+  const withdrawAtoms = limits ? Math.min(cash, Number(limits.maxPayout)) : 0;
+  const { refreshFunds } = priv;
+  // The wallet balance changes when the user sends USDC from elsewhere: re-read it while Funds is open.
+  useEffect(() => {
+    if (view !== "funds" || !live) return;
+    refreshFunds();
+    const timer = setInterval(refreshFunds, 10_000);
+    return () => clearInterval(timer);
+  }, [view, live, refreshFunds]);
   useLayoutEffect(() => {
     const element = dialog.current;
     const opener = document.activeElement as HTMLElement | null;
@@ -95,59 +124,74 @@ export default function AccountDrawer({ view, onView, onClose, network, wallet, 
       });
     };
   }, []);
-  const title = view === "account" ? "Your account" : view === "funds" ? "Manage funds" : view === "order" ? "Review your prediction" : "Security & recovery";
+  const title = view === "account" ? "Your account" : view === "funds" ? "Deposit & withdraw" : "Security & recovery";
+  const copy = () => { if (address) void navigator.clipboard?.writeText(address).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }, () => undefined); };
   return (
     <dialog ref={dialog} className="chain-drawer" aria-labelledby={titleId} onCancel={(event) => { event.preventDefault(); onClose(); }}>
       <div className="chain-drawer-heading">
-        <div><span className="eyebrow">ZEDGE · {network === 2651420 ? "TESTNET" : "MAINNET READ-ONLY"}</span><h2 id={titleId}>{title}</h2></div>
+        <div><span className="eyebrow">ZEDGE · {network === 2651420 ? "TESTNET" : live ? "MAINNET" : "MAINNET READ-ONLY"}</span><h2 id={titleId}>{title}</h2></div>
         <button className="icon-button" onClick={onClose} aria-label="Close account drawer"><X size={22} /></button>
       </div>
       <nav className="chain-drawer-nav" aria-label="Account sections">
-        {(["account", "funds", "security"] as const).map((item) => <button key={item} aria-current={view === item ? "page" : undefined} onClick={() => onView(item)}>{item === "account" ? "Setup" : item === "funds" ? "Funds" : "Security"}</button>)}
+        {(["account", "funds", "security"] as const).map((item) => <button key={item} aria-current={view === item ? "page" : undefined} onClick={() => onView(item)}>{item === "account" ? "Account" : item === "funds" ? "Funds" : "Security"}</button>)}
       </nav>
       <div className="chain-drawer-content">
-        {view === "account" && <>
-          <p className="chain-copy">Connect your wallet to get started.</p>
-          <ol className="chain-steps">
-            <li><span className="chain-step-number">{wallet.session ? <Check /> : "1"}</span><div><h3>Connect your wallet</h3>
-              {wallet.session ? <><code>{wallet.session.address}</code><button className="chain-text-button" onClick={wallet.disconnect}>Disconnect from app</button></> : <><p>Choose an account in your wallet.</p><button className="button primary" disabled={!wallet.provider || wallet.pending} onClick={() => void wallet.connect()}><Wallet />{wallet.pending ? "Open your wallet…" : "Connect wallet"}</button>{!wallet.provider && <p>No wallet found. Open ZEDGE in a browser with a wallet.</p>}</>}
-            </div></li>
-            <li><span className="chain-step-number">{sameNetwork ? <Check /> : "2"}</span><div><h3>Select {NETWORKS[network].name}</h3>
-              <p>{sameNetwork ? "You’re on the right network." : "Switch your wallet to this network."}</p>
-              {wallet.session && !sameNetwork && <button className="button" disabled={wallet.pending} onClick={() => void wallet.switchNetwork(network)}>Switch network in wallet</button>}
-              {wallet.session && <details className="chain-details"><summary>Add network to wallet</summary><p>Review these settings in your wallet.</p><button className="button" disabled={wallet.pending} onClick={() => void wallet.switchNetwork(network, true)}>Review network settings</button></details>}
-              {sameNetwork && <p className="mono">Gas balance: {gas === null ? "Unavailable" : `${formatEther(gas)} ETH`}{network === 2651420 ? " · test funds" : ""}</p>}
-            </div></li>
-            <li><span className="chain-step-number">3</span><div><h3>Private account</h3><p>Private accounts are not available yet.</p><button className="button" disabled><LockKey />Unavailable</button></div></li>
-          </ol>
-        </>}
+        {view === "account" && <ol className="chain-steps">
+          <li><span className="chain-step-number">{wallet.session ? <Check /> : "1"}</span><div><h3>Sign in</h3>
+            {wallet.session ? <><code>{wallet.session.address}</code><button className="chain-text-button" onClick={wallet.disconnect}>Sign out</button></>
+              : <><p>Email, Google, X or Apple. A wallet is created for you: nothing to install, no network to pick, no gas to pay.</p><button className="button primary" disabled={!wallet.configured || wallet.pending} onClick={() => wallet.connect()}><Wallet />{wallet.pending ? "Loading…" : "Sign in"}</button>{!wallet.configured && <p>{SIGN_IN_NOT_SET_UP}</p>}</>}
+          </div></li>
+          <li><span className="chain-step-number">{unlocked ? <Check /> : "2"}</span><div><h3>Private account</h3>
+            {!live ? <p>{orderbookReason || "Private accounts are not available yet."}</p>
+              : unlocked ? <p>Unlocked in this tab. Key fingerprint <code>{snap?.fingerprint}</code></p>
+              : <><p>Your private key is made in this browser when you sign in, and registered once.</p><button className="button" disabled={!wallet.session || !snap || priv.busy} onClick={() => void priv.run((a) => a.unlock())}><LockKey />{priv.busy ? "Unlocking…" : priv.hasKeyHint ? "Unlock" : "Set up private account"}</button></>}
+            <ActionLine snapshot={snap} names={["Unlock", "Register key"]} />
+            {live && !unlocked && priv.error && !snap?.actions.some((a) => a.text === priv.error) && <p className="chain-error" role="alert">{priv.error}</p>}
+          </div></li>
+          <li><span className="chain-step-number">{cash > 0 ? <Check /> : "3"}</span><div><h3>Add funds</h3><p>Deposit USDC on Base once; trade from your private balance; withdraw once.</p><button className="button" onClick={() => onView("funds")}>Deposit</button></div></li>
+        </ol>}
         {view === "funds" && <>
-          <div className="chain-segment" aria-label="Funding action">{(["deposit", "withdraw"] as const).map((item) => <button key={item} aria-pressed={fundingTab === item} onClick={() => setFundingTab(item)}>{item === "deposit" ? "Deposit" : "Withdraw"}</button>)}</div>
-          <div className="chain-callout"><LockKey size={22} /><div><strong>Funding unavailable</strong><p>Deposits and withdrawals are closed.</p></div></div>
-          <dl className="chain-account-values"><div><dt>Private balance</dt><dd>Locked</dd></div><div><dt>Available to {fundingTab}</dt><dd>Unavailable</dd></div><div><dt>Network</dt><dd>{NETWORKS[network].name}</dd></div></dl>
-
-          <button className="button primary chain-full" disabled>{fundingTab === "deposit" ? "Deposits unavailable" : "Withdrawals unavailable"}</button>
+          {live ? <div className="chain-callout"><LockKey size={22} /><div><strong>Network fees are paid by ZEDGE.</strong><p>Deposits and withdrawals, with their amounts and your address, are public on Base. Trades are not.</p></div></div>
+            : <div className="chain-callout"><LockKey size={22} /><div><strong>Funding unavailable</strong><p>Deposits and withdrawals are closed.</p></div></div>}
+          {address && live && <div className="chain-deposit-address"><div><h3>Your deposit address · Base</h3><code>{address}</code>
+            <button className="chain-text-button" onClick={copy}><Copy size={13} /> {copied ? "Copied" : "Copy address"}</button>
+            <p className="chain-copy">Send only USDC on Base to this address. Then deposit it below in one click.</p></div><AddressQr address={address} /></div>}
+          <dl className="chain-account-values"><div><dt>In your wallet on Base</dt><dd>{!live || !snap || snap.wallet === null ? "Unavailable" : usdc(snap.wallet)}</dd></div><div><dt>Trading balance</dt><dd>{unlocked ? usdc(cash) : "Locked"}</dd></div></dl>
+          {live && limits && <>
+            <label htmlFor="chain-funds-amount">Deposit amount · USDC</label>
+            <input id="chain-funds-amount" inputMode="decimal" value={funds} onChange={(event) => setFunds(event.target.value)} aria-invalid={Boolean(fundsError || outOfRange)} placeholder={fallback ? usdc(fallback).replace(" USDC", "") : "Enter amount"} autoComplete="off" />
+            {fundsError && <p className="chain-error">{fundsError}</p>}
+            <button className="button primary chain-full" disabled={!unlocked || priv.busy || depositAtoms === 0n || Boolean(outOfRange)}
+              onClick={() => void priv.run((a) => a.depositFromBase(depositAtoms)).then((ok) => ok && setFunds(""))}>Deposit {depositAtoms ? usdc(depositAtoms) : ""}</button>
+            <p className="chain-copy">From {usdc(BigInt(limits.minDeposit))} to {usdc(BigInt(limits.maxDeposit))} per deposit. Credited in about a minute.</p>
+            <button className="button chain-full" disabled={!unlocked || priv.busy || withdrawAtoms <= 0} onClick={() => void priv.run((a) => a.withdraw())}>Withdraw {withdrawAtoms > 0 ? usdc(withdrawAtoms) : ""} to your wallet on Base</button>
+            {cash > withdrawAtoms && <p className="chain-copy">At most {usdc(withdrawAtoms)} per withdrawal; withdraw again for the rest.</p>}
+          </>}
+          {!live && <button className="button primary chain-full" disabled>Deposits unavailable</button>}
+          <ActionLine snapshot={snap} names={["Deposit", "Withdraw", "Payout"]} />
+          {priv.error && <p className="chain-error" role="alert">{priv.error}</p>}
           <TransactionLookup key={network} network={network} />
         </>}
-        {view === "order" && <>
-          <div className="chain-order-review"><span>{market}</span><strong>Buy {outcome}</strong><p>Payout per share: 1 collateral unit if correct, 0 if incorrect, ½ if voided.</p></div>
-          <label htmlFor="chain-order-amount">Amount · collateral</label>
-          <input id="chain-order-amount" inputMode="decimal" value={amount} onChange={(event) => setAmount(event.target.value)} aria-invalid={Boolean(amountError)} aria-describedby={amountError ? "chain-amount-help" : undefined} placeholder="Enter amount" autoComplete="off" />
-          {amountError && <p id="chain-amount-help" className="chain-error">{amountError}</p>}
-          <dl className="chain-account-values"><div><dt>Execution price</dt><dd>Unavailable</dd></div><div><dt>Shares / possible payout</dt><dd>Unavailable</dd></div><div><dt>Trading fees</dt><dd>Unavailable</dd></div><div><dt>Private balance</dt><dd>Locked</dd></div></dl>
-
-          <button className="button primary chain-full" disabled>Trading unavailable</button>
-          <button className="chain-text-button" onClick={() => onView("account")}>View account</button>
-        </>}
         {view === "security" && <>
-          <div className="chain-callout"><LockKey size={23} /><div><strong>Private account unavailable</strong></div></div>
-          <h3>What stays public</h3><p className="chain-copy">On-chain transactions, including deposits and withdrawals, are public.</p>
-          <h3>Keys and account access</h3><p className="chain-copy">Key setup and recovery are not available yet.</p>
-          <button className="button" disabled>Key rotation unavailable</button>
-          <h3>Recovery and withdrawals</h3><p className="chain-copy">No custody contract or claim facility is connected. The public market contracts cannot hold or release your trading funds.</p>
+          <div className="chain-callout"><LockKey size={23} /><div><strong>{unlocked ? "Private account unlocked" : live ? "Private account locked" : "Private account unavailable"}</strong></div></div>
+          {book ? <>
+            <h3>What is private</h3><p className="chain-copy">Your orders, balance, positions and fills are encrypted on chain and hidden from the public.</p>
+            <h3>What stays public</h3><p className="chain-copy">Deposits and withdrawals on Base, with their amounts and your address, and the time of each request. Others can tell when you place or cancel an order, but not what it is. ZEDGE’s relayer (<code>{book.relayer.facilitator}</code>) appears on chain as the sender of your requests and deposits and pays their network fees.</p>
+            <h3>What ZEDGE sees</h3><p className="chain-copy">ZEDGE runs the exchange’s operator (<code>{book.endpoint.operator}</code>), which processes requests in clear: ZEDGE can see everything, including your orders and balances. There is no hardware attestation. ZEDGE also quotes prices as the house.</p>
+            <h3>Where your USDC is</h3><p className="chain-copy">Deposits are held by ZEDGE’s vault on Base (<code>{book.custody.vault.address}</code>). Its owner can replace its code, and withdrawals are paid when ZEDGE’s payout key (<code>{book.custody.vault.signer}</code>) approves them, so you rely on ZEDGE to pay out.</p>
+            <h3>Keys and account access</h3><p className="chain-copy">Your private-data key is derived from a signature by your wallet each time you unlock. It stays in this tab’s memory and is never sent to ZEDGE. Privy’s servers can compute that signature and your other signatures, so Privy could re-create your private-data key and read your private records. Privy also knows which sign-in account owns your wallet and when you sign.</p>
+            {unlocked && <><p className="chain-copy">Key fingerprint <code>{snap?.fingerprint}</code></p><button className="button" onClick={priv.lock}>Lock</button></>}
+            <button className="button" disabled>Key rotation unavailable</button>
+            <h3>Recovery and withdrawals</h3><p className="chain-copy">If ZEDGE’s operator or payout service stops, private balances cannot be withdrawn until it runs again.</p>
+          </> : <>
+            <h3>What stays public</h3><p className="chain-copy">On-chain transactions, including deposits and withdrawals, are public.</p>
+            <h3>Keys and account access</h3><p className="chain-copy">Key setup and recovery are not available yet.</p>
+            <button className="button" disabled>Key rotation unavailable</button>
+            <h3>Recovery and withdrawals</h3><p className="chain-copy">No custody contract is connected. The public market contracts cannot hold or release your trading funds.</p>
+          </>}
           <button className="button" disabled>Recovery unavailable</button>
-          <h3>Your session</h3><p className="chain-copy">Disconnect from ZEDGE here. Manage saved permissions in your wallet.</p>
-          {wallet.session && <button className="button" onClick={wallet.disconnect}>Disconnect from app</button>}
+          <h3>Your session</h3><p className="chain-copy">Sign out of ZEDGE here.</p>
+          {wallet.session && <button className="button" onClick={wallet.disconnect}>Sign out</button>}
           <a className="chain-source-link" href="https://github.com/penguinpecker/zedge/tree/main/research" target="_blank" rel="noreferrer">Privacy details <ArrowSquareOut /></a>
         </>}
         {wallet.error && <p className="chain-error" role="alert">{wallet.error}</p>}

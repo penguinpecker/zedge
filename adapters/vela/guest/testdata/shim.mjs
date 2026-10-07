@@ -49,7 +49,7 @@ assert.equal(result(guest.deploy(7n, held, 8)).error, bad); // freed
 
 // Empty input is how the host passes nothing: an ordinary refusal.
 assert.equal(result(guest.deploy(7n, 0, 0)).error, 'zedge: malformed parameters');
-assert.equal(result(guest.deposit(7n, 0, 0, 0, 0, 0, 0, 0, 0)).error, 'zedge: invalid state');
+assert.equal(result(guest.deposit(7n, 0, 0, 0, 0, 0, 0, 0, 0)).error, 'zedge: unsupported token'); // custody is the Base vault
 assert.equal(result(guest.process_request(7n, 0, 0, 1, 0, 0, 0, 0)).error, 'zedge: invalid state');
 assert.equal(result(guest.process_request(7n, 0, 0, 2, 0, 0, 0, 0)).error, 'zedge: unsupported request type');
 assert.equal(result(guest.trusted_request(7n, 0, 0, 0, 0)).error, 'zedge: invalid state');

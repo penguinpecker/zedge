@@ -1,4 +1,10 @@
 import { defineChain } from "viem";
+import { STREAMS_RPCS } from "./streams-manifest.ts";
+
+// `vite --mode fork` only: the local Anvil forks of Horizen and Base. Vite replaces MODE at build time, so production keeps the public RPCs.
+const HORIZEN_RPC = import.meta.env?.MODE === "fork" ? "http://127.0.0.1:38945" : "https://horizen.calderachain.xyz/http";
+/** Base, where the vault takes deposits and pays withdrawals. */
+export const BASE_RPC = import.meta.env?.MODE === "fork" ? "http://127.0.0.1:39301" : STREAMS_RPCS.base;
 
 export const NETWORKS = {
   2651420: defineChain({
@@ -13,7 +19,7 @@ export const NETWORKS = {
     id: 26514,
     name: "Horizen",
     nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
-    rpcUrls: { default: { http: ["https://horizen.calderachain.xyz/http"] } },
+    rpcUrls: { default: { http: [HORIZEN_RPC] } },
     blockExplorers: { default: { name: "Horizen explorer", url: "https://explorer.horizen.io" } },
   }),
 } as const;
@@ -25,13 +31,14 @@ export function isNetworkId(value: unknown): value is NetworkId {
   return value === 2651420 || value === 26514;
 }
 
-export function transactionExplorerUrl(network: NetworkId, hash: string): string {
-  if (!isNetworkId(network)) throw new Error("Unsupported explorer network.");
+/** A transaction on one of the markets' networks, or on Base (8453) for deposits and payouts. */
+export function transactionExplorerUrl(network: NetworkId | 8453, hash: string): string {
+  if (!isNetworkId(network) && network !== 8453) throw new Error("Unsupported explorer network.");
   if (typeof hash !== "string" || hash.length !== 66 || !/^0x[0-9a-fA-F]{64}$/.test(hash)) {
     throw new Error("Invalid transaction hash.");
   }
   // Keep the link origin independent of input, manifests and provider responses.
-  const origin = network === 2651420
+  const origin = network === 8453 ? "https://basescan.org" : network === 2651420
     ? "https://explorer-testnet.horizen.io"
     : "https://explorer.horizen.io";
   return new URL(`/tx/${encodeURIComponent(hash)}`, origin).href;

@@ -42,9 +42,7 @@ const (
 	ErrApplication = "zedge: wrong application"
 	ErrSender      = "zedge: malformed sender"
 	ErrToken       = "zedge: unsupported token"
-	ErrAmount      = "zedge: invalid amount"
 	ErrClock       = "zedge: clock not initialised"
-	ErrDeposit     = "zedge: deposit rejected"
 	ErrRequestType = "zedge: unsupported request type"
 	ErrEnvelope    = "zedge: malformed envelope"
 	ErrContext     = "zedge: wrong context"
@@ -52,7 +50,6 @@ const (
 	ErrCommand     = "zedge: malformed command"
 	ErrTrusted     = "zedge: malformed trusted payload"
 	ErrTick        = "zedge: stale or unknown tick"
-	ErrTime        = "zedge: clock regression"
 	ErrInternal    = "zedge: internal error"
 )
 

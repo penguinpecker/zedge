@@ -12,12 +12,13 @@ import (
 // fails the run (a panic in the guest is a wasm trap). Every result must be
 // well formed and have the one public shape its entry point allows; an error
 // carries no effect; a private rejection, a retry or a sync hands back the
-// input state with one more tick requested and the sender's outcome collected,
-// and a staged command adds only its item; the ledger is conserved (a deposit
-// adds exactly its amount, a request pays out exactly its withdrawal, a tick
-// moves nothing in or out); no deposit or withdrawal leaves fewer evidence IDs
-// than the exits still owed; every request accepted is RequestBytes long and
-// every clock record ends with its payload's Keccak-256.
+// input state with one more tick requested (none for a report) and the
+// sender's outcome collected, and a staged command adds only its item; the
+// ledger is conserved (the engine takes in exactly the deposits a tick
+// credits and pays out exactly the withdrawal payouts it publishes); no
+// credit or payout leaves fewer evidence IDs than the exits still owed; no
+// result carries a Vela withdrawal; every request accepted is RequestBytes
+// long and every clock record ends with its payload's Keccak-256.
 //
 //	go test -run '^$' -fuzz FuzzEntryPoints -fuzztime 60s
 func FuzzEntryPoints(f *testing.F) {
@@ -76,34 +77,54 @@ func FuzzEntryPoints(f *testing.F) {
 		if err != nil {
 			t.Fatalf("returned state does not decode: %v", err)
 		}
-		// One shape per entry point: a request gives one receipt and asks for
-		// one tick, a deposit gives one receipt, a tick publishes its clock,
-		// then archive records, then at most one request to carry on.
-		receipts, appEvents, withdrawals := 0, 0, 0 // deploy: nothing
+		// One shape per entry point: a command or sync gives one receipt and
+		// asks for one tick, and a withdrawal adds its payout record; a report
+		// gives one receipt and only public round records; a tick publishes
+		// its clock, then public records, then at most one request to carry on.
+		prev, _ := DecodeState(state)
+		if call%5 == 0 {
+			prev = nil // deploy ignores the state it is handed
+		}
+		report := call%5 == 2 && prev != nil && next.TickSeq == prev.TickSeq
 		switch call % 5 {
-		case 1:
-			receipts = 1
+		case 0:
+			if r.Events != nil || r.AppEvents != nil {
+				t.Fatalf("deploy with effects: %s", out)
+			}
 		case 2:
-			receipts, appEvents, withdrawals = 1, 1, 1
+			ok := len(r.Events) == 1
+			for i, e := range r.AppEvents {
+				switch {
+				case report:
+					ok = ok && (e.EventSubType == SettleSubType || e.EventSubType == ConfirmSubType || e.EventSubType == ArchiveSubType)
+				case i == 0:
+					ok = ok && e.EventSubType == TickSubType
+				default:
+					ok = ok && i == 1 && e.EventSubType == PayoutSubType
+				}
+			}
+			if !ok || !report && len(r.AppEvents) == 0 || len(payload) != RequestBytes {
+				t.Fatalf("wrong public shape for a request of %d bytes: %s", len(payload), out)
+			}
 		case 3:
-			appEvents = len(r.AppEvents)
-			if appEvents == 0 || r.AppEvents[0].EventSubType != ClockSubType {
+			if len(r.Events) != 0 || len(r.AppEvents) == 0 || r.AppEvents[0].EventSubType != ClockSubType || !bytes.Equal(r.AppEvents[0].Data[192:], keccak(payload)) {
 				t.Fatalf("a tick without its clock record: %s", out)
 			}
 			for i, e := range r.AppEvents[1:] {
-				if e.EventSubType != ArchiveSubType && (e.EventSubType != TickSubType || i != appEvents-2) {
+				switch e.EventSubType {
+				case ArchiveSubType, SettleSubType, CreditSubType, PayoutSubType, ConfirmSubType:
+				case TickSubType:
+					if i != len(r.AppEvents)-2 {
+						t.Fatalf("a tick asked for another in the middle: %s", out)
+					}
+				default:
 					t.Fatalf("a tick published %x: %s", e.EventSubType, out)
 				}
 			}
 		}
-		if len(r.Events) != receipts || len(r.AppEvents) != appEvents || len(r.Withdrawals) > withdrawals || call%5 == 2 && r.AppEvents[0].EventSubType != TickSubType {
-			t.Fatalf("wrong public shape for entry point %d: %s", call%5, out)
+		if r.Withdrawals != nil {
+			t.Fatalf("a Vela withdrawal: %s", out)
 		}
-		// Every request accepted has the one length; every clock record names its payload.
-		if call%5 == 2 && len(payload) != RequestBytes || call%5 == 3 && !bytes.Equal(r.AppEvents[0].Data[160:], keccak(payload)) {
-			t.Fatalf("a request of %d bytes, or a clock record without its payload's hash: %s", len(payload), out)
-		}
-		prev, _ := DecodeState(state)
 		for _, e := range r.Events {
 			var receipt receiptEnvelope
 			if !canonical(e.Data, &receipt) || receipt.Kind != "receipt" || receipt.Account != e.UserID || e.EventSubType != ReceiptSubType || len(e.Data)%ReceiptBytes != 0 {
@@ -111,33 +132,38 @@ func FuzzEntryPoints(f *testing.F) {
 			}
 			if s := receipt.Body.Status; prev != nil && (s == "rejected" || s == "retry" || s == "requested" || s == "staged") {
 				again := *next
-				again.TickSeq--
+				if !report {
+					again.TickSeq--
+				}
 				again.Outcomes = prev.Outcomes
 				if s == "staged" {
 					again.Staged = prev.Staged
 				}
-				if !bytes.Equal(marshal(&again), state) || r.Withdrawals != nil {
+				if !bytes.Equal(marshal(&again), state) || len(r.AppEvents) > 1 {
 					t.Fatalf("a %s request had an effect: %s", s, out)
 				}
 			}
 		}
 		if prev != nil {
-			paid := uint64(0)
-			for _, w := range r.Withdrawals {
-				amount, _ := new(big.Int).SetString(w.Amount[2:], 16)
-				paid += amount.Uint64()
-			}
-			deposited := uint64(0)
-			if call%5 == 1 {
-				deposited = new(big.Int).SetBytes(value).Uint64()
+			// The engine takes in exactly the deposits credited and pays out
+			// exactly the withdrawal payouts; a refund never touches it.
+			deposited, paid := uint64(0), uint64(0)
+			for _, e := range r.AppEvents {
+				amount := func(at int) uint64 { return new(big.Int).SetBytes(e.Data[at : at+32]).Uint64() }
+				if e.EventSubType == CreditSubType && amount(96) == creditCredited {
+					deposited += amount(64)
+				}
+				if e.EventSubType == PayoutSubType && amount(64) == payoutWithdrawal {
+					paid += amount(160)
+				}
 			}
 			a, b := prev.Engine, next.Engine
 			if b.Deposited != a.Deposited+deposited || b.PaidOut != a.PaidOut+paid || b.Custody != a.Custody+deposited-paid {
 				t.Fatalf("ledger not conserved: deposited %d -> %d, paid out %d -> %d, custody %d -> %d", a.Deposited, b.Deposited, a.PaidOut, b.PaidOut, a.Custody, b.Custody)
 			}
-		}
-		if (call%5 == 1 || r.Withdrawals != nil) && !exitReserved(next.Engine) {
-			t.Fatalf("the exit reserve was spent: %s", out)
+			if (deposited != 0 || paid != 0) && !exitReserved(b) {
+				t.Fatalf("the exit reserve was spent: %s", out)
+			}
 		}
 	})
 }

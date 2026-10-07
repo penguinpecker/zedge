@@ -35,8 +35,8 @@ func newHarness(t *testing.T, accounts ...string) *harness {
 	h.sync(keeper)
 	h.ok(h.tick(t0))
 	for _, who := range accounts {
-		if r := h.deposit(who, 100_000_000); r.Error != "" {
-			t.Fatal(r.Error)
+		if !h.credited(who, 100_000_000) {
+			t.Fatalf("deposit by %s refunded", who)
 		}
 	}
 	h.sync(keeper)
@@ -78,12 +78,30 @@ func (h *harness) cmd(who string, c engine.Command) receiptBody {
 	return h.send(who, commandPayload(who, h.next(who), c))
 }
 
+// deposit hands the guest a Base deposit of amount from who, with the next
+// vault index, in the tick a keeper sync asks for, at the clock, and returns
+// that tick's result.
 func (h *harness) deposit(who string, amount uint64) Result {
-	r := result(h.t, Deposit(testApp, raw(who), raw(collateral), new(big.Int).SetUint64(amount).Bytes(), h.st))
+	h.sync(keeper)
+	s := h.s()
+	h.block++
+	r := result(h.t, TrustedRequest(testApp, tick3(s.TickSeq, h.block, s.Clock, nil, []dep{{s.DepositsSeen + 1, who, amount}}), h.st))
 	if r.Error == "" {
 		h.st = r.State
 	}
 	return r
+}
+
+// credited reports whether a Base deposit was credited rather than refunded.
+func (h *harness) credited(who string, amount uint64) bool {
+	h.t.Helper()
+	for _, e := range h.ok(h.deposit(who, amount)).AppEvents {
+		if e.EventSubType == CreditSubType {
+			return new(big.Int).SetBytes(e.Data[96:128]).Uint64() == creditCredited
+		}
+	}
+	h.t.Fatal("the deposit was not processed")
+	return false
 }
 
 // tickN applies tick n at timestamp at, with registry records.
@@ -157,7 +175,7 @@ func TestStagingRules(t *testing.T) {
 	}
 	item := string(marshal(s.Staged))
 	// S3: frozen until activated. The same bytes again change nothing but the
-	// tick count; anything else is refused; a deposit fails; a sync works.
+	// tick count; anything else is refused; a sync works.
 	if b := h.send(alice, sell); b.Status != "staged" || string(marshal(h.s().Staged)) != item {
 		t.Fatalf("resend: %+v", b)
 	}
@@ -165,9 +183,6 @@ func TestStagingRules(t *testing.T) {
 		if b := h.cmd(alice, c); b.Status != "rejected" || b.Reason != "a staged command is waiting for its tick" {
 			t.Fatalf("%s while staged: %+v", c.Op, b)
 		}
-	}
-	if r := h.deposit(alice, 1); r.Error != ErrDeposit {
-		t.Fatalf("deposit while staged: %q", r.Error)
 	}
 	if b := h.sync(alice); b.Status != "requested" || string(marshal(h.s().Staged)) != item || !bytes.Equal(marshal(h.s().Engine), marshal(before.Engine)) {
 		t.Fatalf("sync while staged: %+v", b)
@@ -279,8 +294,9 @@ func TestTicksOutOfOrder(t *testing.T) {
 			t.Fatalf("tick %d after tick %d: %q", k, c, r.Error)
 		}
 	}
+	// A pending tick stamped behind the clock applies at the clock.
 	h.sync(keeper)
-	if r := h.tick(s1 + 19); r.Error != ErrTime {
+	if r := h.tick(s1 + 19); r.Error != "" || h.s().Clock != s1+20 {
 		t.Fatalf("a pending tick behind the clock: %q", r.Error)
 	}
 	if b := h.sync(bob); b.Outcome.Receipt.Status != "filled" || len(b.Outcome.Receipt.Fills) != 1 || b.At.Timestamp != s1+20 {
@@ -298,7 +314,7 @@ func TestStagedOrderForAVoidedRound(t *testing.T) {
 	second.RoundID, second.Expiry = id2, s1+900+895
 	h.cmd(alice, second)
 	r := h.ok(h.tick(s1+900+40, rec{start: s1 + 900, resolvedAt: s1 + 900 + 31, outcome: 3}))
-	if applied, skipped := counts(r); applied != 1 || skipped != 0 || len(r.AppEvents) != 2 || r.AppEvents[1].EventSubType != ArchiveSubType {
+	if applied, skipped := counts(r); applied != 1 || skipped != 0 || len(r.AppEvents) != 3 || r.AppEvents[1].EventSubType != SettleSubType || r.AppEvents[2].EventSubType != ArchiveSubType {
 		t.Fatalf("void of round 2: applied %d, skipped %d, %d app events", applied, skipped, len(r.AppEvents))
 	}
 	// Activation runs after the mirror and before the archive: the round is void.
@@ -309,14 +325,14 @@ func TestStagedOrderForAVoidedRound(t *testing.T) {
 	// nothing; the registry's record does.
 	voidable := mustSpec(s1).VoidableAfter
 	h.ok(h.tick(voidable + 5))
-	if m := h.s().Engine.Rounds[0]; m.Status != "open" {
-		t.Fatalf("round 1 after voidableAfter without a record: %s", m.Status)
+	if m := status(h.s(), id1); m != "open" {
+		t.Fatalf("round 1 after voidableAfter without a record: %s", m)
 	}
 	h.cmd(alice, order(engine.Sell, 60, 1_000, engine.GTC))
 	voided := opened1
 	voided.outcome, voided.resolvedAt = 3, voidable+6
 	r = h.ok(h.tick(voidable+10, voided))
-	if applied, _ := counts(r); applied != 1 || len(r.AppEvents) != 2 || len(h.s().Engine.Rounds) != 0 {
+	if applied, _ := counts(r); applied != 1 || status(h.s(), id1) != "absent" || status(h.s(), id2) != "absent" {
 		t.Fatalf("void of round 1: applied %d, %d app events", applied, len(r.AppEvents))
 	}
 	for _, who := range []string{alice, bob} {
@@ -419,7 +435,7 @@ func TestCancelCannotProbeAnotherAccount(t *testing.T) {
 // The clock record ends with the payload's Keccak-256, the hash the endpoint
 // put into the trusted request's ID, so a tick fed anything but the trigger's
 // answer publishes something else: a forged round record of the same shape,
-// or a version-1 payload in place of a version-2 one with no records.
+// or a deposit record stripped that would have changed nothing.
 func TestClockRecordBindsThePayload(t *testing.T) {
 	h := &harness{t: t, st: result(t, Deploy(testApp, marshal(testParams()), testSalt)).State, block: 1000}
 	h.sync(keeper)
@@ -431,12 +447,12 @@ func TestClockRecordBindsThePayload(t *testing.T) {
 	forged := opened1
 	forged.opening = observed(s1, s1+3, "1000000000000000000") // $1, not $97,000
 	for name, p := range map[string][2][]byte{
-		"a forged record": {tick2(k, 2000, s1+5, opened1), tick2(k, 2000, s1+5, forged)},
-		"version 1":       {tick2(k, 2000, s1+5), tickPayload(k, 2000, s1+5)},
+		"a forged record":           {tick2(k, 2000, s1+5, opened1), tick2(k, 2000, s1+5, forged)},
+		"a stripped deposit record": {tick3(k, 2000, s1+5, nil, []dep{{h.s().DepositsSeen, alice, 1}}), tickPayload(k, 2000, s1+5)},
 	} {
 		genuine, fed := h.ok(result(t, TrustedRequest(testApp, p[0], h.st))), h.ok(result(t, TrustedRequest(testApp, p[1], h.st)))
-		if bytes.Equal(genuine.AppEvents[0].Data, fed.AppEvents[0].Data) || !bytes.Equal(fed.AppEvents[0].Data[:160], genuine.AppEvents[0].Data[:160]) ||
-			!bytes.Equal(fed.AppEvents[0].Data[160:], keccak(p[1])) {
+		if bytes.Equal(genuine.AppEvents[0].Data, fed.AppEvents[0].Data) || !bytes.Equal(fed.AppEvents[0].Data[:192], genuine.AppEvents[0].Data[:192]) ||
+			!bytes.Equal(fed.AppEvents[0].Data[192:], keccak(p[1])) {
 			t.Errorf("%s: the clock record does not show the payload it was fed", name)
 		}
 	}
@@ -465,11 +481,12 @@ func TestMatchingWorkLimit(t *testing.T) {
 func TestRoundMirror(t *testing.T) {
 	h := newHarness(t, alice)
 	// Nothing is created for a round that has started or a market the
-	// deployment does not mirror, and nothing is done for a round with no news.
+	// deployment does not mirror, and nothing is done for a round with no
+	// news. The guest creates the next two slots itself: here round 3.
 	h.sync(keeper)
 	r := h.ok(h.tick(s1+6, opened1, rec{start: t0}, rec{asset: 1, start: s1 + 1800}, rec{start: s1 + 1800, duration: 300}))
-	if applied, skipped := counts(r); applied != 0 || skipped != 4 || len(h.s().Engine.Rounds) != 2 {
-		t.Fatalf("no news: applied %d, skipped %d", applied, skipped)
+	if applied, skipped := counts(r); applied != 0 || skipped != 4 || len(h.s().Engine.Rounds) != 3 || status(h.s(), engine.RoundID(deployed(), mustSpec(s1+1800))) != "scheduled" {
+		t.Fatalf("no news: applied %d, skipped %d, %d rounds", applied, skipped, len(h.s().Engine.Rounds))
 	}
 	// A record the engine refuses, or one that does not decode, is skipped and
 	// the tick still applies: round 2's opening recorded after its deadline;
@@ -494,18 +511,20 @@ func TestRoundMirror(t *testing.T) {
 	}
 	resolved.outcome = 1
 	h.sync(keeper)
-	if r := h.ok(h.tick(s1+900+42, resolved)); len(r.AppEvents) != 2 || len(h.s().Engine.Rounds) != 1 {
-		t.Fatalf("resolution: %d app events, %d rounds", len(r.AppEvents), len(h.s().Engine.Rounds))
+	if r := h.ok(h.tick(s1+900+42, resolved)); len(r.AppEvents) != 3 || r.AppEvents[1].EventSubType != SettleSubType || r.AppEvents[2].EventSubType != ArchiveSubType || status(h.s(), id1) != "absent" {
+		t.Fatalf("resolution: %d app events", len(r.AppEvents))
 	}
-	// Records apply in (start, asset, duration) order: with one slot left the
-	// earlier round takes it, whatever order the payload lists them in.
+	// Records apply in (start, asset, duration) order: with five slots left
+	// the five earliest rounds take them, whatever order the payload lists
+	// them in, and the two latest are skipped.
 	var future []rec
-	for k := uint64(3); k <= 9; k++ {
+	for k := uint64(4); k <= 10; k++ {
 		future = append(future, rec{start: s1 + 900*k})
 	}
 	h.sync(keeper)
 	r = h.ok(h.tick(s1+900+43, future[6], future[5], future[4], future[3], future[2], future[1], future[0]))
-	if applied, skipped := counts(r); applied != 7 || skipped != 0 || len(h.s().Engine.Rounds) != MaxSliceRounds {
+	if applied, skipped := counts(r); applied != 5 || skipped != 2 || len(h.s().Engine.Rounds) != MaxSliceRounds ||
+		status(h.s(), engine.RoundID(deployed(), mustSpec(s1+900*8))) != "scheduled" || status(h.s(), engine.RoundID(deployed(), mustSpec(s1+900*9))) != "absent" {
 		t.Fatalf("filling the slots: applied %d, skipped %d, %d rounds", applied, skipped, len(h.s().Engine.Rounds))
 	}
 	h.sync(keeper)
@@ -514,28 +533,30 @@ func TestRoundMirror(t *testing.T) {
 		t.Fatalf("a ninth round: applied %d, skipped %d", applied, skipped)
 	}
 	// The next request asks about every round the engine holds as scheduled
-	// or open, 8 of them; the trigger's answer is framed by n.
+	// or open, 8 of them; the trigger's answer is framed by n and d.
 	if b := h.sync(keeper); b.Tick != h.s().TickSeq {
 		t.Fatal(b)
 	}
+	k, at := h.s().TickSeq, s1+900+45
 	for name, p := range map[string][]byte{
-		"version 3":          append(words(3), tick2(h.s().TickSeq, h.block+1, s1+900+45)[32:]...),
-		"one word short":     tick2(h.s().TickSeq, h.block+1, s1+900+45, rec{start: s1})[:7*32+18*32],
-		"one word long":      append(tick2(h.s().TickSeq, h.block+1, s1+900+45), words(0)...),
-		"seventeen records":  tick2(h.s().TickSeq, h.block+1, s1+900+45, slices.Repeat([]rec{{start: s1}}, 17)...),
-		"count over 64 bits": func() []byte { p := tick2(h.s().TickSeq, h.block+1, s1+900+45); p[6*32] = 1; return p }(),
-		"version 1, 7 words": append(tickPayload(h.s().TickSeq, h.block+1, s1+900+45), words(0)...),
-		"version 2, 6 words": tick2(h.s().TickSeq, h.block+1, s1+900+45)[:6*32],
-		"partial final word": tick2(h.s().TickSeq, h.block+1, s1+900+45)[:7*32-1],
-		"record count on v1": append(tickPayload(h.s().TickSeq, h.block+1, s1+900+45), words(1)...),
+		"version 2":                  append(words(2), tick2(k, h.block+1, at)[32:]...),
+		"one word short":             tick2(k, h.block+1, at, rec{start: s1})[:8*32+18*32],
+		"one word long":              append(tick2(k, h.block+1, at), words(0)...),
+		"seventeen records":          tick2(k, h.block+1, at, slices.Repeat([]rec{{start: s1}}, 17)...),
+		"count over 64 bits":         func() []byte { p := tick2(k, h.block+1, at); p[6*32] = 1; return p }(),
+		"deposit count over 64 bits": func() []byte { p := tick2(k, h.block+1, at); p[7*32] = 1; return p }(),
+		"nine deposits":              tick3(k, h.block+1, at, nil, deps(1, 0x100, MaxDeposits+1, 1)),
+		"a deposit record cut short": tick3(k, h.block+1, at, nil, deps(1, 0x100, 1, 1))[:8*32+2*32],
+		"seven words":                tick2(k, h.block+1, at)[:7*32],
+		"partial final word":         tick2(k, h.block+1, at)[:8*32-1],
 	} {
 		if r := result(t, TrustedRequest(testApp, p, h.st)); r.Error != ErrTrusted {
 			t.Errorf("%s: %q", name, r.Error)
 		}
 	}
-	// A version-1 payload is a plain clock tick.
-	if r := h.ok(result(t, TrustedRequest(testApp, tickPayload(h.s().TickSeq, h.block+1, s1+900+45), h.st))); len(r.AppEvents) != 1 || !bytes.Equal(r.AppEvents[0].Data[96:160], words(0, 0)) {
-		t.Fatal("version 1 in the order build")
+	// A payload with no records is a plain clock tick.
+	if r := h.ok(result(t, TrustedRequest(testApp, tickPayload(k, h.block+1, at), h.st))); len(r.AppEvents) != 1 || !bytes.Equal(r.AppEvents[0].Data[96:192], words(0, 0, 0)) {
+		t.Fatal("a plain clock tick")
 	}
 }
 
@@ -548,7 +569,7 @@ func TestSweepAndArchive(t *testing.T) {
 	h.sync(keeper)
 	k := h.s().TickSeq
 	h.cmd(alice, engine.Command{Op: engine.CancelAll})
-	if r := h.ok(h.tickN(k, s1+905, resolved)); len(r.AppEvents) != 1 {
+	if r := h.ok(h.tickN(k, s1+905, resolved)); len(r.AppEvents) != 2 || r.AppEvents[1].EventSubType != SettleSubType {
 		t.Fatalf("resolution: %d app events", len(r.AppEvents))
 	}
 	s := h.s()
@@ -563,7 +584,7 @@ func TestSweepAndArchive(t *testing.T) {
 		t.Fatalf("alice after her tick: %+v, %d app events", a, len(r.AppEvents))
 	}
 	var record engine.RoundArchive
-	if !canonical(r.AppEvents[1].Data, &record) || record.Count != 1 || record.Round.ID != id1 || record.Round.Outcome != engine.Up || len(h.s().Engine.Rounds) != 1 {
+	if !canonical(r.AppEvents[1].Data, &record) || record.Count != 1 || record.Round.ID != id1 || record.Round.Outcome != engine.Up || status(h.s(), id1) != "absent" {
 		t.Fatalf("archive record: %s", r.AppEvents[1].Data)
 	}
 	if digest, err := engine.ArchiveDigest(record); err != nil || digest != record.Hash || h.s().Engine.ArchiveRoot != record.Hash {
@@ -603,7 +624,7 @@ func TestSweepAndArchive(t *testing.T) {
 	h.ok(h.tick(s1+6, five...))
 	h.sync(keeper)
 	r = h.ok(h.tick(s1+900*6+100, voided...))
-	if applied, _ := counts(r); applied != 5 || len(r.AppEvents) != 1+MaxArchives {
+	if applied, _ := counts(r); applied != 5 || len(r.AppEvents) != 1+5+MaxArchives {
 		t.Fatalf("five voids: applied %d, %d app events", applied, len(r.AppEvents))
 	}
 	h.sync(keeper)
@@ -622,11 +643,12 @@ func TestOutcomeCollection(t *testing.T) {
 	if r := result(t, ProcessRequest(testApp, raw(alice), requestTypeProcess, []byte(`{"version":1`), h.st)); r.Error != ErrEnvelope || !bytes.Equal(before, h.st) {
 		t.Fatal(r.Error)
 	}
-	r := h.deposit(alice, 1_000_000)
-	if b := body(t, r.Events[0]).Body; r.Error != "" || b.Type != "deposit" || b.Outcome == nil || b.Outcome.Receipt.OrderID != engine.CommandID(alice, 3) || len(h.s().Outcomes) != 0 {
-		t.Fatalf("deposit receipt: %+v", b)
+	// A report request, which asks for no tick, collects it too.
+	if b := h.send(alice, reportPayload(alice, chainlinkReport(engine.BTCStreamsFeed, uint32(b1), 0).Report, uint32(b1))); b.Type != "report" || b.Status != "rejected" ||
+		b.Outcome == nil || b.Outcome.Receipt.OrderID != engine.CommandID(alice, 3) || len(h.s().Outcomes) != 0 {
+		t.Fatalf("report receipt: %+v", b)
 	}
-	if b := h.sync(alice); b.Outcome != nil || b.View.Cash != 96_000_000 {
+	if b := h.sync(alice); b.Outcome != nil || b.View.Cash != 95_000_000 {
 		t.Fatalf("second collection: %+v", b.Outcome)
 	}
 	// The view is the account's own; an unregistered sender has none.
@@ -642,8 +664,8 @@ func TestOutcomeCollection(t *testing.T) {
 // ledger at the end. The conformance test runs the same steps in the wasm.
 func TestFullRound(t *testing.T) {
 	steps := run(t, script())
-	for _, s := range steps[len(steps)-len(round()):] {
-		if s.Error != "" {
+	for _, s := range steps {
+		if s.Error != "" && !strings.HasSuffix(s.Name, "fails") {
 			t.Fatalf("%s: %s", s.Name, s.Error)
 		}
 	}
@@ -651,8 +673,8 @@ func TestFullRound(t *testing.T) {
 	if o := told("alice collects the outcome of her order for an unknown round").Outcome; o.Status != "rejected" || o.Reason != "unknown round" || o.Receipt != nil {
 		t.Fatalf("first outcome: %+v", o)
 	}
-	if applied, skipped := counts(Result{AppEvents: find(t, steps, "tick 13 opens round 1 and creates round 3").AppEvents}); applied != 2 || skipped != 0 {
-		t.Fatalf("tick 13: applied %d, skipped %d", applied, skipped)
+	if applied, skipped := counts(Result{AppEvents: find(t, steps, "tick 17 opens round 1 and creates round 3").AppEvents}); applied != 2 || skipped != 0 {
+		t.Fatalf("tick 17: applied %d, skipped %d", applied, skipped)
 	}
 	if b := told("alice collects her order's outcome and stages a cancel"); b.Outcome.Receipt.Status != "resting" || b.View.Orders[0].Filled != 400_000 || b.View.Orders[0].Remaining != 600_000 || b.View.Cash != 148_237_600 {
 		t.Fatalf("alice, maker: %+v %+v", b.Outcome, b.View)
@@ -661,20 +683,21 @@ func TestFullRound(t *testing.T) {
 		b.View.Cash != 9_757_600 || b.View.Holdings[0].Up != 400_000 {
 		t.Fatalf("bob, taker: %+v %+v", b.Outcome, b.View)
 	}
-	settle := find(t, steps, "tick 21 resolves round 1, sweeps and archives it, opens round 2 and creates round 4")
+	settle := find(t, steps, "tick 25 resolves round 1, sweeps and archives it, opens round 2 and creates round 4")
 	var record engine.RoundArchive
-	if applied, skipped := counts(Result{AppEvents: settle.AppEvents}); applied != 3 || skipped != 0 || len(settle.AppEvents) != 2 || !canonical(settle.AppEvents[1].Data, &record) || record.Round.ID != id1 || record.Round.Outcome != engine.Up {
-		t.Fatalf("tick 21: %d app events", len(settle.AppEvents))
+	if applied, skipped := counts(Result{AppEvents: settle.AppEvents}); applied != 3 || skipped != 0 || len(settle.AppEvents) != 4 || settle.AppEvents[1].EventSubType != SettleSubType ||
+		settle.AppEvents[2].EventSubType != SettleSubType || !canonical(settle.AppEvents[3].Data, &record) || record.Round.ID != id1 || record.Round.Outcome != engine.Up {
+		t.Fatalf("tick 25: %d app events", len(settle.AppEvents))
 	}
 	if s := state(t, settle.after); status(s, id2) != "open" || len(s.Engine.Rounds) != 3 {
-		t.Fatalf("rounds after tick 21: %+v", s.Engine.Rounds)
+		t.Fatalf("rounds after tick 25: %+v", s.Engine.Rounds)
 	}
 	// The sweep redeemed in alice's name, so her stored receipt is no longer
 	// the cancel's: the outcome comes back without it.
 	if b := told("alice collects her cancel, whose receipt the sweep replaced"); b.Outcome.CommandID != engine.CommandID(alice, 5) || b.Outcome.Status != "applied" || b.Outcome.Receipt != nil || b.View.Nonce != 6 {
 		t.Fatalf("alice's cancel: %+v %+v", b.Outcome, b.View)
 	}
-	e := state(t, steps[len(steps)-1].after).Engine
+	e := state(t, find(t, steps, "bob withdraws everything again").after).Engine
 	if e.Fees != 4_800 || e.Custody != e.Fees+30 || e.PaidOut != 284_995_200 || e.Deposited != 285_000_030 || len(e.Orders) != 0 {
 		t.Fatalf("final ledger: fees %d, custody %d, paid out %d, deposited %d", e.Fees, e.Custody, e.PaidOut, e.Deposited)
 	}

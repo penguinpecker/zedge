@@ -2,9 +2,11 @@ package guest
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/big"
 	"slices"
 	"strings"
 	"testing"
@@ -59,6 +61,25 @@ func heaviest(t testing.TB) (state, tick []byte) {
 	return heavyState, heavyTick
 }
 
+// cappedReport is the state at every cap, nothing staged, with the test DON
+// of reports_test.go pinned, and that DON's report for the open round's end:
+// the heaviest report there is, which resolves the round and redeems all 32
+// holders in one transition.
+func cappedReport(t testing.TB) (st, payload []byte) {
+	_, _, idle, _ := capped(t)
+	s := state(t, idle)
+	d := newTestDON(4)
+	s.Chainlink = d.config(1)
+	var end uint64
+	for _, m := range s.Engine.Rounds {
+		if m.Status == "open" {
+			end = m.Spec.End
+		}
+	}
+	full := d.sign(1, engine.BTCStreamsFeed, end, end, end+86400, new(big.Int).Mul(big.NewInt(98_000), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)))
+	return marshal(s), reportPayload(alice, "0x"+hex.EncodeToString(full), uint32(end))
+}
+
 func cappedAccounts() []string {
 	accounts := []string{alice, bob}
 	for i := len(accounts); i < MaxSliceAccounts; i++ {
@@ -77,8 +98,8 @@ func buildCapped(t testing.TB) *State {
 	h.ok(h.tick(t0))
 	accounts := cappedAccounts()
 	for _, who := range accounts {
-		if r := h.deposit(who, 1_000_000_000); r.Error != "" {
-			t.Fatal(r.Error)
+		if !h.credited(who, 1_000_000_000) {
+			t.Fatalf("deposit by %s refunded", who)
 		}
 	}
 	var rounds []rec
@@ -149,6 +170,19 @@ func buildCapped(t testing.TB) *State {
 		s.Outcomes = append(s.Outcomes, Outcome{a.ID, engine.CommandID(a.ID, 999), 1, "rejected", reason})
 	}
 	s.Engine.AuthorityReceipt.ReleasedOrders = slices.Repeat([]string{engine.CommandID(alice, 999)}, MaxSliceAccounts*MaxAccountOrders)
+	// Every round settled from a report and not yet confirmed, and the most
+	// DON configurations a deployment may pin, each with the most signers.
+	for i := 0; i < MaxUnconfirmed; i++ {
+		s.Unconfirmed = append(s.Unconfirmed, Unconfirmed{fmt.Sprintf("0x%064x", i+1), "0x" + sha("open"), "0x" + sha("close"), 2})
+	}
+	for len(s.Chainlink.Configs) < MaxDigests {
+		s.Chainlink.Configs = append(s.Chainlink.Configs, DONConfig{Digest: fmt.Sprintf("0x%064x", len(s.Chainlink.Configs)), F: 5})
+	}
+	for i := range s.Chainlink.Configs {
+		for j := len(s.Chainlink.Configs[i].Signers); j < MaxSigners; j++ {
+			s.Chainlink.Configs[i].Signers = append(s.Chainlink.Configs[i].Signers, fmt.Sprintf("0x%040x", 0x5160+100*i+j))
+		}
+	}
 	return s
 }
 
@@ -159,7 +193,7 @@ func buildCapped(t testing.TB) *State {
 // number is at most 10^15, the engine's cap on amounts, nonces and sequences.
 var digits = map[string]int{"price": 2, "time": 10, "clock": 10, "start": 10, "end": 10, "cutoff": 10, "openingDeadline": 10, "voidableAfter": 10, "expiry": 10,
 	"validFromTimestamp": 10, "observationsTimestamp": 10, "expiresAt": 10, "decimals": 2, "version": 1, "rulesVersion": 1, "feeBps": 4, "chainId": 7,
-	"observationWindow": 2, "openingGrace": 3, "voidGrace": 7, "cutoffBuffer": 3, "deposits": 4, "withdrawals": 4}
+	"observationWindow": 2, "openingGrace": 3, "voidGrace": 7, "cutoffBuffer": 3, "deposits": 4, "withdrawals": 4, "f": 2}
 
 // widest is the length of the state with every number at its widest, every
 // all-digit string at the largest int192 price, every command or order ID with
@@ -212,7 +246,8 @@ func TestStateAtEveryCapFitsTheBound(t *testing.T) {
 	}
 	e := s.Engine
 	if len(e.Accounts) != MaxSliceAccounts || len(e.Rounds) != MaxSliceRounds || len(e.Orders) != MaxSliceAccounts*MaxAccountOrders ||
-		len(s.Staged) != MaxSliceAccounts || len(s.Outcomes) != MaxSliceAccounts || len(s.Notices) != MaxSliceAccounts || len(e.ExternalEvidence) != maxEvidence {
+		len(s.Staged) != MaxSliceAccounts || len(s.Outcomes) != MaxSliceAccounts || len(s.Unconfirmed) != MaxUnconfirmed || len(e.ExternalEvidence) != maxEvidence ||
+		len(s.Chainlink.Configs) != MaxDigests {
 		t.Fatalf("not at every cap: %d accounts, %d rounds, %d orders, %d staged, %d outcomes, %d evidence IDs", len(e.Accounts), len(e.Rounds), len(e.Orders), len(s.Staged), len(s.Outcomes), len(e.ExternalEvidence))
 	}
 	for _, a := range e.Accounts {
@@ -246,15 +281,15 @@ func TestFullBookAtEveryCap(t *testing.T) {
 	if b := h.cmd(keeper, engine.Command{Op: engine.Register}); b.Status != "rejected" || b.Reason != "account capacity" {
 		t.Fatalf("33rd account: %+v", b)
 	}
-	if r := h.deposit(keeper, 1); r.Error != ErrDeposit {
-		t.Fatalf("33rd account's deposit: %q", r.Error)
-	}
 	last := h.s().Engine.Time
 	if r := h.ok(h.tick(last+1, rec{start: s1 + 900*MaxSliceRounds})); len(h.s().Engine.Rounds) != MaxSliceRounds {
 		t.Fatalf("a ninth round was created: %d app events", len(r.AppEvents))
 	}
 	if b := h.sync(alice); b.Outcome.Reason != "order capacity" || len(b.View.Orders) != MaxAccountOrders {
 		t.Fatalf("fifth order at activation: %+v", b.Outcome)
+	}
+	if h.credited(keeper, 1) {
+		t.Fatal("33rd account's deposit was credited")
 	}
 	// Every account cancels all its orders: two ticks of sixteen.
 	h.st = cancelling
@@ -299,10 +334,19 @@ func TestFullBookAtEveryCap(t *testing.T) {
 	}
 	// The busiest tick timed: 1 checkpoint, 7 resolutions, 16 cancel_all and
 	// 16 sweeps, 40 engine commands; sixteen staged are left and asked for.
+	// It publishes the clock, the seven settle records and the request.
 	heavy, tick := heaviest(t)
 	if r := h.ok(result(t, TrustedRequest(testApp, tick, heavy))); state(t, r.State).Engine.Sequence-state(t, heavy).Engine.Sequence != 40 ||
-		len(state(t, r.State).Staged) != MaxSliceAccounts-MaxActivations || len(r.AppEvents) != 2 {
+		len(state(t, r.State).Staged) != MaxSliceAccounts-MaxActivations || len(r.AppEvents) != 2+MaxSliceRounds-1 {
 		t.Fatalf("the busiest tick: %d app events", len(r.AppEvents))
+	}
+	// The heaviest report: the open round resolves, all 32 holders are paid,
+	// the round is archived and the slot it frees is taken by the next round,
+	// in the one transition: 36 engine commands.
+	st, report := cappedReport(t)
+	r = result(t, ProcessRequest(testApp, raw(alice), requestTypeProcess, report, st))
+	if n := state(t, r.State).Engine.Sequence - state(t, st).Engine.Sequence; r.Error != "" || body(t, r.Events[0]).Body.Status != "applied" || n != 1+1+MaxSliceAccounts+1+1 {
+		t.Fatalf("the heaviest report: %q, %d engine commands", r.Error, n)
 	}
 	// Sixteen place_orders on the full book, each one the engine refuses.
 	h.st = placing

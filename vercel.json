@@ -1,5 +1,12 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "installCommand": "npm ci --ignore-scripts",
+  "functions": { "api/relay.ts": { "maxDuration": 30 } },
+  "headers": [
+    { "source": "/(.*)", "headers": [
+      { "key": "Content-Security-Policy", "value": "default-src 'self'; script-src 'self' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://api.web3modal.org https://explorer-api.walletconnect.com; font-src 'self' https://fonts.reown.com; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; child-src https://auth.privy.io https://verify.walletconnect.com https://verify.walletconnect.org; frame-src https://auth.privy.io https://verify.walletconnect.com https://verify.walletconnect.org https://secure.walletconnect.org https://challenges.cloudflare.com; connect-src 'self' https://auth.privy.io https://*.rpc.privy.systems wss://relay.walletconnect.com wss://relay.walletconnect.org https://rpc.walletconnect.org https://explorer-api.walletconnect.com https://api.web3modal.org https://pulse.walletconnect.org wss://www.walletlink.org https://horizen.calderachain.xyz https://horizen-testnet.rpc.caldera.xyz https://mainnet.base.org https://base-rpc.publicnode.com https://api.kraken.com wss://ws.kraken.com https://api.exchange.coinbase.com wss://ws-feed.exchange.coinbase.com; worker-src 'self'; manifest-src 'self'" }
+    ] }
+  ],
   "rewrites": [
     { "source": "/terms", "destination": "/index.html" },
     { "source": "/privacy", "destination": "/index.html" },

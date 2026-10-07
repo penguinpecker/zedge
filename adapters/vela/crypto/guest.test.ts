@@ -5,7 +5,8 @@ import { Wallet, keccak256, toUtf8Bytes } from "ethers";
 import { decrypt, encrypt, exportPublicKeyToHex, generateKeyPair, importPublicKeyFromHex } from "@horizen/vela-common-ts";
 import { EvaluationSession } from "./session.ts";
 import type { EvaluationDomain } from "./session.ts";
-import { RECEIPT_BYTES, commandBody, commandId, encodeCommand, noticeRequestId, syncBody, syncRequestId } from "./guest.ts";
+import { RECEIPT_BYTES, SUBTYPES, commandBody, commandId, decodeClock, decodeConfirm, decodeCredit, decodePayout, decodeSettle, encodeCommand,
+  reportBody, reportRequestId, syncBody, syncRequestId } from "./guest.ts";
 import type { EngineCommand, ReceiptBody } from "./guest.ts";
 
 // Written by the Go adapter's own tests (go test -run TestVectors -update . in
@@ -16,10 +17,14 @@ interface Vectors {
   epoch: string;
   accounts: Record<string, string>;
   commands: { name: string; command: EngineCommand; canonical: string }[];
-  requests: { name: string; account: string; requestId: string; body: { type: string; command?: string }; plaintext: string }[];
+  requests: { name: string; account: string; requestId: string; body: { type: string; command?: string; report?: string }; plaintext: string }[];
   receipts: { name: string; account: string; requestId: string; type: string; status: string; plaintext: string }[];
+  records: { name: string; subType: string; data: string }[];
 }
 const vectors: Vectors = JSON.parse(readFileSync(new URL("../guest/testdata/vectors.json", import.meta.url), "utf8"));
+// The recorded Chainlink reports the guest's own tests verify, as 0x hex.
+const reports: { feedId: string; observationsTimestamp: number; report: string }[] =
+  JSON.parse(readFileSync(new URL("../guest/testdata/chainlink.json", import.meta.url), "utf8")).reports;
 const encoder = new TextEncoder();
 
 // Test-only wallets derived from a public label. Never fund them.
@@ -69,7 +74,7 @@ test("encoder refuses what the engine would read differently", () => {
 
 test("session.ts produces exactly the plaintext the guest accepts", async () => {
   const { enclave, session, userPublicKey } = await open("alice");
-  assert.equal(vectors.requests.length, 3);
+  assert.equal(vectors.requests.length, 4);
   for (const vector of vectors.requests) {
     assert.equal(vector.account, session.account);
     let body: unknown = syncBody();
@@ -79,6 +84,13 @@ test("session.ts produces exactly the plaintext the guest accepts", async () => 
       body = commandBody(command);
       requestId = commandId(session.account, command.nonce);
       assert.equal(command.id, requestId);
+    }
+    if (vector.body.type === "report") {
+      // The first recorded BTC report for the boundary the request names.
+      const at = Number(vector.requestId.split(":").at(-1));
+      const source = reports.find(r => r.feedId.startsWith("0x00039d9e") && r.observationsTimestamp === at)!;
+      body = reportBody(source.report);
+      requestId = reportRequestId(session.account, at);
     }
     assert.deepEqual(body, vector.body, vector.name);
     assert.equal(requestId, vector.requestId, vector.name);
@@ -93,7 +105,7 @@ test("guest receipts pass the session's context checks", async () => {
   const bob = await open("bob");
   assert.ok(vectors.receipts.length >= 10);
   assert.ok(vectors.receipts.some(vector => vector.type === "sync" && vector.requestId === syncRequestId(vector.account)));
-  assert.equal(vectors.receipts[0]!.requestId, noticeRequestId(alice.session.account, 1));
+  assert.ok(vectors.receipts.some(vector => vector.type === "report" && vector.status === "applied"));
   for (const vector of vectors.receipts) {
     const [owner, other] = vector.account === alice.session.account ? [alice, bob] : [bob, alice];
     const result = await owner.session.decryptReceipt(await owner.seal(vector.plaintext), vector.requestId);
@@ -106,8 +118,8 @@ test("guest receipts pass the session's context checks", async () => {
     // One size for every receipt, whatever it says; and the clock it was judged at.
     assert.equal(encoder.encode(vector.plaintext).length, RECEIPT_BYTES, vector.name);
     assert.match(body.pad, /^0+$/, vector.name);
-    assert.ok(body.at.tick >= 1 && body.at.timestamp >= 1_800_000_000, vector.name);
-    assert.equal(typeof body.tick === "number", body.type !== "deposit", vector.name);
+    assert.ok(body.at.tick >= 1 && body.at.timestamp >= 1_790_000_000, vector.name);
+    assert.equal(typeof body.tick === "number", body.type !== "report", vector.name);
     // The same receipt under any other expectation is refused, never shown as empty.
     assert.equal((await owner.session.decryptReceipt(await owner.seal(vector.plaintext), `${vector.requestId}0`)).status, "context-mismatch");
     assert.equal((await other.session.decryptReceipt(await other.seal(vector.plaintext), vector.requestId)).status, "context-mismatch");
@@ -140,4 +152,29 @@ test("book receipts: staged, then the outcome and the view with the next request
   assert.deepEqual(fill.body.outcome?.receipt?.fills?.map(f => [f.role, f.side, f.price, f.quantity]), [["taker", "buy", 60, 400_000]]);
   // Neither side's receipt names the other.
   assert.ok(!fill.vector.plaintext.includes(alice.session.account) && !resting.vector.plaintext.includes(bob.session.account));
+});
+
+test("report bodies and request IDs", () => {
+  assert.deepEqual(reportBody("0x00ff10"), { type: "report", report: "AP8Q" });
+  for (const bad of ["", "0x", "00ff", "0x0", "0xzz", "0x00 "]) assert.throws(() => reportBody(bad), bad);
+  assert.equal(reportRequestId(vectors.accounts.alice!, 1_791_270_900), `${vectors.accounts.alice}:report:1791270900`);
+  assert.throws(() => reportRequestId(vectors.accounts.alice!, 2 ** 32));
+});
+
+test("public records decode as the guest wrote them", () => {
+  const alice = vectors.accounts.alice!;
+  const record = (name: string, subType: string) => vectors.records.find(r => r.name.startsWith(name) && r.subType === subType)!.data;
+  assert.deepEqual(decodeClock(record("tick 1 ", SUBTYPES.clock)).deposits, 1);
+  assert.deepEqual(decodeCredit(record("tick 1 ", SUBTYPES.credit)), { index: 1n, account: alice, amount: 200_000_000n, status: 1, payout: 0n });
+  const payout = decodePayout(record("alice withdraws", SUBTYPES.payout));
+  assert.deepEqual([payout.ordinal, payout.kind, payout.account, payout.amount], [1n, 1, alice, 50_000_000n]);
+  const refund = decodeCredit(record("tick 15 ", SUBTYPES.credit));
+  assert.deepEqual([refund.status, refund.payout, refund.amount], [2, 3n, 1n]);
+  assert.deepEqual(decodePayout(record("tick 15 ", SUBTYPES.payout)).kind, 2);
+  const settled = vectors.records.filter(r => r.subType === SUBTYPES.settle).map(r => decodeSettle(r.data));
+  assert.deepEqual(settled.map(s => [s.kind, s.outcome, s.source, s.observationsTimestamp]), [[2, 1, 1, 1_791_270_900], [1, 0, 1, 1_791_270_900]]);
+  assert.equal(settled[0]!.reportHash, settled[1]!.reportHash);
+  const confirm = decodeConfirm(record("reports: tick 8", SUBTYPES.confirm));
+  assert.deepEqual([confirm.agree, confirm.engineOutcome, confirm.registryOutcome, confirm.engineClosing], [1, 1, 1, settled[0]!.reportHash]);
+  assert.throws(() => decodeCredit(record("tick 1 ", SUBTYPES.clock)));
 });

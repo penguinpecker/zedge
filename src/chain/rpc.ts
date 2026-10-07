@@ -1,10 +1,11 @@
 import { http } from "viem";
-import { NETWORKS } from "./networks.ts";
+import { BASE_RPC, NETWORKS } from "./networks.ts";
 import { STREAMS_RPCS } from "./streams-manifest.ts";
 
 const endpoints = new Set<string>([
   ...Object.values(NETWORKS).flatMap((network) => network.rpcUrls.default.http),
   STREAMS_RPCS.base,
+  BASE_RPC,
 ]);
 const cooldowns = new Map<string, number>();
 const DEFAULT_DELAY = 60_000;

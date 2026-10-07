@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 3,
+  "kind": "zedge-private-orderbook",
+  "chainId": 26514,
+  "status": "planned",
+  "release": "orderbook-mainnet-2026-10-07"
+}

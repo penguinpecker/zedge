@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { parseEnv } from 'node:util';
+import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { privateKeyToAccount } from 'viem/accounts';
@@ -10,6 +11,7 @@ import { Journal, privateFile, encodeJSON, spent, FINAL, DAILY_MAXIMUM } from '.
 import { createChainAccess, sendOnce, reconcile, held, heldUntil, defaultStateDirectory } from './chain.mjs';
 import { MARKETS, schedules, chooseAction, orderedActions } from './lifecycle.mjs';
 import { classify } from './errors.mjs';
+import { runVela, startVela } from './vela.mjs';
 
 const registry = 'StreamsRoundRegistry';
 const source = 'BaseStreamsPublisher';
@@ -71,9 +73,26 @@ export async function settings(option) {
     requireCondition(['chainlink', 'solana'].includes(source), 'KEEPER_REPORT_SOURCE');
     const origin = option.rehearsal && env.KEEPER_STREAMS_ORIGIN ? { origin: env.KEEPER_STREAMS_ORIGIN } : {};
     const paid = () => new StreamsClient({ username: env.CHAINLINK_STREAMS_USERNAME, secret: env.CHAINLINK_STREAMS_SECRET, ...origin });
-    if (source === 'chainlink') return { rpc, account, budgets, streams: paid() };
+    const vela = await velaSettings(env, option, account);
+    if (source === 'chainlink') return { rpc, account, budgets, streams: paid(), vela };
     const free = new SolanaReports({ url: env.KEEPER_SOLANA_RPC_URL || undefined });
-    return { rpc, account, budgets, streams: env.CHAINLINK_STREAMS_USERNAME || env.CHAINLINK_STREAMS_SECRET ? withFallback(free, paid()) : free };
+    return { rpc, account, budgets, streams: env.CHAINLINK_STREAMS_USERNAME || env.CHAINLINK_STREAMS_SECRET ? withFallback(free, paid()) : free, vela };
+  } finally { bytes.fill(0); }
+}
+
+// The order-book lane (vela.mjs) runs only with its own wallet: KEEPER_VELA_KEY_FILE, a 0600 file holding 0x and 64 hex,
+// never the keeper's key (the two lanes never share a nonce). The manifest is the committed one; a rehearsal may name a
+// fork's (KEEPER_ORDERBOOK_MANIFEST).
+async function velaSettings(env, option, keeper) {
+  if (!env.KEEPER_VELA_KEY_FILE) return null;
+  const bytes = await privateFile(resolve(env.KEEPER_VELA_KEY_FILE));
+  try {
+    const key = bytes.toString().trim();
+    requireCondition(/^0x[0-9a-fA-F]{64}$/.test(key), 'KEEPER_VELA_KEY');
+    const account = privateKeyToAccount(key);
+    requireCondition(!same(account.address, keeper.address), 'KEEPER_VELA_KEY');
+    requireCondition(!env.KEEPER_ORDERBOOK_MANIFEST || option.rehearsal, 'KEEPER_ARGUMENT');
+    return { account, manifest: env.KEEPER_ORDERBOOK_MANIFEST ? resolve(env.KEEPER_ORDERBOOK_MANIFEST) : new URL('../../public/deployments/26514-orderbook.json', import.meta.url) };
   } finally { bytes.fill(0); }
 }
 
@@ -479,10 +498,23 @@ async function main() {
   const identity = keccak256(toHex(`${access.release.routeHash}:${access.release.rulesHash}:${auth.account.address.toLowerCase()}${option.rehearsal ? ':rehearsal' : ''}`));
   const journal = await Journal.acquire(option.directory, identity);
   let stopping = false, wake = () => {}; const stop = () => { stopping = true; wake(); }; process.once('SIGINT', stop); process.once('SIGTERM', stop);
+  const print = status => console.log(JSON.stringify({ at: iso(Date.now()), ...(option.rehearsal ? { rehearsal: true } : {}), ...status }));
   try {
-    await watch(access, journal, auth, { once: option.mode !== '--watch', stopped: () => stopping,
-      sleep: ms => new Promise(ok => { const timer = setTimeout(ok, ms); wake = () => { clearTimeout(timer); ok(); }; }),
-      print: status => console.log(JSON.stringify({ at: iso(Date.now()), ...(option.rehearsal ? { rehearsal: true } : {}), ...status })) });
+    // The order-book lane: --watch only, and never a reason to stop the registry work (a failure leaves it off, said once).
+    let vela = null;
+    if (option.mode === '--watch' && auth.vela) {
+      try {
+        const { parseOrderbookManifest } = await import('../../src/chain/orderbook-manifest.ts');
+        const book = parseOrderbookManifest(JSON.parse(await readFile(auth.vela.manifest, 'utf8')));
+        if (book.status !== 'configured') print({ vela: 'off', reason: 'the order-book manifest is planned' });
+        else vela = await startVela({ book, account: auth.vela.account, url: auth.rpc.horizen ?? 'https://26514.rpc.thirdweb.com', streams: auth.streams, rehearsal: option.rehearsal, print });
+      } catch (error) { print({ vela: 'off', code: /^[A-Z_]+$/.test(error?.message) ? error.message : 'KEEPER_VELA_START' }); }
+    }
+    await Promise.all([
+      watch(access, journal, auth, { once: option.mode !== '--watch', stopped: () => stopping,
+        sleep: ms => new Promise(ok => { const timer = setTimeout(ok, ms); wake = () => { clearTimeout(timer); ok(); }; }), print }),
+      vela && runVela(vela, { stopped: () => stopping, sleep: ms => new Promise(ok => setTimeout(ok, ms)), print }),
+    ]);
   } finally { await journal.close(); process.removeListener('SIGINT', stop); process.removeListener('SIGTERM', stop); }
 }
 

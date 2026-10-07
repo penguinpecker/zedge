@@ -1,13 +1,18 @@
 import { createPublicClient, erc20Abi, formatUnits, isHash, parseAbi, type Address, type Hex, type Abi, type PublicClient } from "viem";
 import { registryReadAbi, oracleReadAbi } from "./abi.ts";
 import { streamsRegistryReadAbi } from "./streams-abi.ts";
-import { STREAMS_RPCS, verifyRegistryControl, verifyStreamsDeployment, type StreamsChainId, type StreamsReader } from "./streams-manifest.ts";
-import { NETWORKS, type NetworkId } from "./networks.ts";
+import { STREAMS_RPCS, verifyRegistryControl, verifyStreamsDeployment, type StreamsChainId, type StreamsManifest, type StreamsReader } from "./streams-manifest.ts";
+import { parseOrderbookManifest, verifyOrderbook, type OrderbookManifest, type VerifiedOrderbook } from "./orderbook-manifest.ts";
+import { BASE_RPC, NETWORKS, type NetworkId } from "./networks.ts";
 import { parseManifest, verifyDeployment, type DeploymentManifest, type VerifiedDeployment } from "./manifest.ts";
 import { rpcTransport } from "./rpc.ts";
 
 export function chainClient(chainId: NetworkId) {
   return createPublicClient({ chain: NETWORKS[chainId], transport: rpcTransport(NETWORKS[chainId].rpcUrls.default.http[0]) });
+}
+/** Base, for the vault and the user's USDC. */
+export function baseClient() {
+  return createPublicClient({ transport: rpcTransport(BASE_RPC) });
 }
 
 export type ChainSnapshot = { chainId: NetworkId; blockNumber: bigint; blockHash: Hex; timestamp: bigint; checkedAt: number };
@@ -32,7 +37,7 @@ export async function loadManifest(chainId: NetworkId, signal?: AbortSignal): Pr
 }
 
 /** Every read is pinned to one block of one chain. */
-function streamsReader(chain: PublicClient, blockNumber: bigint): StreamsReader {
+export function streamsReader(chain: PublicClient, blockNumber: bigint): StreamsReader {
   return {
     chainId: () => chain.getChainId(),
     code: (address) => chain.getCode({ address, blockNumber }),
@@ -77,6 +82,29 @@ export async function checkDeployment(manifest: DeploymentManifest, snapshot: Ch
   const anchored = await client.getBlock({ blockNumber: snapshot.blockNumber });
   if (anchored.hash !== snapshot.blockHash) throw new Error("Horizen verification snapshot changed; retry.");
   fresh(snapshot.timestamp);
+  return result;
+}
+
+export async function loadOrderbook(signal?: AbortSignal): Promise<OrderbookManifest> {
+  const response = await fetch("/deployments/26514-orderbook.json", { cache: "no-store", signal, credentials: "same-origin" });
+  if (!response.ok) throw new Error("Order book information is unavailable.");
+  const body = await response.text();
+  if (body.length > 16_384) throw new Error("Order book information is invalid.");
+  return parseOrderbookManifest(JSON.parse(body) as unknown);
+}
+
+/** The private order book at the snapshot's block (and the vault at Base's latest), against the already-verified streams release.
+ * A planned release reads nothing. */
+export async function checkOrderbook(manifest: OrderbookManifest, streams: StreamsManifest, snapshot: ChainSnapshot): Promise<VerifiedOrderbook | null> {
+  if (manifest.status !== "configured" || snapshot.chainId !== 26514) return null;
+  fresh(snapshot.timestamp);
+  const client = chainClient(26514), base = baseClient();
+  const baseBlock = await base.getBlock();
+  if (baseBlock.number === null) throw new Error("Base network is unavailable.");
+  fresh(baseBlock.timestamp);
+  const result = await verifyOrderbook(manifest, streams, streamsReader(client, snapshot.blockNumber), streamsReader(base, baseBlock.number));
+  const anchored = await client.getBlock({ blockNumber: snapshot.blockNumber });
+  if (anchored.hash !== snapshot.blockHash) throw new Error("Horizen verification snapshot changed; retry.");
   return result;
 }
 
