@@ -24,7 +24,7 @@ export function mainnetDeployment(book) {
   if (book?.kind !== "zedge-private-orderbook" || book.chainId !== CHAIN) fail("public/deployments/26514-orderbook.json is not Horizen's order-book manifest");
   if (book.status !== "configured") fail("the order-book manifest is planned: nothing is deployed to quote on yet");
   return {
-    rpc: "https://26514.rpc.thirdweb.com", crossCheckRpc: "https://horizen.calderachain.xyz/http", baseRpc: "https://base-rpc.publicnode.com",
+    rpc: "https://26514.rpc.thirdweb.com", crossCheckRpc: "https://horizen.calderachain.xyz/http", baseRpc: "https://mainnet.base.org",
     endpoint: book.endpoint.address, authenticator: book.authenticator.address, trigger: book.trigger.address, registry: book.trigger.registry,
     applicationId: book.application.id, applicationFingerprint: book.application.wasmSha256, origin: book.application.origin, epoch: book.application.epoch,
     house: book.application.house, keyFile: `${homedir()}/.config/zedge/house.key`, minFeeWei: BigInt(book.endpoint.minFeePerRequestWei),

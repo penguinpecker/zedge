@@ -27,7 +27,7 @@ export async function POST(request: Request): Promise<Response> {
     // The thirdweb gateway by default: the operator keeps Caldera to itself.
     wire: config ? viemWire(env.HORIZEN_RPC_URL ?? "https://26514.rpc.thirdweb.com", config.book) : null,
     // Base carries the vault deposits; a private endpoint is advised over the public default.
-    base: config ? viemWire(env.BASE_RPC_URL ?? "https://base-rpc.publicnode.com", config.book) : null,
+    base: config ? viemWire(env.BASE_RPC_URL ?? "https://mainnet.base.org", config.book) : null,
     log: (line) => console.log(line),
   });
   return Response.json(answer.body, { status: answer.status, headers: { "cache-control": "no-store" } });

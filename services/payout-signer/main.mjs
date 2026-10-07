@@ -18,7 +18,7 @@ import { parseOrderbookManifest } from "../../src/chain/orderbook-manifest.ts";
 import { SUBTYPES, decodePayout, payoutTypedData, usdcAbi, vaultAbi } from "../../src/chain/vault.ts";
 
 // GAS_CAP: a day's first payout to an emptied wallet measured 134,798 gas on a Base fork (new paid, day-total and balance slots).
-export const POLL_MS = 2_000, GAS_CAP = 250_000n, BLOCKS_PER_READ = 2_000n, RESEND_MS = 30_000;
+export const POLL_MS = 2_000, GAS_CAP = 250_000n, BLOCKS_PER_READ = 1_000n, RESEND_MS = 30_000;
 /** Base fee caps, wei per gas: the relayer's (server/relay.ts FEE_CAPS.base). */
 export const FEES = { tip: 1_000_000n, max: 100_000_000n };
 const ENDPOINT_EVENTS = parseAbi([
