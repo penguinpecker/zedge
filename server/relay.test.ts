@@ -202,7 +202,6 @@ test("tokens are verified with the app's public key only: wrong audience, issuer
   const none = new UnsecuredJWT({ linked_accounts: JSON.stringify([{ type: "wallet", address: addr(alice), chain_type: "ethereum" }]) }).setIssuer("privy.io").setAudience(APP).setSubject("did:privy:alice").setIssuedAt().setExpirationTime("1h").encode();
   const cases: Record<string, Record<string, string>> = {
     "no tokens": {},
-    "access only": { authorization: good.authorization },
     "wrong audience": await auth({ aud: "another-app" }),
     "wrong issuer": await auth({ iss: "evil.example" }),
     "unknown key id": await auth({ kid: "k2" }),
@@ -231,6 +230,9 @@ test("the sender (or depositor) must be one of the signed-in user's own wallets;
   const r = relay();
   assert.equal((await r.post(await request({ who: bob }), await auth())).body.code, "SENDER_NOT_LINKED");
   assert.equal((await r.post(await deposit({ who: bob }), await auth())).body.code, "SENDER_NOT_LINKED");
+  // Without an identity token the request's own signature proves the sender: a signed-in session relays it.
+  const accessOnly = { authorization: (await auth()).authorization };
+  for (const body of [await request(), await request({ who: bob })]) assert.ok(!["UNAUTHENTICATED", "SENDER_NOT_LINKED"].includes(String((await relay().post(body, accessOnly)).body.code)));
   assert.equal((await r.post(await request(), { ...(await auth()), origin: "https://evil.example" })).body.code, "ORIGIN_NOT_ALLOWED");
   assert.equal((await r.post(await request(), await auth(), "GET")).body.code, "ORIGIN_NOT_ALLOWED");
   const invite = relay({ invited: ["did:privy:carol"] });

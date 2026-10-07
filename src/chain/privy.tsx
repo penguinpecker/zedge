@@ -72,11 +72,12 @@ function PrivyBridge({ children }: { children: ReactNode }) {
       session: address ? { address, chainId: 26514, generation: 0 } : null,
       connect: () => login(),
       disconnect: () => void logout(),
-      async authHeaders() {
-        const [access, identity] = await Promise.all([getAccessToken(), getIdentityToken()]);
-        if (!access || !identity) throw new Error("Sign in again to continue.");
+      async authHeaders(): Promise<Record<string, string>> {
+        // The identity token is optional: Privy issues one only when the app turns it on, and the relayer then checks the wallet is linked.
+        const [access, identity] = await Promise.all([getAccessToken(), getIdentityToken().catch(() => null)]);
+        if (!access) throw new Error("Sign in again to continue.");
         // Headers, not cookies: no cross-site request can carry them.
-        return { authorization: `Bearer ${access}`, "privy-id-token": identity };
+        return identity ? { authorization: `Bearer ${access}`, "privy-id-token": identity } : { authorization: `Bearer ${access}` };
       },
     };
   }, [embedded, address, ready, login, logout, getAccessToken, signMessage, signTypedData]);

@@ -120,15 +120,19 @@ export function parseBody(text: string): Parsed {
 }
 
 /** Step 2–3: both Privy tokens, verified with the app's public keys only, for the same user; the user's Ethereum wallets. */
-export async function authenticate(headers: Headers, config: Pick<RelayConfig, "privyAppId" | "jwks">): Promise<{ sub: string; wallets: Set<string> }> {
+/** `wallets` is null when no identity token came: Privy issues one only when the app turns it on. The request's own signature,
+ * or the deposit's permit, then proves the sender, so any signed-in user may relay for an address they hold the key to. */
+export async function authenticate(headers: Headers, config: Pick<RelayConfig, "privyAppId" | "jwks">): Promise<{ sub: string; wallets: Set<string> | null }> {
   const bearer = /^Bearer ([A-Za-z0-9._-]{20,4096})$/.exec(headers.get("authorization") ?? "")?.[1], identity = headers.get("privy-id-token") ?? "";
-  if (!bearer || !/^[A-Za-z0-9._-]{20,16384}$/.test(identity)) refuse("UNAUTHENTICATED");
+  if (!bearer || (identity && !/^[A-Za-z0-9._-]{20,16384}$/.test(identity))) refuse("UNAUTHENTICATED");
   const keys = createLocalJWKSet(config.jwks), options = { algorithms: ["ES256"], issuer: "privy.io", audience: config.privyAppId, clockTolerance: 30, requiredClaims: ["sub", "exp", "iat"] };
   try {
-    const [access, id] = await Promise.all([jwtVerify(bearer!, keys, options), jwtVerify(identity, keys, options)]);
-    if (!access.payload.sub || access.payload.sub !== id.payload.sub) refuse("UNAUTHENTICATED");
+    const access = await jwtVerify(bearer!, keys, options);
     // The Bearer token must be an access token (a session, no identity): an identity token in both headers is not two tokens.
-    if (typeof access.payload.sid !== "string" || "linked_accounts" in access.payload) refuse("UNAUTHENTICATED");
+    if (!access.payload.sub || typeof access.payload.sid !== "string" || "linked_accounts" in access.payload) refuse("UNAUTHENTICATED");
+    if (!identity) return { sub: access.payload.sub!, wallets: null };
+    const id = await jwtVerify(identity, keys, options);
+    if (access.payload.sub !== id.payload.sub) refuse("UNAUTHENTICATED");
     const raw = id.payload.linked_accounts;
     const accounts: unknown = typeof raw === "string" ? JSON.parse(raw) : raw;
     if (!Array.isArray(accounts)) refuse("UNAUTHENTICATED");
@@ -174,7 +178,7 @@ export async function handle(request: { method: string; headers: Headers; body: 
     const fees = onBase ? FEE_CAPS.base : FEE_CAPS.horizen, dailyBudgetWei = onBase ? config.baseDailyBudgetWei : config.dailyBudgetWei, minBalanceWei = onBase ? config.baseMinBalanceWei : config.minBalanceWei;
     const who = p.kind === "request" ? p.sender : p.owner;
     Object.assign(line, { chain: chainId, kind: p.kind, type: p.shape, sender: who }, p.kind === "base-deposit" ? { amount: p.amount.toString() } : {});
-    if (!user.wallets.has(who)) return answer("SENDER_NOT_LINKED");
+    if (user.wallets && !user.wallets.has(who)) return answer("SENDER_NOT_LINKED");
     if (!wire) return answer("RPC_UNAVAILABLE");
 
     // Step 7: limits, counted before any RPC.
