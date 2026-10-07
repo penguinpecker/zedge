@@ -24,7 +24,7 @@ export function mainnetDeployment(book) {
   if (book?.kind !== "zedge-private-orderbook" || book.chainId !== CHAIN) fail("public/deployments/26514-orderbook.json is not Horizen's order-book manifest");
   if (book.status !== "configured") fail("the order-book manifest is planned: nothing is deployed to quote on yet");
   return {
-    rpc: HORIZEN_RPC, crossCheckRpc: "https://horizen.calderachain.xyz/http", baseRpc: "https://mainnet.base.org",
+    rpc: HORIZEN_RPC, crossCheckRpc: "https://horizen.calderachain.xyz/http", baseRpc: BASE_RPC,
     endpoint: book.endpoint.address, authenticator: book.authenticator.address, trigger: book.trigger.address, registry: book.trigger.registry,
     applicationId: book.application.id, applicationFingerprint: book.application.wasmSha256, origin: book.application.origin, epoch: book.application.epoch,
     house: book.application.house, keyFile: `${homedir()}/.config/zedge/house.key`, minFeeWei: BigInt(book.endpoint.minFeePerRequestWei),
@@ -33,6 +33,8 @@ export function mainnetDeployment(book) {
 }
 const committedBook = () => JSON.parse(readFileSync(new URL("../../public/deployments/26514-orderbook.json", import.meta.url), "utf8"));
 // The thirdweb Horizen gateway is rate-limited without a client id; the operator keeps it in a private file.
+// An Alchemy key in ~/.config/zedge/alchemy.key gives Base reads a keyed endpoint; otherwise Base's own public one.
+const BASE_RPC = (() => { try { const k = readFileSync(`${homedir()}/.config/zedge/alchemy.key`, "utf8").trim(); if (/^[A-Za-z0-9_-]{16,64}$/.test(k)) return `https://base-mainnet.g.alchemy.com/v2/${k}`; } catch {} return "https://mainnet.base.org"; })();
 const HORIZEN_RPC = (() => { try { const id = readFileSync(`${homedir()}/.config/zedge/thirdweb.id`, "utf8").trim(); if (/^[0-9a-f]{32}$/.test(id)) return `https://26514.rpc.thirdweb.com/${id}`; } catch {} return "https://26514.rpc.thirdweb.com"; })();
 const USAGE = "usage: main.mjs <run [--dry-run] | status | deposit <usdc> | withdraw <usdc>> (--mainnet | --fork http://127.0.0.1:<port>) [--settings <file>]";
 const COINBASE = "https://api.exchange.coinbase.com/products/BTC-USD", KRAKEN = "https://api.kraken.com/0/public/Ticker?pair=XBTUSD";
