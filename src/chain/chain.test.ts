@@ -1,12 +1,13 @@
 import { strict as assert } from "node:assert";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
-import { keccak256, type Address, type Hex } from "viem";
+import { createPublicClient, keccak256, type Address, type Hex } from "viem";
 import { appMode } from "./mode.ts";
-import { DEFAULT_NETWORK, parseAtomicAmount, parseChainId, publicError, transactionExplorerUrl, type NetworkId } from "./networks.ts";
+import { DEFAULT_NETWORK, NETWORKS, parseAtomicAmount, parseChainId, publicError, transactionExplorerUrl, type NetworkId } from "./networks.ts";
 import { firstAccount } from "./wallet.ts";
 import { parseManifest, requireTradingReady, verifyDeployment, type ConfiguredManifest, type DeploymentReader } from "./manifest.ts";
 import { observationPrice } from "./gateway.ts";
+import { rpcCooldownRemaining, rpcTransport } from "./rpc.ts";
 import { registryReadAbi, oracleReadAbi } from "./abi.ts";
 
 const code: Hex = "0x60006000";
@@ -34,21 +35,28 @@ function reader(manifest = fixture()): DeploymentReader {
   };
 }
 
-test("mode is selected before either app mounts, defaults to demo only, with explicit chain routes", () => {
+test("mode is selected before either app mounts: the live market by default, the demo only at ?mode=demo", () => {
+  assert.equal(appMode(""), "chain");
+  assert.equal(appMode("", "#/portfolio"), "chain");
   assert.equal(appMode("?mode=chain"), "chain");
   assert.equal(appMode("?mode=chain&other=1", "#/portfolio"), "chain");
   assert.equal(appMode("", "#/chain"), "chain");
   assert.equal(appMode("", "#/chain/markets"), "chain");
+  assert.equal(appMode("?mode=chainish", "#/chainish"), "chain");
+  assert.equal(appMode("?mode=demo"), "demo");
   assert.equal(appMode("?mode=demo", "#/trade/btc-5m"), "demo");
   assert.equal(appMode("?mode=demo", "#/chain"), "demo");
-  assert.equal(appMode("?mode=chainish", "#/chainish"), "demo");
+  assert.equal(appMode("?other=1&mode=demo"), "demo");
   assert.equal(DEFAULT_NETWORK, 26514);
 });
 
 test("atomic amounts preserve precision beyond safe Number range and reject ambiguous input", () => {
   assert.equal(parseAtomicAmount("9007199254740993.000001", 6), 9007199254740993000001n);
   assert.equal(parseAtomicAmount("0.000000000000000001", 18), 1n);
-  for (const invalid of ["1e3", " 1", "1 ", "1,000", "-1", "+1", "01", ".5", "1.", "0", "0.0", "NaN", "Infinity", "1.0000001"]) assert.throws(() => parseAtomicAmount(invalid, 6));
+  assert.equal(parseAtomicAmount(".5", 6), 500_000n);
+  assert.equal(parseAtomicAmount("05", 6), 5_000_000n);
+  assert.equal(parseAtomicAmount("007.25", 6), 7_250_000n);
+  for (const invalid of ["1e3", " 1", "1 ", "1,000", "-1", "+1", "1.", ".", "", "00", ".0", "0", "0.0", "NaN", "Infinity", "1.0000001", "1..5", ".5.5"]) assert.throws(() => parseAtomicAmount(invalid, 6), invalid);
   assert.throws(() => parseAtomicAmount((2n ** 256n).toString(), 0));
 });
 
@@ -132,6 +140,13 @@ test("read-only contract ABI excludes every transaction entrypoint", () => {
 
 test("oracle display uses integer arithmetic and never treats missing prices as zero", () => {
   assert.equal(observationPrice(9739064000000n, -8), "$97,390.64");
+  // Rounded half up to cents, so the header and the chart show the same cent.
+  assert.equal(observationPrice(83056369853982335000000n, -18), "$83,056.37");
+  assert.equal(observationPrice(83046785197112335000000n, -18), "$83,046.79");
+  assert.equal(observationPrice(1005n, -3), "$1.01");
+  assert.equal(observationPrice(1004n, -3), "$1.00");
+  assert.equal(observationPrice(99999n, -3), "$100.00");
+  assert.equal(observationPrice(7n, 0), "$7.00");
   assert.throws(() => observationPrice(0n, -8));
   assert.throws(() => observationPrice(-1n, -8));
   assert.throws(() => observationPrice(1n, -19));
@@ -142,4 +157,22 @@ test("chain mode offers only the BTC 15-minute market, selected by default", asy
   const markets = source.match(/const MARKETS = \[([\s\S]*?)\] as const;/)?.[1] ?? "";
   assert.deepEqual([...markets.matchAll(/\{[^}]*\}/g)].map(([entry]) => entry), ['{ id: "btc-15m", asset: "BTC", name: "Bitcoin", duration: 900, assetId: 0 }']);
   assert.match(source, /const \[marketIndex, setMarketIndex\] = useState\(0\);/);
+});
+
+test("a request that gets no response at all (a 429 the browser hides for missing CORS headers) still starts the cooldown", async (t) => {
+  // No other test in this file touches an endpoint cooldown.
+  const url = NETWORKS[2651420].rpcUrls.default.http[0];
+  let now = 1_000_000;
+  t.mock.method(performance, "now", () => now);
+  let calls = 0;
+  t.mock.method(globalThis, "fetch", async () => { calls += 1; throw new TypeError("Failed to fetch"); });
+  const read = () => createPublicClient({ transport: rpcTransport(url) }).getChainId();
+  await assert.rejects(read());
+  assert.equal(rpcCooldownRemaining(url), 5_000);
+  await assert.rejects(read());
+  assert.equal(calls, 1, "no request is sent during the cooldown");
+  now += 5_000;
+  assert.equal(rpcCooldownRemaining(url), 0);
+  await assert.rejects(read());
+  assert.equal(calls, 2, "the read is tried again once the cooldown ends");
 });

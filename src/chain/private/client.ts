@@ -37,7 +37,7 @@ export interface Chain {
    * the deadline, or used by another signature well past it); "pending" before either. Never decided from a relayer's answer. */
   settle(sender: Address, signature: Hex, nonce: bigint, deadline: bigint, fromBlock: bigint): Promise<Submission | "pending" | "absent">;
   completion(requestId: Hex, fromBlock: bigint): Promise<Completion | null>;
-  /** Receipts of the account's requests since `fromBlock`, in chain order. */
+  /** Receipts of the account's requests since `fromBlock`, in chain order, read back no further than its first request. */
   history(account: Address, fromBlock: bigint): Promise<Logged[]>;
   /** Horizen's latest block number. */
   head(): Promise<bigint>;
@@ -48,13 +48,13 @@ export interface Chain {
   deposited(owner: Address, fromBlock: bigint): Promise<{ index: bigint; txHash: Hex } | null>;
   /** The deposit record has reached the Horizen inbox. */
   arrived(index: bigint): Promise<boolean>;
-  /** The guest's `credit` event for this Base deposit index since Horizen block `fromBlock`: 1 credited, 2 refunded. */
+  /** The guest's `credit` event for this Base deposit index since Horizen block `fromBlock` (within the last 1,000 blocks): 1 credited, 2 refunded. */
   credited(index: bigint, fromBlock: bigint): Promise<{ status: number; amount: bigint } | null>;
-  /** The guest's `payout` event for this ordinal since Horizen block `fromBlock`. */
+  /** The guest's `payout` event for this ordinal since Horizen block `fromBlock` (within the last 1,000 blocks). */
   approved(ordinal: bigint, fromBlock: bigint): Promise<boolean>;
   /** The vault's Paid transaction for this ordinal since Base block `fromBlock`. */
   paid(ordinal: bigint, fromBlock: bigint): Promise<Hex | null>;
-  /** Resolve and void `settle` events of these engine rounds since Horizen block `fromBlock`. */
+  /** Resolve and void `settle` events of these engine rounds since Horizen block `fromBlock` (within the last 1,000 blocks). */
   settled(roundIds: Hex[], fromBlock: bigint): Promise<Settled[]>;
 }
 export interface HintStore { get(key: string): string | null; set(key: string, value: string): void }
@@ -64,6 +64,7 @@ type Outcome = NonNullable<ReceiptBody["outcome"]>;
 export type Phase = "signing" | "sending" | "submitted" | "waiting" | "staged" | "matching" | "collecting" | "done" | "refused" | "failed";
 /** `chain` names where `tx` is: Horizen unless it is a Base transaction. */
 export type ActionState = { id: number; action: string; phase: Phase; text: string; tx?: Hex; chain?: 8453 | 26514; /** Deposit only: stages done of Sent on Base, Reached Horizen, Credited. */ stage?: 1 | 2 | 3; startedAt: number; final: boolean };
+type Step = (phase: Phase, text: string, tx?: Hex, chain?: 8453 | 26514, stage?: 1 | 2 | 3) => void;
 export type HistoryEntry = { requestId: Hex; block: bigint; txHash: Hex; text: string; readable: boolean };
 export type Order = { roundStart: number; outcome: "up" | "down"; side: "buy" | "sell"; price: number; quantity: number; tif: "ioc" | "gtc"; expiry: number };
 
@@ -75,6 +76,10 @@ const NETWORK_DOWN = "The network is busy. Nothing was sent. Try again in a minu
 export const NOT_SUBMITTED = "The request could not be sent. Nothing was submitted.";
 export const KEY_CHANGED = "Your wallet produced a different private key than before. Private records stay unreadable until this is resolved.";
 const DEPOSIT_DEADLINE = 1_200n, MONEY_WAIT = 900_000;
+const LOCKED = "Your private account was locked.";
+const RESULTS_UNREAD = "Round results could not be read. Trying again.";
+/** How a Base deposit ended for now: "pending" when this page stopped waiting before the credit (a slower check carries on). */
+export type DepositResult = "credited" | "pending" | "refunded";
 const usd = (atoms: number | bigint) => `${formatUnits(BigInt(atoms), 6)} USDC`;
 /** A failure the user can read: no internal detail, no secret. */
 export class PublicError extends Error {
@@ -157,6 +162,10 @@ export class PrivateAccount {
   #closed = false;
   /** Rounds whose result line was shown. */
   readonly #reported = new Set<string>();
+  /** Ended rounds that got their one sync without a readable result. */
+  readonly #synced = new Set<string>();
+  /** Results reads after a failure: the next one not before `#resultsAfter`, each wait twice the last; the line saying so. */
+  #resultsAfter = 0; #resultsWait = 0; #resultsLine = 0;
   /** When the last fresh receipt was read. */
   #readAt = 0;
   /** Book commands waiting for their result, by command ID: it comes back once, with whichever request of this account is next. */
@@ -177,7 +186,7 @@ export class PrivateAccount {
 
   get snapshot(): Snapshot { return this.#state; }
   #set(patch: Partial<Snapshot>) { this.#state = { ...this.#state, ...patch }; if (!this.#closed) this.#onChange(this.#state); }
-  #action(action: string): (phase: Phase, text: string, tx?: Hex, chain?: 8453 | 26514, stage?: 1 | 2 | 3) => void {
+  #action(action: string): Step {
     const id = ++this.#actionId, startedAt = this.#now();
     return (phase, text, tx, chain, stage) => {
       const prior = this.#state.actions.find((x) => x.id === id);
@@ -194,30 +203,35 @@ export class PrivateAccount {
 
   /** Lock on sign-out, account change and tab close. Drops the key; in-flight work stops at its next step. */
   lock() { this.#closed = true; this.#session.lock(); }
+  #alive() { if (this.#closed) throw new PublicError(LOCKED, "LOCKED"); }
 
   /** Derive the key with one silent signature, then sync; register the key only if the chain has none for this account. */
-  unlock(): Promise<void> {
-    return this.#serial(async () => {
-      const signer = { getAddress: async () => this.account, signMessage: (message: string | Uint8Array) => {
-        if (typeof message !== "string") throw new Error("Unexpected key challenge.");
-        return this.#signer.signMessage(message);
-      } } as unknown as EthersSigner;
-      await this.#session.unlock(signer);
-      const fingerprint = sha256(await this.#session.associationPayload()).slice(2);
-      const hintKey = `zedge:key:${this.#book.application.id}:${this.account}`;
-      const hint = this.#hints?.get(hintKey) ?? null;
-      if (hint && hint !== fingerprint) { this.#session.lock(); throw new PublicError(KEY_CHANGED); }
-      this.#set({ fingerprint: fingerprint.slice(0, 16), error: "" });
-      // Unlocked only once the key is registered and the first view is in: a refused first request leaves Set up / Unlock in place.
-      try { await this.#sync("Unlock"); }
-      catch (error) {
-        if (!(error instanceof PublicError) || error.code !== "NO_KEY") throw error;
-        (await this.#send("Register key", ASSOCIATEKEY, toHex(await this.#session.associationPayload()))).step("done", "Key registered");
-        await this.#sync("Unlock");
-      }
-      this.#hints?.set(hintKey, fingerprint);
-      this.#set({ unlocked: true, registered: true });
-    });
+  unlock(): Promise<void> { return this.#serial(() => this.#unlock()); }
+
+  async #unlock() {
+    const signer = { getAddress: async () => this.account, signMessage: (message: string | Uint8Array) => {
+      if (typeof message !== "string") throw new Error("Unexpected key challenge.");
+      return this.#signer.signMessage(message);
+    } } as unknown as EthersSigner;
+    await this.#session.unlock(signer);
+    const fingerprint = sha256(await this.#session.associationPayload()).slice(2);
+    const hintKey = `zedge:key:${this.#book.application.id}:${this.account}`;
+    const hint = this.#hints?.get(hintKey) ?? null;
+    if (hint && hint !== fingerprint) { this.#session.lock(); throw new PublicError(KEY_CHANGED); }
+    this.#set({ fingerprint: fingerprint.slice(0, 16), error: "" });
+    const register = async () => (await this.#send("Register key", ASSOCIATEKEY, toHex(await this.#session.associationPayload()))).step("done", "Key registered");
+    // Keys live in the operator's state, not on chain. But an account whose request nonce is still 0 has never sent a request, so it
+    // has no key: it registers first instead of sending a sync that can only fail (one relayed request and ~20 s less to set up).
+    if (!hint && await this.#chain.context(this.account).then((c) => c.nonce === 0n, () => false)) await register();
+    // Unlocked only once the key is registered and the first view is in: a refused first request leaves Set up / Unlock in place.
+    try { await this.#sync("Unlock"); }
+    catch (error) {
+      if (!(error instanceof PublicError) || error.code !== "NO_KEY") throw error;
+      await register();
+      await this.#sync("Unlock");
+    }
+    this.#hints?.set(hintKey, fingerprint);
+    this.#set({ unlocked: true, registered: true });
   }
 
   sync(): Promise<ReceiptBody> { return this.#serial(() => this.#sync("Sync")); }
@@ -286,6 +300,7 @@ export class PrivateAccount {
   async #landed(ctx: AuthContext, signature: Hex, deadline: bigint, step: (phase: Phase, text: string) => void): Promise<Submission> {
     const started = this.#now();
     for (;;) {
+      this.#alive();
       const found = await this.#chain.settle(this.account, signature, ctx.nonce, deadline, ctx.block).catch(() => null);
       if (found === "absent") throw new PublicError(NOT_SUBMITTED, "NOT_SUBMITTED");
       if (found && found !== "pending") return found;
@@ -299,6 +314,7 @@ export class PrivateAccount {
     const started = this.#now();
     step("waiting", "Waiting for the operator");
     for (;;) {
+      this.#alive();
       // A failed read is waited out like a slow operator: the request is on chain whatever this page can read.
       let done: Completion | null = null, busy = false;
       try { done = await this.#chain.completion(requestId, fromBlock); } catch { busy = true; }
@@ -326,7 +342,7 @@ export class PrivateAccount {
           if (body.outcome) this.#collected(body.outcome);
           return { body, id };
         }
-        if (r.status === "locked") throw new PublicError("Your private account was locked.");
+        if (r.status === "locked") throw new PublicError(LOCKED);
       }
     }
     throw new PublicError(stale ? "The network returned an older record than the one already read. Try again later." : "Your receipt could not be read with this key.");
@@ -418,19 +434,22 @@ export class PrivateAccount {
   merge(roundStart: number, quantity: number) { return this.#run("Merge", { op: "merge", roundId: engineRound(this.#book, roundStart).id, quantity }, false); }
   redeem(roundStart: number) { return this.#run("Redeem", { op: "redeem", roundId: engineRound(this.#book, roundStart).id }, false); }
 
-  /** Polls a chain read every 2 s until it answers, or null once `until` (this clock) passes. A failed read is waited out. */
-  async #poll<T>(read: () => Promise<T | null | false>, until: number): Promise<T | null> {
+  /** Polls a chain read every `every` ms until it answers, or null once `until` (this clock) passes. A failed read is waited out;
+   * a lock stops it. */
+  async #poll<T>(read: () => Promise<T | null | false>, until: number, every = 2_000): Promise<T | null> {
     for (;;) {
+      this.#alive();
       const value = await read().catch(() => null);
       if (value) return value;
       if (this.#now() > until) return null;
-      await this.#sleep(2_000);
+      await this.#sleep(every);
     }
   }
 
   /** One-click deposit: a silent Base USDC permit to the vault, sent by the relayer (no gas from the user). Then the record's way,
-   * from the chain alone: Sent on Base, On its way (the Horizen inbox), Credited or Refunded (the guest's `credit` event). */
-  depositFromBase(amount: bigint): Promise<void> {
+   * from the chain alone: Sent on Base, On its way (the Horizen inbox), Credited or Refunded (the guest's `credit` event).
+   * Resolves once credited (and the account unlocked and synced), refunded, or "pending" when this page stopped waiting. */
+  depositFromBase(amount: bigint): Promise<DepositResult> {
     // Not queued behind Horizen requests: a Base deposit uses no request nonce and needs no unlock (the engine registers a new
     // account on its first credit), so a stuck unlock or a Horizen halt cannot hold it.
     return (async () => {
@@ -444,7 +463,6 @@ export class PrivateAccount {
         if (ctx.balance < amount) throw new PublicError("Your wallet holds less than this deposit.");
         const deadline = ctx.timestamp + DEPOSIT_DEADLINE;
         const permit = await this.#signed(usdcPermitTypedData(c, { owner: this.account, value: amount, nonce: ctx.permitNonce, deadline }));
-        const horizenFrom = await this.#chain.head().catch(() => null);
         step("sending", "Sending");
         const answer = await this.#relay.post({ kind: "base-deposit", owner: this.account, amount: amount.toString(), deadline: deadline.toString(), permit });
         if (refusedBeforeSending(answer)) throw new PublicError(relayText(answer, this.#now()), answer.code, answer.retryAfter);
@@ -454,23 +472,31 @@ export class PrivateAccount {
         if (!sent) throw new PublicError(NOT_SUBMITTED, "NOT_SUBMITTED");
         step("submitted", "Sent on Base", sent.txHash, 8453, 1);
         step("waiting", "Reaching Horizen (about 25 s)");
-        if (!await this.#poll(() => this.#chain.arrived(sent.index), this.#now() + MONEY_WAIT)) return step("waiting", "Still on its way. It is credited when it arrives; nothing more is needed.");
-        step("waiting", "Reached Horizen · crediting", undefined, undefined, 2);
-        // ponytail: 300 blocks (5 min at 1 s blocks) back when the pre-send read failed; thirdweb caps getLogs at 1,000 blocks.
-        const from = horizenFrom ?? await this.#chain.head() - 300n;
-        const credit = await this.#poll(() => this.#chain.credited(sent.index, from), this.#now() + MONEY_WAIT);
-        if (!credit) return step("waiting", "Reached Horizen · waiting for the exchange to credit it");
-        if (credit.status !== 1) step("refused", "Refunded: the exchange could not take this deposit. It is paid back to your wallet on Base.");
-        else {
-          step("done", `Credited · ${usd(credit.amount)}`, undefined, undefined, 3);
-          if (this.#state.unlocked) await this.sync().catch(() => undefined);
-        }
+        const result = await this.#credit(sent.index, step, MONEY_WAIT, 2_000);
+        // This page stopped waiting, not the deposit: a check every 30 s carries on until the credit (or a lock).
+        if (result === "pending") void this.#credit(sent.index, step, Infinity, 30_000).catch(() => undefined);
+        return result;
       } catch (error) {
         const message = error instanceof PublicError ? error.message : "The deposit could not complete.";
         step("failed", message);
         throw error instanceof PublicError ? error : new PublicError(message);
       } finally { await this.refreshFunds().catch(() => undefined); }
     })();
+  }
+
+  /** After Sent on Base: Reached Horizen (the inbox), then Credited or Refunded (the guest's `credit` event), each read every
+   * `every` ms for up to `wait` ms. A credit unlocks the account if it is not, then syncs, so its view and new balance are in. */
+  async #credit(index: bigint, step: Step, wait: number, every: number): Promise<DepositResult> {
+    if (!await this.#poll(() => this.#chain.arrived(index), this.#now() + wait, every)) { step("waiting", "Still on its way. It is credited when it arrives; nothing more is needed."); return "pending"; }
+    step("waiting", "Reached Horizen · crediting", undefined, undefined, 2);
+    // The credit is matched by its deposit index, so any start block will do: 0 reads the last 1,000 blocks.
+    const credit = await this.#poll(() => this.#chain.credited(index, 0n), this.#now() + wait, every);
+    if (!credit) { step("waiting", "Reached Horizen · waiting for the exchange to credit it"); return "pending"; }
+    if (credit.status !== 1) { step("refused", "Refunded: the exchange could not take this deposit. It is paid back to your wallet on Base."); return "refunded"; }
+    step("done", `Credited · ${usd(credit.amount)}`, undefined, undefined, 3);
+    // A failed unlock or sync shows on its own line; the money is credited either way.
+    await this.#serial<unknown>(() => this.#state.unlocked ? this.#sync("Sync") : this.#unlock()).catch(() => undefined);
+    return "credited";
   }
 
   /** One-click withdrawal of the trading balance (up to the vault's largest payout) to this same address on Base: Requested,
@@ -494,21 +520,39 @@ export class PrivateAccount {
   async refreshFunds() { this.#set({ wallet: await this.#chain.wallet(this.account) }); }
 
   /** Rounds this account holds that have ended: their result once its `settle` event is public (winners are paid in that same
-   * transition), then one sync to read the new balance. Looks back an hour of Horizen blocks. */
+   * transition), then one sync to read the new balance. The event is read from the last 1,000 Horizen blocks (settlement lands
+   * 11-35 s after the end). A round whose result cannot be read (the read failed, or it ended before that window) gets one sync
+   * anyway, a minute after its end. A failed read is said once, on a Round result line, and retried later each time (10 s,
+   * doubling up to 2 min). */
   checkResults(): Promise<void> {
     return this.#serial(async () => {
-      const view = this.#state.view, now = Math.floor(this.#now() / 1000);
-      if (!view) return;
+      const view = this.#state.view, ms = this.#now(), now = Math.floor(ms / 1000);
+      if (!view || ms < this.#resultsAfter) return;
       // The guest's `settle` record names a round by its registry round ID; holdings name it by the engine's.
-      const ended = new Map<Hex, { id: string; h: View["holdings"][number] }>();
+      const ended = new Map<Hex, { id: string; h: View["holdings"][number]; end: number }>();
       for (let k = 1, last = Math.floor(now / 900) * 900; k <= 96; k++) {
         const r = engineRound(this.#book, last - k * 900), h = view.holdings.find((x) => x.roundId === r.id);
-        if (h && !this.#reported.has(r.id)) ended.set(r.spec.registryRoundId.toLowerCase() as Hex, { id: r.id, h });
+        if (h && !this.#reported.has(r.id)) ended.set(r.spec.registryRoundId.toLowerCase() as Hex, { id: r.id, h, end: r.spec.end });
       }
       if (!ended.size) return;
-      const head = await this.#chain.head();
+      // ponytail: 900 s stands for the 1,000-block window at Horizen's ~1 s blocks; an older round's event can no longer be read.
+      const readable = [...ended].filter(([, e]) => now - e.end < 900).map(([key]) => key);
+      let found: Settled[] = [], failed = false;
+      if (readable.length) {
+        try {
+          found = await this.#chain.settled(readable, 0n);
+          this.#resultsWait = 0;
+          const line = this.#resultsLine;
+          if (line) { this.#resultsLine = 0; this.#set({ actions: this.#state.actions.filter((x) => x.id !== line) }); }
+        } catch {
+          failed = true;
+          this.#resultsWait = Math.min(this.#resultsWait * 2 || 10_000, 120_000);
+          this.#resultsAfter = ms + this.#resultsWait;
+          if (!this.#resultsLine) { this.#action("Round result")("waiting", RESULTS_UNREAD); this.#resultsLine = this.#actionId; }
+        }
+      }
       let shown = 0;
-      for (const s of await this.#chain.settled([...ended.keys()], head > 3_600n ? head - 3_600n : 0n)) {
+      for (const s of found) {
         const e = ended.get(s.roundId.toLowerCase() as Hex);
         if (!e || this.#reported.has(e.id)) continue;
         const { id, h } = e;
@@ -519,7 +563,10 @@ export class PrivateAccount {
         const name = s.outcome === 1 ? "Up won" : s.outcome === 2 ? "Down won" : "Round voided";
         this.#action("Round result")("done", paid ? `${name} · ${usd(paid)} credited` : `${name} · nothing to collect`);
       }
-      if (shown) await this.#sync("Sync");
+      // Not when a receipt read since then already shows the round settled.
+      const due = [...ended].filter(([key, e]) => (failed || !readable.includes(key)) && !this.#reported.has(e.id) && !this.#synced.has(e.id) && now >= e.end + 60 && this.#readAt < (e.end + 60) * 1000).map(([, e]) => e);
+      for (const e of due) this.#synced.add(e.id);
+      if (shown || due.length) await this.#sync("Sync");
     });
   }
 
@@ -533,7 +580,8 @@ export class PrivateAccount {
 
   /** Receipts of the last seven days from the chain, trial-decrypted in order; unmatched ones stay listed as unreadable. */
   async loadHistory(fromBlock: bigint): Promise<void> {
-    const logged = await this.#chain.history(this.account, fromBlock);
+    // A failed read is the network's, never the wallet's.
+    const logged = await this.#chain.history(this.account, fromBlock).catch(() => { throw new PublicError("Couldn't load your history. Try again.", "HISTORY"); });
     const entries: HistoryEntry[] = [];
     let nonce = 0;
     for (const item of logged) {
@@ -564,6 +612,14 @@ export function describeReceipt(body: ReceiptBody): string {
 // ---------------------------------------------------------------- chain reads with viem (Horizen, and Base for the vault)
 
 const eventsOf = (book: Book) => ({ app: BigInt(book.application.id), endpoint: book.endpoint.address });
+/** thirdweb answers eth_getLogs over at most 1,000 blocks ("Maximum allowed number of requested blocks is 1000"). */
+const LOG_BLOCKS = 1_000n;
+/** At most four reads in flight (thirdweb's free tier allows 10 requests a second), wave by wave until `stop()` says enough. */
+async function inFours<T>(jobs: (() => Promise<T>)[], stop = () => false): Promise<T[]> {
+  const out: T[] = [];
+  for (let i = 0; i < jobs.length && !stop(); i += 4) out.push(...await Promise.all(jobs.slice(i, i + 4).map((job) => job())));
+  return out;
+}
 const authAbi = [
   { type: "function", name: "getTeeSigner", stateMutability: "view", inputs: [], outputs: [{ type: "address" }] },
   { type: "function", name: "getPubSecp521r1", stateMutability: "view", inputs: [], outputs: [{ type: "bytes" }] },
@@ -576,9 +632,12 @@ export function viemChain(client: PublicClient, book: Book, base: PublicClient):
     AppEvent: getAbiItem({ abi: endpointAbi, name: "AppEvent" }), Deposited: getAbiItem({ abi: vaultAbi, name: "Deposited" }), Paid: getAbiItem({ abi: vaultAbi, name: "Paid" }) };
   const ours = <N extends "RequestSubmitted" | "UserEvent">(logs: Parameters<typeof parseEventLogs>[0]["logs"], eventName: N) =>
     parseEventLogs({ abi: endpointAbi, logs: logs.filter((l) => l.address.toLowerCase() === endpoint), eventName }).filter((l) => l.args.applicationId === app);
-  // The guest's public events of this application and subtype, oldest first.
-  const appEvents = async (subtype: Hex, fromBlock: bigint) =>
-    (await client.getLogs({ address: endpoint, event: events.AppEvent, args: { applicationId: app, eventSubType: subtype }, fromBlock, toBlock: "latest" })).map((l) => l.args.data ?? "0x");
+  // The guest's public events of this application and subtype since `fromBlock`, oldest first, within the last 1,000 blocks: a poll
+  // that runs for minutes never asks for more.
+  const appEvents = async (subtype: Hex, fromBlock: bigint) => {
+    const head = await client.getBlockNumber(), floor = head - LOG_BLOCKS + 1n;
+    return (await client.getLogs({ address: endpoint, event: events.AppEvent, args: { applicationId: app, eventSubType: subtype }, fromBlock: fromBlock > floor ? fromBlock : floor, toBlock: head })).map((l) => l.args.data ?? "0x");
+  };
   return {
     async context(sender) {
       const block = await client.getBlock({ blockTag: "latest" });
@@ -614,20 +673,32 @@ export function viemChain(client: PublicClient, book: Book, base: PublicClient):
         ciphertexts: ours(receipt.logs, "UserEvent").filter((l) => l.args.requestId === requestId).map((l) => hexToBytes(l.args.encryptedData)), tick: tick?.args.requestId ?? null };
     },
     async history(account, fromBlock) {
-      const head = await client.getBlockNumber();
+      const head = await client.getBlockNumber(), sender = getAddress(account);
       const start = fromBlock > BigInt(book.application.deployBlock) ? fromBlock : BigInt(book.application.deployBlock);
+      // Every request this account has sent: once that many submissions are found, older blocks hold none, so the scan (newest
+      // first) ends at its first request. Requests to another application count too; they only let the scan run on to `start`.
+      const total = await client.readContract({ address: endpoint, abi: endpointAbi, functionName: "facilitatorNonces", args: [sender], blockNumber: head });
       const chunks: [bigint, bigint][] = [];
-      for (let from = start; from <= head; from += 10_000n) chunks.push([from, from + 9_999n < head ? from + 9_999n : head]);
-      const mine = (await Promise.all(chunks.map(([fromBlock, toBlock]) => client.getLogs({ address: endpoint, event: events.RequestSubmitted, args: { applicationId: app, sender: getAddress(account) }, fromBlock, toBlock })))).flat();
-      const ids = mine.map((l) => l.args.requestId!);
-      const receipts: { requestId: Hex; txHash: Hex; data: Hex }[] = [];
-      // Receipts land after their submissions, in any later chunk; topic lists stay short.
-      for (let i = 0; i < ids.length; i += 50) {
-        for (const [fromBlock, toBlock] of chunks) {
-          const logs = await client.getLogs({ address: endpoint, event: events.UserEvent, args: { applicationId: app, requestId: ids.slice(i, i + 50) }, fromBlock, toBlock });
-          receipts.push(...logs.map((l) => ({ requestId: l.args.requestId!, txHash: l.transactionHash!, data: l.args.encryptedData! })));
+      for (let to = head; to >= start; to -= LOG_BLOCKS) chunks.push([to - LOG_BLOCKS + 1n > start ? to - LOG_BLOCKS + 1n : start, to]);
+      let count = 0n;
+      const found = (await inFours(chunks.map(([fromBlock, toBlock]) => async () => {
+        const logs = await client.getLogs({ address: endpoint, event: events.RequestSubmitted, args: { applicationId: app, sender }, fromBlock, toBlock });
+        count += BigInt(logs.length);
+        return { toBlock, fromBlock, logs };
+      }), () => count >= total)).filter((c) => c.logs.length);
+      // ponytail: a receipt is read in its request's chunk and the next one (1,000-2,000 blocks); a completion slower than that is
+      // listed as "No private record". Topic lists stay at 50 IDs.
+      const reads: (() => Promise<{ requestId: Hex; txHash: Hex; data: Hex }[]>)[] = [];
+      for (const { fromBlock: from, toBlock: to, logs } of found) {
+        const ranges: [bigint, bigint][] = to < head ? [[from, to], [to + 1n, to + LOG_BLOCKS < head ? to + LOG_BLOCKS : head]] : [[from, to]];
+        for (let i = 0; i < logs.length; i += 50) {
+          const requestId = logs.slice(i, i + 50).map((l) => l.args.requestId!);
+          for (const [fromBlock, toBlock] of ranges) reads.push(async () => (await client.getLogs({ address: endpoint, event: events.UserEvent, args: { applicationId: app, requestId }, fromBlock, toBlock }))
+            .map((l) => ({ requestId: l.args.requestId!, txHash: l.transactionHash!, data: l.args.encryptedData! })));
         }
       }
+      const receipts = (await inFours(reads)).flat();
+      const mine = found.flatMap((c) => c.logs).sort((a, b) => a.blockNumber! === b.blockNumber! ? a.logIndex! - b.logIndex! : a.blockNumber! < b.blockNumber! ? -1 : 1);
       return mine.map((l) => {
         const own = receipts.filter((r) => r.requestId === l.args.requestId);
         return { requestId: l.args.requestId!, block: l.blockNumber!, txHash: own[0]?.txHash ?? l.transactionHash!, ciphertexts: own.map((r) => hexToBytes(r.data)) };

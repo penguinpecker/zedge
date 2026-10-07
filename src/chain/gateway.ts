@@ -19,9 +19,20 @@ export type ChainSnapshot = { chainId: NetworkId; blockNumber: bigint; blockHash
 function fresh(timestamp: bigint) {
   if (Math.abs(Date.now() / 1000 - Number(timestamp)) > 180) throw new Error("The network response is stale. Refresh before continuing.");
 }
+// Each network has one pinned endpoint, so its chain id is read once per page, not on every poll. A mismatch is never remembered.
+const confirmedChains = new Set<number>();
+async function requireChain(client: { getChainId(): Promise<number> }, chainId: number, message: string) {
+  if (confirmedChains.has(chainId)) return;
+  if (await client.getChainId() !== chainId) throw new Error(message);
+  confirmedChains.add(chainId);
+}
+const settled = <T>(result: PromiseSettledResult<T>): T => {
+  if (result.status === "rejected") throw result.reason;
+  return result.value;
+};
 export async function readChain(chainId: NetworkId): Promise<ChainSnapshot> {
   const client = chainClient(chainId);
-  if (await client.getChainId() !== chainId) throw new Error("RPC returned a different network.");
+  await requireChain(client, chainId, "RPC returned a different network.");
   const block = await client.getBlock();
   if (block.number === null || !block.hash) throw new Error("Waiting for a confirmed block.");
   fresh(block.timestamp);
@@ -120,42 +131,53 @@ export type RoundState = {
 };
 export type RoundRead = { roundId: Hex; phase: number; start: bigint; round: RoundState | null };
 /** Captions under the two price boxes. Phase 7 is Voided; phase 8 can be voided now and, with no opening price, can never resolve.
- * While this round has not been read at the displayed block (a new block, or a failed read) its state is unknown, so nothing is promised. */
-export function priceCaptions(read: RoundRead | null, verified: boolean, failed = false): { opening: string; closing: string } {
+ * While this round has not been read at the displayed block (a new block, or a failed read) its state is unknown, so nothing is promised.
+ * `loading`: the market checks have not finished yet (first load or a refresh), so "not verified" is not a failure yet. */
+export function priceCaptions(read: RoundRead | null, verified: boolean, failed = false, loading = false): { opening: string; closing: string } {
   const round = read?.round, phase = read?.phase;
   const opened = Boolean(round?.openedAt);
-  const pending = !verified || (failed && !read) ? "Unavailable" : !read ? "Loading…" : phase === 0 ? "No scheduled round" : null;
+  const pending = !verified ? loading ? "Loading…" : "Unavailable" : failed && !read ? "Unavailable" : !read ? "Loading…" : phase === 0 ? "No scheduled round" : null;
   return {
     opening: opened ? "Verified opening observation" : pending ?? (phase === 7 || phase === 8 ? "No opening price recorded" : "Awaiting opening observation"),
     closing: round?.outcome === 3 ? "Round voided" : round?.resolvedAt ? "Verified closing observation"
       : pending ?? (phase === 8 ? opened ? "No closing price delivered" : "Can only be voided" : "Awaiting resolution"),
   };
 }
+/** How far back the round view can go (the chart's price history keeps 120 minutes); the next round is the furthest ahead. */
+export const OLDEST_ROUND_OFFSET = -6;
 export async function readRound(deployment: VerifiedDeployment, snapshot: ChainSnapshot, asset: 0 | 1, duration: 300 | 900, offset: number): Promise<RoundRead> {
-  if (deployment.manifest.chainId !== snapshot.chainId || ![-1, 0, 1].includes(offset)) throw new Error("Invalid round request.");
+  if (deployment.manifest.chainId !== snapshot.chainId || !Number.isInteger(offset) || offset < OLDEST_ROUND_OFFSET || offset > 1) throw new Error("Invalid round request.");
   fresh(snapshot.timestamp);
   const client = chainClient(snapshot.chainId);
-  if (await client.getChainId() !== snapshot.chainId) throw new Error("Round RPC network mismatch.");
-  const address = deployment.manifest.contracts.registry.address;
-  // The cached verification is older than this block, and the registry's owner can replace its code at any block.
-  // An upgrade or ownership change is refused here, at the block the round is read at, and not only when the cache expires.
-  if (deployment.manifest.schemaVersion === 3) await verifyRegistryControl(deployment.manifest, streamsReader(client, snapshot.blockNumber));
+  await requireChain(client, snapshot.chainId, "Round RPC network mismatch.");
+  const address = deployment.manifest.contracts.registry.address, blockNumber = snapshot.blockNumber;
   const start = snapshot.timestamp / BigInt(duration) * BigInt(duration) + BigInt(offset * duration);
+  // Reads that do not depend on each other go out together, as one batch each: the registry's control check with the round id, then the phase with the round.
+  // The cached verification is older than this block, and the registry's owner can replace its code at any block.
+  // An upgrade or ownership change is refused here, at the block the round is read at, and its mismatch is reported over any other read's failure.
   // roundIdFor and phase have the same read signature across both reviewed schemas.
-  const roundId = await client.readContract({ address, abi: registryReadAbi, functionName: "roundIdFor", args: [asset, duration, start], blockNumber: snapshot.blockNumber });
-  const phase = await client.readContract({ address, abi: registryReadAbi, functionName: "phase", args: [roundId], blockNumber: snapshot.blockNumber });
+  const [control, id] = await Promise.allSettled([
+    deployment.manifest.schemaVersion === 3 ? verifyRegistryControl(deployment.manifest, streamsReader(client, blockNumber)) : null,
+    client.readContract({ address, abi: registryReadAbi, functionName: "roundIdFor", args: [asset, duration, start], blockNumber }),
+  ]);
+  settled(control);
+  const roundId = settled(id);
+  // getRound reverts for a round that was never scheduled, so its answer is used only when the phase says the round exists.
+  const roundState: Promise<RoundState> = deployment.manifest.schemaVersion === 3
+    ? client.readContract({ address, abi: streamsRegistryReadAbi, functionName: "getRound", args: [roundId], blockNumber }).then((raw) => {
+      const observation = (value: typeof raw.opening): ObservationRead => ({ price: value.price, decimals: value.decimals, observedAt: BigInt(value.observationsTimestamp), validFrom: BigInt(value.validFromTimestamp), reportHash: value.reportHash });
+      return { ...raw, resolutionDeadline: null, opening: observation(raw.opening), closing: observation(raw.closing) };
+    })
+    : client.readContract({ address, abi: registryReadAbi, functionName: "getRound", args: [roundId], blockNumber }).then((raw) => {
+      const observation = (value: typeof raw.opening): ObservationRead => ({ price: value.price, decimals: -value.exponent, observedAt: value.publishTime, validFrom: null, reportHash: null });
+      return { ...raw, voidableAfter: null, opening: observation(raw.opening), closing: observation(raw.closing) };
+    });
+  const [phaseRead, roundRead] = await Promise.allSettled([client.readContract({ address, abi: registryReadAbi, functionName: "phase", args: [roundId], blockNumber }), roundState]);
+  const phase = settled(phaseRead);
   if (phase > 8) throw new Error("Unsupported market phase.");
   let round: RoundState | null = null;
   if (phase !== 0) {
-    if (deployment.manifest.schemaVersion === 3) {
-      const raw = await client.readContract({ address, abi: streamsRegistryReadAbi, functionName: "getRound", args: [roundId], blockNumber: snapshot.blockNumber });
-      const observation = (value: typeof raw.opening): ObservationRead => ({ price: value.price, decimals: value.decimals, observedAt: BigInt(value.observationsTimestamp), validFrom: BigInt(value.validFromTimestamp), reportHash: value.reportHash });
-      round = { ...raw, resolutionDeadline: null, opening: observation(raw.opening), closing: observation(raw.closing) };
-    } else {
-      const raw = await client.readContract({ address, abi: registryReadAbi, functionName: "getRound", args: [roundId], blockNumber: snapshot.blockNumber });
-      const observation = (value: typeof raw.opening): ObservationRead => ({ price: value.price, decimals: -value.exponent, observedAt: value.publishTime, validFrom: null, reportHash: null });
-      round = { ...raw, voidableAfter: null, opening: observation(raw.opening), closing: observation(raw.closing) };
-    }
+    round = settled(roundRead);
     if (round.asset !== asset || round.duration !== duration || round.start !== start || round.end !== start + BigInt(duration)) throw new Error("Round identity did not match.");
   }
   const anchored = await client.getBlock({ blockNumber: snapshot.blockNumber });
@@ -170,17 +192,22 @@ export async function gasBalance(chainId: NetworkId, address: Address): Promise<
   return client.getBalance({ address });
 }
 
-export type TransactionRead = { hash: Hex; status: "pending" | "success" | "reverted"; confirmations: bigint; from: Address; blockNumber: bigint | null };
-export async function readTransaction(chainId: NetworkId, hash: string): Promise<TransactionRead> {
+/** `network` is where the transaction was found: Base (8453) or one of the markets' networks. */
+export type TransactionRead = { hash: Hex; status: "pending" | "success" | "reverted"; confirmations: bigint; from: Address; blockNumber: bigint | null; network: NetworkId | 8453 };
+export async function readTransaction(chainId: NetworkId | 8453, hash: string): Promise<TransactionRead> {
   if (!isHash(hash)) throw new Error("Enter a 32-byte transaction hash.");
-  const client = chainClient(chainId);
-  if (await client.getChainId() !== chainId) throw new Error("Network mismatch.");
+  const client = chainId === 8453 ? baseClient() : chainClient(chainId);
+  await requireChain(client, chainId, "Network mismatch.");
   const tx = await client.getTransaction({ hash });
-  if (tx.blockNumber === null) return { hash, status: "pending", confirmations: 0n, from: tx.from, blockNumber: null };
+  if (tx.blockNumber === null) return { hash, status: "pending", confirmations: 0n, from: tx.from, blockNumber: null, network: chainId };
   const [receipt, head] = await Promise.all([client.getTransactionReceipt({ hash }), client.getBlockNumber()]);
   const block = await client.getBlock({ blockNumber: receipt.blockNumber });
   if (!receipt.blockHash || receipt.blockHash !== block.hash || tx.blockHash !== receipt.blockHash) throw new Error("Transaction inclusion changed; retry.");
-  return { hash, status: receipt.status, confirmations: head >= receipt.blockNumber ? head - receipt.blockNumber + 1n : 0n, from: tx.from, blockNumber: receipt.blockNumber };
+  return { hash, status: receipt.status, confirmations: head >= receipt.blockNumber ? head - receipt.blockNumber + 1n : 0n, from: tx.from, blockNumber: receipt.blockNumber, network: chainId };
+}
+/** Deposits and payouts are on Base, which is checked first; orders and account requests are on the markets' network. */
+export async function findTransaction(network: NetworkId, hash: string): Promise<TransactionRead> {
+  try { return await readTransaction(8453, hash); } catch { return readTransaction(network, hash); }
 }
 
 export function exactObservationPrice(price: bigint, decimals: number): string {
@@ -190,6 +217,7 @@ export function exactObservationPrice(price: bigint, decimals: number): string {
 export function observationPrice(price: bigint, exponent: number): string {
   if (!Number.isInteger(exponent) || exponent < -18 || exponent > 0 || price <= 0n) throw new Error("Invalid oracle price.");
   const unit = 10n ** BigInt(-exponent);
-  const cents = price * 100n / unit;
+  // Rounded half up to cents, the one display rule for prices; settlement compares the exact values.
+  const cents = (price * 100n + unit / 2n) / unit;
   return `$${(cents / 100n).toLocaleString("en-US")}.${(cents % 100n).toString().padStart(2, "0")}`;
 }

@@ -1,8 +1,8 @@
-/** Sign-in for chain mode: Privy's popup (email, Google, X or Apple) with an embedded wallet for every user, when this build carries
+/** Sign-in for chain mode: Privy's popup (Google or X) with an embedded wallet for every user, when this build carries
  * a Privy app ID; without one, sign-in is closed and every private feature stays locked. ZEDGE's own signatures (its requests, the
  * Base deposit permit and the key challenge) are signed silently; the relayer pays every network fee. */
-import { createContext, lazy, Suspense, useContext, useMemo, type ReactNode } from "react";
-import { PrivyProvider, getIdentityToken, usePrivy, useSignMessage, useSignTypedData, useWallets } from "@privy-io/react-auth";
+import { createContext, lazy, Suspense, useContext, useMemo, useState, type ReactNode } from "react";
+import { PrivyProvider, getIdentityToken, useLogin, usePrivy, useSignMessage, useSignTypedData, useWallets } from "@privy-io/react-auth";
 import { defineChain, type Address } from "viem";
 import { BASE_RPC, NETWORKS } from "./networks.ts";
 import { normalizeSignature } from "./orderbook-manifest.ts";
@@ -14,7 +14,9 @@ export type ChainWallet = {
   configured: boolean;
   /** The embedded wallet, once signed in. Its address is also the user's Base deposit address. */
   session: WalletSession | null;
+  /** True while Privy is still loading: Sign in buttons should be disabled until it is false. */
   pending: boolean;
+  /** Why the last sign-in failed, in plain English; empty when it succeeded or the user closed the popup. */
   error: string;
   connect(): void;
   disconnect(): void;
@@ -30,15 +32,28 @@ const APP_ID = typeof import.meta.env.VITE_PRIVY_APP_ID === "string" && /^[a-z0-
 // `vite --mode fork` only. Vite replaces MODE at build time, so a production build drops the fork path and its module.
 const FORK = import.meta.env.MODE === "fork";
 const ForkBoundary = FORK ? lazy(() => import("./private/test-signer.ts").then((m) => ({ default: m.ForkBoundary(WalletContext) }))) : null;
+// The site connects no Solana wallets. Passing an empty set stops Privy's "Solana wallet login enabled, but no Solana wallet
+// connectors" console warning, which it prints whenever that login is on in the Privy dashboard (turning it off there is the full fix).
+const NO_SOLANA_WALLETS = { onMount() {}, onUnmount() {}, get: () => [] };
+const SIGN_IN_ERRORS: Record<string, string> = {
+  exited_auth_flow: "", // the user closed the popup
+  disallowed_login_method: "That sign-in option is off for this site. Use Google or X.",
+  too_many_requests: "Too many sign-in attempts. Wait a minute and try again.",
+};
 const BASE = defineChain({ id: 8453, name: "Base", nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 }, rpcUrls: { default: { http: [BASE_RPC] } }, blockExplorers: { default: { name: "Basescan", url: "https://basescan.org" } } });
 
 export function WalletBoundary({ children }: { children: ReactNode }) {
   if (ForkBoundary) return <Suspense fallback={null}><ForkBoundary>{children}</ForkBoundary></Suspense>;
   if (!APP_ID) return <WalletContext.Provider value={closed}>{children}</WalletContext.Provider>;
   return <PrivyProvider appId={APP_ID} config={{
-    // Socials only: every user gets an embedded wallet, so there is nothing to install, switch or fund.
-    loginMethods: ["email", "google", "twitter", "apple"],
-    appearance: { walletChainType: "ethereum-only", theme: "dark", accentColor: "#c7f86f" },
+    // Google and X only (owner decision 2026-10-07: email and Apple are off in the Privy dashboard). Every user gets an
+    // embedded wallet, so there is nothing to install, switch or fund.
+    loginMethods: ["google", "twitter"],
+    // The site's charcoal and lime (chain.css --bg, --lime) and its logo. walletList keeps browser-extension wallets detected
+    // but leaves out Coinbase, Base Account and WalletConnect, so Privy no longer loads the Coinbase SDK on every visit (its
+    // "configured chains are not supported by Coinbase Smart Wallet" message and two HEAD requests to the page).
+    appearance: { walletChainType: "ethereum-only", walletList: ["detected_ethereum_wallets"], theme: "#101311", accentColor: "#c7f86f", logo: "/favicon.svg" },
+    externalWallets: { solana: { connectors: NO_SOLANA_WALLETS } },
     // No global `showWalletUIs: false`: it would silence every signature and transaction any code on the page asks for.
     embeddedWallets: { ethereum: { createOnLogin: "all-users" } },
     defaultChain: NETWORKS[26514], supportedChains: [NETWORKS[26514], BASE],
@@ -52,7 +67,13 @@ export function jsonTypedData(data: TypedData) {
 }
 
 function PrivyBridge({ children }: { children: ReactNode }) {
-  const { ready, authenticated, login, logout, getAccessToken } = usePrivy();
+  const { ready, authenticated, logout, getAccessToken } = usePrivy();
+  const [error, setError] = useState("");
+  // Memoized: Privy re-subscribes these callbacks whenever the object changes.
+  const { login } = useLogin(useMemo(() => ({
+    onComplete: () => setError(""),
+    onError: (code: string) => setError(SIGN_IN_ERRORS[code] ?? "Sign-in did not finish. Try again."),
+  }), []));
   const { wallets } = useWallets();
   const { signMessage } = useSignMessage();
   const { signTypedData } = useSignTypedData();
@@ -67,10 +88,10 @@ function PrivyBridge({ children }: { children: ReactNode }) {
       signTypedData: async (data) => normalizeSignature((await signTypedData(jsonTypedData(data), silent)).signature),
     } : null;
     return {
-      configured: true, pending: !ready, error: "", signer,
+      configured: true, pending: !ready, error, signer,
       // The embedded wallet signs for any chain: the network step is always done.
       session: address ? { address, chainId: 26514, generation: 0 } : null,
-      connect: () => login(),
+      connect: () => { setError(""); login(); },
       disconnect: () => void logout(),
       async authHeaders(): Promise<Record<string, string>> {
         // The identity token is optional: Privy issues one only when the app turns it on, and the relayer then checks the wallet is linked.
@@ -80,6 +101,6 @@ function PrivyBridge({ children }: { children: ReactNode }) {
         return identity ? { authorization: `Bearer ${access}`, "privy-id-token": identity } : { authorization: `Bearer ${access}` };
       },
     };
-  }, [embedded, address, ready, login, logout, getAccessToken, signMessage, signTypedData]);
+  }, [embedded, address, ready, error, login, logout, getAccessToken, signMessage, signTypedData]);
   return <WalletContext.Provider value={value}>{children}</WalletContext.Provider>;
 }

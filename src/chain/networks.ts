@@ -57,10 +57,11 @@ export function parseChainId(value: unknown): number {
 
 export function parseAtomicAmount(value: string, decimals: number): bigint {
   if (!Number.isInteger(decimals) || decimals < 0 || decimals > 18) throw new Error("Invalid token precision.");
-  if (!/^(0|[1-9]\d*)(\.\d+)?$/.test(value) || value.length > 100) throw new Error("Enter a positive amount without separators.");
+  // ".5" and leading zeros ("05") are what people type; exponents, signs, separators and a trailing "." are not amounts.
+  if (!/^(\d+(\.\d+)?|\.\d+)$/.test(value) || value.length > 100) throw new Error("Enter a positive amount without separators.");
   const [whole, fraction = ""] = value.split(".");
   if (fraction.length > decimals) throw new Error("Too many decimal places.");
-  const result = BigInt(whole) * 10n ** BigInt(decimals) + BigInt(fraction.padEnd(decimals, "0") || "0");
+  const result = BigInt(whole || "0") * 10n ** BigInt(decimals) + BigInt(fraction.padEnd(decimals, "0") || "0");
   if (result <= 0n || result > 2n ** 256n - 1n) throw new Error("Amount is outside the supported range.");
   return result;
 }

@@ -251,7 +251,7 @@ test("a check that completed and did not pass is a mismatch, a read that failed 
   }
 });
 
-test("every round read checks the registry's implementation, owner and pending owner again at the block it reads", async () => {
+test("every round read checks the registry's implementation, owner and pending owner again at the block it reads, in three requests", async () => {
   // The real readRound over a fake JSON-RPC endpoint. A verification is cached for two minutes; the registry's owner can replace its code in any block.
   const { m } = mockReaders();
   const registry = m.contracts.registry, other: Address = "0x1111111111111111111111111111111111111111";
@@ -260,20 +260,29 @@ test("every round read checks the registry's implementation, owner and pending o
   const released = { implementation: registry.implementation, owner: registry.owner, pendingOwner: zero };
   let state = released;
   const readAt = new Set<unknown>();
+  const reverted = Symbol("reverted");
   const answer = (method: string, params: unknown[]): unknown => {
     if (method === "eth_chainId") return toHex(26514);
     if (method === "eth_getBlockByNumber") return { number: block, hash: blockHash, timestamp: toHex(now) };
     readAt.add(params.at(-1));
     if (method === "eth_getStorageAt") return word(params[1] === STREAMS_SLOTS.implementation ? state.implementation : zero);
     const { functionName } = decodeFunctionData({ abi: streamsRegistryReadAbi, data: (params[0] as { data: Hex }).data });
+    // The registry reverts getRound for a round that was never scheduled. A replaced registry may revert anything, and its mismatch is still what is reported.
+    if (functionName === "getRound" || (functionName === "roundIdFor" && state !== released)) return reverted;
     const result = { roundIdFor: blockHash, phase: 0, owner: state.owner, pendingOwner: state.pendingOwner }[functionName as string];
     return encodeFunctionResult({ abi: streamsRegistryReadAbi, functionName, result: result as never });
   };
+  let requests = 0, chainIdReads = 0;
   const realFetch = globalThis.fetch;
   globalThis.fetch = (async (_url: unknown, init?: { body?: unknown }) => {
     type Call = { id: number; method: string; params?: unknown[] };
     const body = JSON.parse(String(init?.body)) as Call | Call[];
-    const reply = (call: Call) => ({ jsonrpc: "2.0", id: call.id, result: answer(call.method, call.params ?? []) });
+    requests++;
+    const reply = (call: Call) => {
+      if (call.method === "eth_chainId") chainIdReads++;
+      const result = answer(call.method, call.params ?? []);
+      return result === reverted ? { jsonrpc: "2.0", id: call.id, error: { code: 3, message: "execution reverted" } } : { jsonrpc: "2.0", id: call.id, result };
+    };
     return new Response(JSON.stringify(Array.isArray(body) ? body.map(reply) : reply(body)), { headers: { "content-type": "application/json" } });
   }) as typeof fetch;
   try {
@@ -284,8 +293,13 @@ test("every round read checks the registry's implementation, owner and pending o
       await assert.rejects(readRound(deployment, snapshot, 0, 300, 0), StreamsMismatchError, JSON.stringify(changed));
     }
     state = released;
-    assert.equal((await readRound(deployment, snapshot, 0, 300, 0)).phase, 0);
+    // Independent reads go out together: the control check with the round id, the phase with the round, then the block anchor.
+    const before = requests;
+    assert.equal((await readRound(deployment, snapshot, 0, 300, -6)).phase, 0);
+    assert.equal(requests - before, 3);
+    assert.equal(chainIdReads, 1, "the network's chain id is read once per page, not once per round read");
     assert.deepEqual([...readAt], [block]);
+    for (const offset of [-7, 2, 0.5]) await assert.rejects(readRound(deployment, snapshot, 0, 300, offset), /Invalid round request/);
   } finally { globalThis.fetch = realFetch; }
 });
 
@@ -343,6 +357,8 @@ test("price boxes never promise an observation that a voided or void-only round 
   // The round may be voided, so neither box may say a price is awaited.
   assert.deepEqual(priceCaptions(null, true), { opening: "Loading…", closing: "Loading…" });
   assert.deepEqual(priceCaptions(null, true, true), { opening: "Unavailable", closing: "Unavailable" });
+  // Market checks still running on first load or a refresh: loading, not unavailable.
+  assert.deepEqual(priceCaptions(null, false, false, true), { opening: "Loading…", closing: "Loading…" });
 });
 
 test("Market Rules does not call the price contracts fixed without naming what they depend on that can change", async () => {

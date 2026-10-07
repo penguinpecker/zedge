@@ -40,8 +40,8 @@ export default function LegalPage({ page, mode }: { page: LegalPageId; mode: "ch
           <h1>{document.title}</h1>
           <p className="legal-summary">{document.summary}</p>
           <div className="legal-meta">
-            {document.draft && <span className="legal-draft">Preview draft</span>}
-            <span>Updated <time dateTime="2026-10-05">5 October 2026</time></span>
+            {document.draft && <span className="legal-draft">Draft</span>}
+            <span>Updated <time dateTime="2026-10-07">7 October 2026</time></span>
           </div>
         </div>
 
@@ -53,7 +53,7 @@ export default function LegalPage({ page, mode }: { page: LegalPageId; mode: "ch
         </article>
 
         <div className="legal-ending">
-          <p>ZEDGE preview · Real-money trading has not launched.</p>
+          <p>ZEDGE · The live market trades real USDC.</p>
           <a href="#page-top">Back to top <ArrowUp size={16} aria-hidden="true" /></a>
         </div>
       </main>

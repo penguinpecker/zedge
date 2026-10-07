@@ -45,6 +45,11 @@ function requireAvailable(url: string) {
   if (rpcCooldownRemaining(url) > 0) throw new Error("Network busy or unavailable. Retry after the cooldown.");
 }
 
+function backOff(url: string, delay: number) {
+  // Older in-flight success/error responses must not clear or shorten an active cooldown.
+  cooldowns.set(url, Math.max(cooldowns.get(url) ?? 0, performance.now() + delay));
+}
+
 /** Only pinned public endpoints; no automatic retry, fallback, or cached security verification. */
 export function rpcTransport(url: string) {
   requireEndpoint(url);
@@ -58,13 +63,16 @@ export function rpcTransport(url: string) {
     fetchFn(input, init) {
       // viem awaits its request hook. Recheck synchronously at fetch to close that microtask gap.
       requireAvailable(url);
-      return fetch(input, init);
+      // A 429 without CORS headers (thirdweb's) reaches the page only as a failed fetch, with no status or Retry-After to read,
+      // so any request that got no response backs off like a 429 without Retry-After. A timeout (aborted) does not.
+      return fetch(input, init).catch((error: unknown) => {
+        if (!init?.signal?.aborted) backOff(url, DEFAULT_DELAY);
+        throw error;
+      });
     },
     onFetchResponse(response) {
       if (response.status !== 429 && response.status !== 503) return;
-      const until = performance.now() + retryDelay(response.headers.get("retry-after"));
-      // Older in-flight success/error responses must not clear or shorten an active cooldown.
-      cooldowns.set(url, Math.max(cooldowns.get(url) ?? 0, until));
+      backOff(url, retryDelay(response.headers.get("retry-after")));
     },
   });
 }

@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
-import { hexToBytes, keccak256, recoverTypedDataAddress, toHex, type Address, type Hex, type PublicClient } from "viem";
+import { encodeAbiParameters, hexToBytes, keccak256, parseAbiParameters, recoverTypedDataAddress, toHex, type Address, type Hex, type PublicClient } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { decrypt, encrypt, exportPublicKeyToHex, generateKeyPair, importPublicKeyFromHex } from "@horizen/vela-common-ts";
 import { KEY_CHALLENGE_START, engineRound, parseOrderbookManifest, requestTypedData, signable, type VerifiedOrderbook } from "../orderbook-manifest.ts";
@@ -147,7 +147,7 @@ async function stack(options: { relayRefuses?: (body: RelayBody) => { code: stri
   };
   /** Cash credited outside this client (a deposit made earlier); the account sees it with its next receipt. */
   const fund = (account: string, amount: number) => { views.get(account)!.cash += amount; sequence++; };
-  return { book, chain, relay, sent, log, views, fund, settles, wallet: () => wallet };
+  return { book, chain, relay, sent, log, views, fund, settles, nonces, wallet: () => wallet };
 }
 
 function wallet(key = generatePrivateKey(), sign?: (m: string) => Promise<Hex>): Signer & { calls: number } {
@@ -170,10 +170,10 @@ test("unlock derives the key silently, registers it only when the chain has none
   const s = await stack(), signer = wallet();
   const { account, phases, hints } = open(s, signer);
   await account.unlock();
-  assert.deepEqual(s.log, ["no key", "associate", "sync"]);
+  assert.deepEqual(s.log, ["associate", "sync"], "request nonce 0: no request ever, so no key; no sync that can only fail");
   assert.equal(account.snapshot.registered, true);
   assert.equal(account.snapshot.view?.nonce, 0);
-  assert.equal(s.sent[1].kind === "request" && (s.sent[1].payload.length - 2) / 2, 133, "ASSOCIATEKEY carries the 133-byte key, never a seed");
+  assert.equal(s.sent[0].kind === "request" && (s.sent[0].payload.length - 2) / 2, 133, "ASSOCIATEKEY carries the 133-byte key, never a seed");
   const register = phases("Register key");
   assert.deepEqual([register[0], register[1], register[3], register[4]], ["Signing", "Sending", "Waiting for the operator", "Key registered"]);
   assert.match(register[2], /^Submitted · 0x[0-9a-f]{8}…$/);
@@ -182,7 +182,12 @@ test("unlock derives the key silently, registers it only when the chain has none
   // A second unlock with the same wallet derives the same key and registers nothing.
   const again = open(s, signer, hints);
   await again.account.unlock();
-  assert.deepEqual(s.log.slice(3), ["sync"]);
+  assert.deepEqual(s.log.slice(2), ["sync"]);
+  // An account that sent requests but has no key (a refused registration) learns it from its first sync.
+  const other = wallet();
+  s.nonces.set(other.address, 1n);
+  await open(s, other).account.unlock();
+  assert.deepEqual(s.log.slice(3), ["no key", "associate", "sync"]);
 });
 
 test("a wallet that derives a different key than before is stopped before any request, and nothing re-registers", async () => {
@@ -196,13 +201,18 @@ test("a wallet that derives a different key than before is stopped before any re
   assert.equal(s.sent.length, sentBefore);
 });
 
-test("a Base deposit needs no unlock and sends nothing on Horizen", async () => {
+test("a Base deposit needs no unlock and sends nothing on Horizen; once credited, the account unlocks itself", async () => {
   const s = await stack(), signer = wallet();
   const { account } = open(s, signer);
-  await account.depositFromBase(20_000_000n);
-  // This stack has no keeper to make the engine take the record, so the deposit stops at its second stage.
+  // This stack's engine refunds a deposit for an account it has never seen, so the deposit stops at its second stage.
+  assert.equal(await account.depositFromBase(20_000_000n), "refunded");
   assert.equal(account.snapshot.actions.find((x) => x.action === "Deposit")?.stage, 2);
   assert.deepEqual(s.sent.map((x) => x.kind), ["base-deposit"]);
+  // Credited to a known account that this page has not unlocked: it unlocks (one silent signature, a sync), so a buy can follow.
+  const reload = open(s, signer);
+  await open(s, signer).account.unlock();
+  assert.equal(await reload.account.depositFromBase(20_000_000n), "credited");
+  assert.deepEqual([reload.account.snapshot.unlocked, reload.account.snapshot.view?.cash], [true, 20_000_000]);
 });
 
 test("one-click deposit: a silent permit to the vault, sent by the relayer, then Sent on Base, Reached Horizen, Credited, and the new balance", async () => {
@@ -286,7 +296,7 @@ test("relayer refusals map to short sentences with a retry time, and nothing ret
   const { account, phases } = open(s, wallet());
   await assert.rejects(account.unlock(), /Too many requests\. Try again in 20s\./);
   assert.equal(s.sent.length, 1);
-  assert.equal(phases("Unlock").at(-1), "Too many requests. Try again in 20s.");
+  assert.equal(phases("Register key").at(-1), "Too many requests. Try again in 20s.");
   assert.equal(relayText({ code: "QUEUE_BUSY", retryAfter: 20 }), "The exchange queue is busy. Try again in 20s.");
   assert.equal(relayText({ code: "BUDGET_EXHAUSTED", retryAfter: 7200 }, Date.UTC(2026, 9, 6, 22, 0)), "ZEDGE's network-fee budget for today is used up. Try again at 00:00 UTC.");
   assert.equal(relayText({ code: "SOMETHING_NEW" }), "ZEDGE's relayer refused the request.");
@@ -388,7 +398,7 @@ test("a refused first setup leaves the account locked with Set up in place; the 
   refuse = false;
   await account.unlock();
   assert.deepEqual([account.snapshot.unlocked, account.snapshot.registered, account.snapshot.view?.nonce], [true, true, 0]);
-  assert.deepEqual(s.log, ["no key", "associate", "sync"]);
+  assert.deepEqual(s.log, ["associate", "sync"]);
 });
 
 test("a book result that is not back is never shown as applied: a second collect, then the line finishes when it does come back", async () => {
@@ -531,6 +541,25 @@ test("a held round's public result is shown once, with what it paid, and the bal
   assert.equal(syncs(), before + 1);
   await account.checkResults();
   assert.equal(syncs(), before + 1, "shown once");
+  // A failing read is said once and spaced out; a minute after the end the round gets one sync anyway; the result still shows.
+  const f = await stack(), settled = f.chain.settled;
+  let now = (ROUND + 900 + 20) * 1000, reads = 0, fail = true;
+  f.chain.settled = async (ids, from) => { reads++; if (fail) throw new Error("HTTP request failed. Status: 429"); return settled(ids, from); };
+  const b = new PrivateAccount(f.book, wallet(), f.chain, f.relay, { hints: memory(), now: () => now, sleep: async () => {} });
+  await b.unlock();
+  f.fund(b.account, 10_000_000);
+  await b.mint(ROUND, 2_000_000);
+  const bSyncs = () => f.log.filter((x) => x === "sync").length, bBefore = bSyncs(), lines = () => b.snapshot.actions.filter((x) => x.action === "Round result");
+  await b.checkResults();
+  await b.checkResults();
+  assert.deepEqual([reads, lines().map((x) => x.text)], [1, ["Round results could not be read. Trying again."]], "the next read waits 10 s");
+  now += 45_000;
+  await b.checkResults();
+  assert.deepEqual([reads, bSyncs(), lines().length], [2, bBefore + 1, 1], "failed again a minute after the end: one sync, still one line");
+  now += 30_000; fail = false;
+  f.settles.push({ roundId: engineRound(f.book, ROUND).spec.registryRoundId, outcome: 1 });
+  await b.checkResults();
+  assert.deepEqual([lines().map((x) => x.text), bSyncs()], [["Up won · 2 USDC credited"], bBefore + 2]);
 });
 
 test("settling from the chain: the request nonce first, then the calldata that carried the signature; 'absent' only past the deadline", async () => {
@@ -554,4 +583,42 @@ test("settling from the chain: the request nonce first, then the calldata that c
   assert.equal(await settle(), "absent");
   logs.push({ args: { requestId: ours }, blockNumber: 21n, transactionHash: ours });
   assert.deepEqual(await settle(), { requestId: ours, block: 21n, txHash: ours });
+});
+
+test("History and round results read logs in 1,000-block ranges, four at a time, and History stops at the account's first request", async () => {
+  const s = await stack(), account = wallet().address;
+  const head = BigInt(s.book.application.deployBlock) + 30_500n, id = (n: number) => keccak256(toHex(`req:${n}`));
+  // Three requests; the second sits on the last block of its range, so its receipt lands in the next one.
+  const submitted = [{ n: 1, block: head - 2_500n }, { n: 2, block: head - 1_000n }, { n: 3, block: head - 5n }];
+  const receipts = [{ n: 1, block: head - 2_490n }, { n: 2, block: head - 990n }, { n: 3, block: head - 3n }];
+  const roundId = engineRound(s.book, ROUND).spec.registryRoundId.toLowerCase() as Hex;
+  const settle = encodeAbiParameters(parseAbiParameters("bytes32, uint256, uint256, uint256, uint256, bytes32, uint256"), [roundId, 2n, 1n, 0n, 0n, roundId, 0n]);
+  let total = 3n, inFlight = 0, peak = 0;
+  const asked: { event: string; from: bigint; to: bigint }[] = [];
+  const client = {
+    getBlockNumber: async () => head,
+    readContract: async () => total,
+    getLogs: async ({ event, args, fromBlock, toBlock }: { event: { name: string }; args: { requestId?: Hex[] }; fromBlock: bigint; toBlock: bigint | "latest" }) => {
+      if (typeof toBlock !== "bigint" || toBlock - fromBlock + 1n > 1_000n) throw new Error("Log response size exceeded. Maximum allowed number of requested blocks is 1000");
+      asked.push({ event: event.name, from: fromBlock, to: toBlock });
+      peak = Math.max(peak, ++inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      inFlight--;
+      const within = (x: { block: bigint }) => x.block >= fromBlock && x.block <= toBlock;
+      if (event.name === "RequestSubmitted") return submitted.filter(within).map((x) => ({ args: { requestId: id(x.n) }, blockNumber: x.block, logIndex: 0, transactionHash: id(x.n) }));
+      if (event.name === "UserEvent") return receipts.filter((x) => within(x) && args.requestId!.includes(id(x.n))).map((x) => ({ args: { requestId: id(x.n), encryptedData: toHex(x.n) }, transactionHash: keccak256(toHex(`done:${x.n}`)) }));
+      return [{ args: { data: settle } }];
+    },
+  } as unknown as PublicClient;
+  const chain = viemChain(client, s.book, client);
+  const history = await chain.history(account, 0n);
+  assert.deepEqual(history.map((h) => [h.requestId, h.ciphertexts.length]), [[id(1), 1], [id(2), 1], [id(3), 1]], "in chain order, each with its receipt");
+  assert.ok(asked.filter((x) => x.event === "RequestSubmitted").every((x) => x.from >= head - 3_999n), "one wave of four ranges found all three requests");
+  assert.ok(peak <= 4);
+  // Requests to another application keep the count short of the total: the scan runs on to the deploy block, still in safe ranges.
+  total = 5n; asked.length = 0; peak = 0;
+  assert.equal((await chain.history(account, 0n)).length, 3);
+  assert.equal(asked.filter((x) => x.event === "RequestSubmitted").at(-1)?.from, BigInt(s.book.application.deployBlock));
+  assert.ok(peak <= 4);
+  assert.deepEqual(await chain.settled([roundId], 0n), [{ roundId, outcome: 1 }], "the results read asks for the last 1,000 blocks, never \"latest\"");
 });
