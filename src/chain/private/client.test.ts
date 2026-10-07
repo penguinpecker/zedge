@@ -196,7 +196,16 @@ test("a wallet that derives a different key than before is stopped before any re
   assert.equal(s.sent.length, sentBefore);
 });
 
-test("one-click deposit: a silent permit to the vault, sent by the relayer, then Sent on Base, On its way, Credited, and the new balance", async () => {
+test("a Base deposit needs no unlock and sends nothing on Horizen", async () => {
+  const s = await stack(), signer = wallet();
+  const { account } = open(s, signer);
+  await account.depositFromBase(20_000_000n);
+  // This stack has no keeper to make the engine take the record, so the deposit stops at its second stage.
+  assert.equal(account.snapshot.actions.find((x) => x.action === "Deposit")?.stage, 2);
+  assert.deepEqual(s.sent.map((x) => x.kind), ["base-deposit"]);
+});
+
+test("one-click deposit: a silent permit to the vault, sent by the relayer, then Sent on Base, Reached Horizen, Credited, and the new balance", async () => {
   const s = await stack(), signer = wallet();
   const { account, phases } = open(s, signer);
   await account.unlock();
@@ -204,7 +213,8 @@ test("one-click deposit: a silent permit to the vault, sent by the relayer, then
   const deposit = s.sent.at(-2)!;
   assert.ok(deposit.kind === "base-deposit" && deposit.owner === signer.address && deposit.amount === "20000000" && (deposit.permit.length - 2) / 2 === 65);
   const seen = phases("Deposit");
-  assert.deepEqual(seen, ["Signing", "Sending", "Sent on Base", "On its way (about 25 s)", "Arrived · crediting", "Credited · 20 USDC"]);
+  assert.deepEqual(seen, ["Signing", "Sending", "Sent on Base", "Reaching Horizen (about 25 s)", "Reached Horizen · crediting", "Credited · 20 USDC"]);
+  assert.equal(account.snapshot.actions.find((x) => x.action === "Deposit")?.stage, 3);
   assert.equal(account.snapshot.actions.find((x) => x.action === "Deposit")?.chain, 8453, "the transaction link is Base's");
   assert.equal(account.snapshot.view?.cash, 20_000_000, "the sync after the credit reads the new balance");
   assert.equal(account.snapshot.wallet, 30_000_000n);

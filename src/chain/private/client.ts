@@ -63,7 +63,7 @@ export type View = NonNullable<ReceiptBody["view"]>;
 type Outcome = NonNullable<ReceiptBody["outcome"]>;
 export type Phase = "signing" | "sending" | "submitted" | "waiting" | "staged" | "matching" | "collecting" | "done" | "refused" | "failed";
 /** `chain` names where `tx` is: Horizen unless it is a Base transaction. */
-export type ActionState = { id: number; action: string; phase: Phase; text: string; tx?: Hex; chain?: 8453 | 26514; startedAt: number; final: boolean };
+export type ActionState = { id: number; action: string; phase: Phase; text: string; tx?: Hex; chain?: 8453 | 26514; /** Deposit only: stages done of Sent on Base, Reached Horizen, Credited. */ stage?: 1 | 2 | 3; startedAt: number; final: boolean };
 export type HistoryEntry = { requestId: Hex; block: bigint; txHash: Hex; text: string; readable: boolean };
 export type Order = { roundStart: number; outcome: "up" | "down"; side: "buy" | "sell"; price: number; quantity: number; tif: "ioc" | "gtc"; expiry: number };
 
@@ -71,6 +71,7 @@ const DEADLINE_SECONDS = 120n;
 const STILL_WAITING = "Still waiting for the operator. Nothing is resent; your request is on chain.";
 const OUTCOME_UNKNOWN = "Outcome unknown — checking the chain";
 const NETWORK_BUSY = "Waiting (network busy)";
+const NETWORK_DOWN = "The network is busy. Nothing was sent. Try again in a minute.";
 export const NOT_SUBMITTED = "The request could not be sent. Nothing was submitted.";
 export const KEY_CHANGED = "Your wallet produced a different private key than before. Private records stay unreadable until this is resolved.";
 const DEPOSIT_DEADLINE = 1_200n, MONEY_WAIT = 900_000;
@@ -176,11 +177,11 @@ export class PrivateAccount {
 
   get snapshot(): Snapshot { return this.#state; }
   #set(patch: Partial<Snapshot>) { this.#state = { ...this.#state, ...patch }; if (!this.#closed) this.#onChange(this.#state); }
-  #action(action: string): (phase: Phase, text: string, tx?: Hex, chain?: 8453 | 26514) => void {
+  #action(action: string): (phase: Phase, text: string, tx?: Hex, chain?: 8453 | 26514, stage?: 1 | 2 | 3) => void {
     const id = ++this.#actionId, startedAt = this.#now();
-    return (phase, text, tx, chain) => {
+    return (phase, text, tx, chain, stage) => {
       const prior = this.#state.actions.find((x) => x.id === id);
-      const next: ActionState = { id, action, phase, text, tx: tx ?? prior?.tx, chain: tx ? chain : prior?.chain, startedAt, final: ["done", "refused", "failed"].includes(phase) };
+      const next: ActionState = { id, action, phase, text, tx: tx ?? prior?.tx, chain: tx ? chain : prior?.chain, stage: stage ?? prior?.stage, startedAt, final: ["done", "refused", "failed"].includes(phase) };
       this.#set({ actions: [next, ...this.#state.actions.filter((x) => x.id !== id)].slice(0, 12) });
     };
   }
@@ -242,7 +243,9 @@ export class PrivateAccount {
     const step = this.#action(label);
     try {
       step("signing", "Signing");
-      const ctx = await this.#chain.context(this.account);
+      // A busy RPC (a 429 and this page's cooldown) is waited out, as #landed does; nothing is signed before the read succeeds.
+      const ctx = await this.#poll(() => this.#chain.context(this.account), this.#now() + 90_000);
+      if (!ctx) throw new PublicError(NETWORK_DOWN, "NETWORK_BUSY");
       // The operator keys are read in the same batch as the nonce: a changed executor key stops every signature.
       if (ctx.teeSigner.toLowerCase() !== this.#book.authenticator.teeSigner || ctx.enclaveKey.toLowerCase() !== this.#book.authenticator.enclavePublicKey) throw new PublicError(OPERATOR_KEYS_CHANGED);
       const deadline = ctx.timestamp + DEADLINE_SECONDS;
@@ -262,6 +265,7 @@ export class PrivateAccount {
       }
       return { completion, step, submission };
     } catch (error) {
+      if (!(error instanceof PublicError)) console.warn("ZEDGE request failed", error);
       const message = error instanceof PublicError ? error.message : "The request could not complete.";
       if (!(error instanceof PublicError && error.code === "NO_KEY")) step("failed", message);
       throw error instanceof PublicError ? error : new PublicError(message);
@@ -427,17 +431,20 @@ export class PrivateAccount {
   /** One-click deposit: a silent Base USDC permit to the vault, sent by the relayer (no gas from the user). Then the record's way,
    * from the chain alone: Sent on Base, On its way (the Horizen inbox), Credited or Refunded (the guest's `credit` event). */
   depositFromBase(amount: bigint): Promise<void> {
-    return this.#serial(async () => {
+    // Not queued behind Horizen requests: a Base deposit uses no request nonce and needs no unlock (the engine registers a new
+    // account on its first credit), so a stuck unlock or a Horizen halt cannot hold it.
+    return (async () => {
       const c = this.#book.custody, min = BigInt(c.vault.limits.minDeposit), max = BigInt(c.vault.limits.maxDeposit);
       if (amount < min || amount > max) throw new PublicError(`Deposits are ${usd(min)} to ${usd(max)}.`);
       const step = this.#action("Deposit");
       try {
         step("signing", "Signing");
-        const ctx = await this.#chain.baseContext(this.account);
+        const ctx = await this.#poll(() => this.#chain.baseContext(this.account), this.#now() + 90_000);
+        if (!ctx) throw new PublicError(NETWORK_DOWN, "NETWORK_BUSY");
         if (ctx.balance < amount) throw new PublicError("Your wallet holds less than this deposit.");
         const deadline = ctx.timestamp + DEPOSIT_DEADLINE;
         const permit = await this.#signed(usdcPermitTypedData(c, { owner: this.account, value: amount, nonce: ctx.permitNonce, deadline }));
-        const horizenFrom = await this.#chain.head();
+        const horizenFrom = await this.#chain.head().catch(() => null);
         step("sending", "Sending");
         const answer = await this.#relay.post({ kind: "base-deposit", owner: this.account, amount: amount.toString(), deadline: deadline.toString(), permit });
         if (refusedBeforeSending(answer)) throw new PublicError(relayText(answer, this.#now()), answer.code, answer.retryAfter);
@@ -445,23 +452,25 @@ export class PrivateAccount {
         // The permit cannot be used past its deadline: no Deposited event by then (a minute's grace for lagging logs) means none.
         const sent = await this.#poll(() => this.#chain.deposited(this.account, ctx.block), this.#now() + Number(DEPOSIT_DEADLINE + 60n) * 1000);
         if (!sent) throw new PublicError(NOT_SUBMITTED, "NOT_SUBMITTED");
-        step("submitted", "Sent on Base", sent.txHash, 8453);
-        step("waiting", "On its way (about 25 s)");
+        step("submitted", "Sent on Base", sent.txHash, 8453, 1);
+        step("waiting", "Reaching Horizen (about 25 s)");
         if (!await this.#poll(() => this.#chain.arrived(sent.index), this.#now() + MONEY_WAIT)) return step("waiting", "Still on its way. It is credited when it arrives; nothing more is needed.");
-        step("waiting", "Arrived · crediting");
-        const credit = await this.#poll(() => this.#chain.credited(sent.index, horizenFrom), this.#now() + MONEY_WAIT);
-        if (!credit) return step("waiting", "Arrived · waiting for the exchange to credit it");
+        step("waiting", "Reached Horizen · crediting", undefined, undefined, 2);
+        // ponytail: 300 blocks (5 min at 1 s blocks) back when the pre-send read failed; thirdweb caps getLogs at 1,000 blocks.
+        const from = horizenFrom ?? await this.#chain.head() - 300n;
+        const credit = await this.#poll(() => this.#chain.credited(sent.index, from), this.#now() + MONEY_WAIT);
+        if (!credit) return step("waiting", "Reached Horizen · waiting for the exchange to credit it");
         if (credit.status !== 1) step("refused", "Refunded: the exchange could not take this deposit. It is paid back to your wallet on Base.");
         else {
-          step("done", `Credited · ${usd(credit.amount)}`);
-          if (this.#state.unlocked) await this.#sync("Sync");
+          step("done", `Credited · ${usd(credit.amount)}`, undefined, undefined, 3);
+          if (this.#state.unlocked) await this.sync().catch(() => undefined);
         }
       } catch (error) {
         const message = error instanceof PublicError ? error.message : "The deposit could not complete.";
         step("failed", message);
         throw error instanceof PublicError ? error : new PublicError(message);
       } finally { await this.refreshFunds().catch(() => undefined); }
-    });
+    })();
   }
 
   /** One-click withdrawal of the trading balance (up to the vault's largest payout) to this same address on Base: Requested,

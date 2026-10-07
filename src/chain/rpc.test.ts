@@ -93,7 +93,7 @@ test("HTTP-date Retry-After is honored and elapsed cooldown uses monotonic time"
   assert.equal(calls, 2);
 });
 
-test("missing or malformed Retry-After defaults to 60 seconds on 429 and 503", async (t) => {
+test("missing or malformed Retry-After defaults to 5 seconds on 429 and 503", async (t) => {
   const time = clock(t);
   let header: string | undefined;
   let status = 429;
@@ -103,11 +103,11 @@ test("missing or malformed Retry-After defaults to 60 seconds on 429 and 503", a
     header = value;
     status = status === 429 ? 503 : 429;
     await assert.rejects(request());
-    assert.equal(rpcCooldownRemaining(horizen), 60_000, String(value));
+    assert.equal(rpcCooldownRemaining(horizen), 5_000, String(value));
     const before = calls;
     await assert.rejects(request());
     assert.equal(calls, before);
-    time.advance(60_000);
+    time.advance(5_000);
   }
 });
 

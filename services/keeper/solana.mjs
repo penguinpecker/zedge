@@ -79,7 +79,7 @@ export const reportOf = data => payloadOf(base58(data));
 // What the top-level instructions of a transaction that call a VERIFYING method decode to, whatever their feed.
 // Instructions that do not decode (malformed data) are skipped. A transaction is at most 1,232 bytes: an answer
 // whose instruction data alone is longer is no transaction (a hostile endpoint) and is not decoded at all.
-const reportsIn = transaction => {
+export const reportsIn = transaction => {
   const message = transaction?.transaction?.message, instructions = message?.instructions, keys = message?.accountKeys;
   if (!Array.isArray(instructions) || !Array.isArray(keys) || instructions.reduce((n, i) => n + (typeof i?.data === 'string' ? i.data.length : 0), 0) > 2048) return [];
   return instructions.flatMap(instruction => {

@@ -59,10 +59,12 @@ export function usePrivate(wallet: ChainWallet, orderbook: VerifiedOrderbook | n
       // One click less: the first account after sign-in unlocks itself (one silent signature, then a sync). After Lock it waits for a click.
       if (generation === 0) void run((a) => a.unlock());
     }, () => { if (live) setError("Private features could not load. Refresh to try again."); });
+    // The Base balance is shown live while signed in: USDC sent from elsewhere appears within 10 s.
+    const funds = setInterval(() => void created?.refreshFunds().catch(() => undefined), 10_000);
     // The key lives in this tab's memory only: drop it on sign-out, account change and tab close.
     const lock = () => created?.lock();
     window.addEventListener("pagehide", lock);
-    return () => { live = false; created?.lock(); account.current = null; window.removeEventListener("pagehide", lock); };
+    return () => { live = false; clearInterval(funds); created?.lock(); account.current = null; window.removeEventListener("pagehide", lock); };
     // Keyed on the release, the relayer and the address on purpose: a re-render must not recreate the account and drop its key.
   }, [key]);
 

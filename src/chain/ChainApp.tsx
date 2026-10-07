@@ -91,7 +91,7 @@ function Ticket({ priv, orderbook, wallet, round, chainNow, feed, onAccount, onF
     <div className="chain-outcomes"><button aria-pressed={outcome === "up"} onClick={() => setOutcome("up")}><ArrowUpRight size={23} /><strong>Up</strong><span>{cents(fair("up"))}</span></button><button className="down" aria-pressed={outcome === "down"} onClick={() => setOutcome("down")}><ArrowDownRight size={23} /><strong>Down</strong><span>{cents(fair("down"))}</span></button></div>
     <label htmlFor="chain-stake">Stake · USDC</label>
     <input id="chain-stake" inputMode="decimal" value={stake} onChange={(event) => setStake(event.target.value)} aria-invalid={pay < 0 || pay > cash} autoComplete="off" />
-    <dl className="chain-account-values"><div><dt>Trading balance</dt><dd>{unlocked && view ? usdc(cash) : <><LockKey size={12} /> Locked</>}</dd></div>
+    <dl className="chain-account-values"><div><dt>On Base</dt><dd>{priv.snapshot?.wallet == null ? "—" : usdc(priv.snapshot.wallet)}</dd></div><div><dt>Trading balance</dt><dd>{unlocked && view ? usdc(cash) : <><LockKey size={12} /> Locked</>}</dd></div>
       <div><dt>Shares / pays if right</dt><dd>{quantity ? `${shares(quantity)} / ${usdc(quantity)}` : "—"}</dd></div></dl>
     <button className="button primary chain-full" disabled={!enabled} onClick={action}>{label}</button>
     {(["up", "down"] as const).filter((side) => free(side) > 0).map((side) => <div className="chain-position" key={side}><span>You hold {shares(free(side))} {side === "up" ? "Up" : "Down"}</span>
@@ -128,6 +128,9 @@ function ChainMarkets() {
   const [loadedRoundKey, setLoadedRoundKey] = useState("");
   const round = verified && loadedRoundKey === currentRoundKey ? roundRead : null;
   const openAccount = () => setDrawer("account");
+  // Onboarding is one popup: signing in from the header opens the wallet (deposit address and balance) once the session exists.
+  const signingIn = useRef(false);
+  useEffect(() => { if (wallet.session && signingIn.current) { signingIn.current = false; setDrawer("account"); } }, [wallet.session]);
   const orderbookCheck = active?.orderbook;
   const orderbook = verified && orderbookCheck && verificationIsFresh(orderbookCheck) ? orderbookCheck.value : null;
   // The private account (its key, in memory) outlives a check that only lapsed until the next poll re-verifies it, as
@@ -280,11 +283,12 @@ function ChainMarkets() {
       <nav className="main-nav" aria-label="Main navigation">{(["markets", "portfolio", "history"] as const).map((item) => <button key={item} className={page === item ? "active" : ""} aria-current={page === item ? "page" : undefined} onClick={() => setPage(item)}>{item[0].toUpperCase() + item.slice(1)}</button>)}</nav>
       <div className="header-actions">
         <label className="chain-network-select"><span className="sr-only">Market network</span><select id="chain-network" name="network" value={network} onChange={(event) => { const next = Number(event.target.value); if (isNetworkId(next)) { setNetwork(next); setRoundOffset(0); } }}><option value={26514}>Horizen mainnet</option></select></label>
-        <button className="button primary chain-connect" onClick={wallet.configured && !wallet.session ? () => wallet.connect() : openAccount}><Wallet size={18} /><span>{wallet.session ? `${wallet.session.address.slice(0, 6)}…${wallet.session.address.slice(-4)}` : "Sign in"}</span></button>
+        {wallet.session && <button className="chain-balance" onClick={openAccount} aria-label="Wallet balance">{priv.snapshot?.wallet == null ? "…" : usdc(priv.snapshot.wallet + BigInt(priv.snapshot.view?.cash ?? 0))}</button>}
+        <button className="button primary chain-connect" onClick={wallet.configured && !wallet.session ? () => { signingIn.current = true; wallet.connect(); } : openAccount}><Wallet size={18} /><span>{wallet.session ? `${wallet.session.address.slice(0, 6)}…${wallet.session.address.slice(-4)}` : "Sign in"}</span></button>
       </div>
     </div></header>
     <main id="chain-main" className="app-main" tabIndex={-1}>
-      <div className="page-heading trading-heading"><div><div className="intro-eyebrow"><span className="eyebrow">The short-term prediction exchange</span></div><h1>{page === "markets" ? <>Find your edge<span>.</span></> : page === "portfolio" ? <>Your positions<span>.</span></> : <>Your history<span>.</span></>}</h1><p>{page === "markets" ? "Big conviction. Short rounds. What’s your next move?" : page === "portfolio" ? "Your positions and balance." : "Your orders, fills and settled predictions."}</p></div><button className="chain-security-link" onClick={() => setDrawer("security")}><LockKey size={18} />{unlocked ? "Account unlocked" : "Account locked"} <CaretRight size={14} /></button></div>
+      {page !== "markets" && <div className="page-heading trading-heading"><div><h1>{page === "portfolio" ? <>Your positions<span>.</span></> : <>Your history<span>.</span></>}</h1></div></div>}
       {(connectionError || (!verified && (planned || offline))) && <div className="chain-status-banner"><Info size={21} /><div><strong>{connectionError ? "Market checks unavailable" : planned ? "Public markets not available yet" : "Public markets unavailable"}</strong><p>{connectionError || offline}</p></div><button className="icon-button" aria-label="Refresh markets" disabled={refreshing || cooldownRemaining(network) > 0} onClick={refreshMarkets}><ArrowsClockwise size={20} /></button></div>}
       {active?.rpcError && !connectionError && <p className="chain-error" role="alert">{active.rpcError}</p>}
       {page === "markets" ? <>

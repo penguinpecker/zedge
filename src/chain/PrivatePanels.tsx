@@ -1,7 +1,7 @@
 /** The signed-in user's private records: resting orders, positions and history, read from their own decrypted receipts.
  * Nothing here is fetched from ZEDGE; everything comes from the chain and this tab's key. */
 import { useEffect, useState } from "react";
-import { ArrowSquareOut } from "@phosphor-icons/react";
+import { ArrowSquareOut, Check } from "@phosphor-icons/react";
 import { formatUnits } from "viem";
 import { parseAtomicAmount, transactionExplorerUrl } from "./networks.ts";
 import { engineRound, LOT, type VerifiedOrderbook } from "./orderbook-manifest.ts";
@@ -18,6 +18,20 @@ export function ActionLine({ snapshot, names }: { snapshot: Snapshot | null; nam
   const a = snapshot?.actions.find((x) => names.includes(x.action));
   if (!a) return null;
   return <p className={a.phase === "failed" || a.phase === "refused" ? "chain-error" : "chain-copy"} role="status">{a.action}: {a.text}{a.tx && <> · <a href={transactionExplorerUrl(a.chain ?? 26514, a.tx)} target="_blank" rel="noreferrer">View transaction <ArrowSquareOut size={12} /></a></>}</p>;
+}
+
+const DEPOSIT_STAGES = ["Sent on Base", "Reached Horizen", "Credited"] as const;
+/** The latest deposit in three stages, each set from its own chain signal (client.ts depositFromBase). */
+export function DepositSteps({ snapshot }: { snapshot: Snapshot | null }) {
+  const a = snapshot?.actions.find((x) => x.action === "Deposit");
+  if (!a) return null;
+  const done = a.stage ?? 0, broken = a.phase === "failed" || a.phase === "refused";
+  return <div className="chain-deposit-steps" role="status">
+    <ol>{DEPOSIT_STAGES.map((label, i) => <li key={label} className={i < done ? "done" : i === done && !a.final ? "now" : ""}>
+      <span>{i < done ? <Check size={12} weight="bold" /> : i + 1}</span>{label}
+      {i === 0 && a.tx && a.chain === 8453 && <a href={transactionExplorerUrl(8453, a.tx)} target="_blank" rel="noreferrer" aria-label="View on Base"><ArrowSquareOut size={12} /></a>}</li>)}</ol>
+    {(broken || (!a.final && done === 0)) && <p className={broken ? "chain-error" : "chain-copy"}>{a.text}</p>}
+  </div>;
 }
 
 export function PrivateOrders({ priv, book, roundStart }: { priv: PrivateState; book: Book; roundStart: number | null }) {

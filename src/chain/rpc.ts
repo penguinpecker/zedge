@@ -8,7 +8,8 @@ const endpoints = new Set<string>([
   BASE_RPC,
 ]);
 const cooldowns = new Map<string, number>();
-const DEFAULT_DELAY = 60_000;
+// thirdweb sends no Retry-After with its 429s; a minute-long pause blanked the market after one busy moment.
+const DEFAULT_DELAY = 5_000;
 const MIN_DELAY = 1_000;
 const MAX_DELAY = 3_600_000;
 

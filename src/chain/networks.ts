@@ -8,7 +8,7 @@ const HORIZEN_RPC = import.meta.env?.MODE === "fork" ? "http://127.0.0.1:38945"
 // Reads go to a keyed gateway set at build time (VITE_BASE_RPC_URL), else Base's own endpoint: publicnode refuses
 // historical receipts and state, which the release checks need. STREAMS_RPCS stays the reviewed name in the manifest.
 export const BASE_RPC = import.meta.env?.MODE === "fork" ? "http://127.0.0.1:39301"
-  : /^https:\/\/8453\.rpc\.thirdweb\.com\/[0-9a-f]{32}$/.test(String(import.meta.env?.VITE_BASE_RPC_URL ?? "")) ? String(import.meta.env.VITE_BASE_RPC_URL) : "https://mainnet.base.org";
+  : /^https:\/\/(8453\.rpc\.thirdweb\.com\/[0-9a-f]{32}|base-mainnet\.g\.alchemy\.com\/v2\/[A-Za-z0-9_-]{16,64})$/.test(String(import.meta.env?.VITE_BASE_RPC_URL ?? "")) ? String(import.meta.env.VITE_BASE_RPC_URL) : "https://mainnet.base.org";
 
 export const NETWORKS = {
   2651420: defineChain({

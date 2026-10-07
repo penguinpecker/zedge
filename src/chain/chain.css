@@ -93,6 +93,24 @@
 .chain-drawer-nav button { padding: 12px 17px; color: var(--muted); font-size: 12px; border-bottom: 2px solid transparent; }
 .chain-drawer-nav button[aria-current="page"] { color: var(--lime); border-color: var(--lime); }
 .chain-drawer-content { padding: 25px 26px 40px; display: grid; gap: 20px; }
+.chain-popup { inset: 0; margin: auto; width: min(420px, calc(100% - 32px)); height: fit-content; max-height: min(720px, calc(100dvh - 32px)); border: 1px solid var(--line); border-radius: 14px; }
+.chain-popup .chain-drawer-heading { align-items: center; padding: 20px 22px 4px; }
+.chain-popup .chain-drawer-content { padding: 14px 22px 22px; gap: 14px; }
+.chain-popup .chain-account-values { margin: 0; gap: 10px; font-size: 13px; }
+.chain-popup .chain-deposit-address { margin: 0; }
+.chain-popup .chain-qr { width: 96px; height: 96px; }
+.chain-deposit-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+.chain-deposit-row input { min-width: 0; }
+.chain-deposit-steps ol { list-style: none; margin: 0; padding: 0; display: flex; gap: 6px; flex-wrap: wrap; font-size: 11px; color: var(--muted); }
+.chain-deposit-steps li { display: flex; align-items: center; gap: 6px; padding: 6px 9px; border: 1px solid var(--line); border-radius: 999px; }
+.chain-deposit-steps li > span { display: grid; place-items: center; width: 16px; height: 16px; border-radius: 50%; border: 1px solid var(--line); font-size: 9px; }
+.chain-deposit-steps li.done { color: var(--text); border-color: #779945; }
+.chain-deposit-steps li.done > span { background: var(--lime); border-color: var(--lime); color: #111410; }
+.chain-deposit-steps li.now { color: var(--text); border-color: var(--lime); }
+.chain-deposit-steps li a { color: var(--muted); display: inline-flex; }
+.chain-deposit-steps p { margin: 8px 0 0; }
+.chain-popup-links { display: flex; flex-wrap: wrap; gap: 16px; font-size: 12px; }
+.chain-popup-links a { display: inline-flex; align-items: center; gap: 4px; }
 .chain-steps { list-style: none; padding: 0; margin: 0; display: grid; gap: 26px; }
 .chain-steps li { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 13px; }
 .chain-steps li > div { display: grid; gap: 11px; }
@@ -178,3 +196,4 @@
 @media (max-width: 420px) { .chain-deposit-address { grid-template-columns: 1fr; } }
 .chain-ticket label { display: block; margin: 0 0 6px; font-size: 11px; color: var(--muted); }
 .chain-position { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-top: 12px; font-size: 12px; }
+.chain-balance { padding: 10px 14px; border: 1px solid var(--line); border-radius: 8px; font-size: 13px; color: var(--text); background: var(--panel); white-space: nowrap; }

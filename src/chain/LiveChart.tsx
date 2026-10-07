@@ -87,6 +87,6 @@ export default function LiveChart({ start, cutoff, end, priceToBeat, onMarket }:
       {!latest && <p className="live-chart-wait" role="status">Connecting to the live price…</p>}
     </div>
     <p className="live-chart-source"><span className={`status-dot ${feed.status === "live" ? "" : "paused"}`} />
-      <span>Display price: {feed.source}. Settlement uses Chainlink Data Streams.{feed.status === "reconnecting" ? " Reconnecting…" : ""}</span></p>
+      <span>Chainlink BTC/USD{feed.status === "reconnecting" ? " · Reconnecting…" : ""}</span></p>
   </div>;
 }
