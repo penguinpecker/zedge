@@ -7,7 +7,7 @@ import { retryAfter } from './errors.mjs';
 // A copy is untrusted input like any other: main.mjs checks it as it checks the API's reports, and nothing is signed
 // unless the Base adapter verifies it in simulation. Read on 2026-10-06, both sources carried the BTC/USD report of
 // every 15-minute boundary of the previous 24 hours, the primary a median 4 s after it and the backup 1 s.
-const SOURCES = {
+export const SOURCES = {
   primary: '2SoQchZSfocDAagJDCpfzP3cYyrV6MzAUuAMH1vsmyt1', // Jupiter Forecast's keeper (ResolveMarketWithChainlink, UpdateMarketWithChainlink)
   backup: '2DeGBCAiEJd1MgMuPGDKh7svBikZa9izbnTn5p7ESzPt', // a round program (RecordOpen, ResolveRound; also SOL/USD, every minute)
 };

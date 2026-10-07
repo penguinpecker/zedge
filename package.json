@@ -29,6 +29,7 @@
     "ethers": "6.17.0",
     "jose": "6.2.12",
     "lightweight-charts": "5.2.1",
+    "postgres": "3.4.9",
     "qrcode": "1.5.4",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",

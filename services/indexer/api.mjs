@@ -1,0 +1,158 @@
+// The read API (README.md) for node:http. JSON; big integers are decimal strings; hashes 0x hex; ciphertexts base64. The site
+// reaches it same-origin through a Vercel rewrite, whose CDN shares the public GETs. An account is asked for in a POST body,
+// never in the URL, and that answer is never cached. Nothing here logs an address, an IP, a body or a URL: only error codes.
+import { gzipSync } from "node:zlib";
+import { decodeClock } from "../../adapters/vela/crypto/guest.ts";
+import { engineRound } from "../../src/chain/orderbook-manifest.ts";
+import { decodeSettle } from "../../src/chain/vault.ts";
+
+export const ROUND = 900, MAX_ROUNDS = 200, RESULTS_ROUNDS = 96, PRICE_MINUTES = 120, MAX_MINUTES = 1_440, PAGE = 50, MAX_PAGE = 100, MAX_BODY = 1_024;
+/** Balances below these get an alert in /v1/status (wei). The relayer's: twice its refusal floor (server/relay.ts RELAY_MIN_BALANCE_WEI). */
+export const LOW = { operator: 5_000_000_000_000_000n, house: 5_000_000_000_000_000n, relayer: 1_000_000_000_000_000n };
+const SHORT = "public, max-age=0, s-maxage=1, stale-while-revalidate=4";
+const FIXED = (s) => `public, max-age=0, s-maxage=${s}`;
+const KEYS = new Set(["address", "before", "limit"]);
+const refuse = (status, error) => Object.assign(new Error(error), { status });
+const int = (v) => /^[0-9]{1,12}$/.test(v ?? "") ? Number(v) : NaN;
+const count = (v) => Number.isSafeInteger(v) && v >= 0;
+
+/** At most `limit` per key in each 10 s window. */
+function windowed(limit, ms = 10_000) {
+  let at = -1, seen = new Map();
+  return (key, now) => {
+    const w = Math.floor(now / ms);
+    if (w !== at) { at = w; seen = new Map(); }
+    const k = (seen.get(key) ?? 0) + 1;
+    seen.set(key, k);
+    return k <= limit;
+  };
+}
+
+function only(params, allowed) {
+  for (const k of params.keys()) if (!allowed.includes(k) || params.getAll(k).length > 1) throw refuse(400, "Unknown or repeated parameter.");
+}
+
+function send(req, res, status, body, cache) {
+  let data = Buffer.from(JSON.stringify(body));
+  const headers = { "content-type": "application/json", "cache-control": cache, vary: "accept-encoding", "x-content-type-options": "nosniff" };
+  if (data.length > 1_024 && /\bgzip\b/.test(String(req.headers["accept-encoding"] ?? ""))) { data = gzipSync(data); headers["content-encoding"] = "gzip"; }
+  res.writeHead(status, headers).end(data);
+}
+
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    req.on("data", (c) => { size += c.length; if (size <= MAX_BODY) chunks.push(c); });
+    req.on("end", () => size > MAX_BODY ? reject(refuse(413, "Request too large.")) : resolve(Buffer.concat(chunks).toString("utf8")));
+    req.on("error", reject);
+  });
+}
+
+/** `deps`: { db (store.mjs reads), book, origin, now() in ms, chain() → { head, balances: { role: { address, wei } } }, log }. */
+export function handler(deps) {
+  const perClient = { GET: windowed(120), POST: windowed(20) }, perEdge = windowed(2_000);
+  const counted = new Set();
+  const price = (p) => p && [p.minute, Number(p.price) / 1e18];
+  const rounds = async (starts) => {
+    const ids = starts.map((s) => engineRound(deps.book, s).spec.registryRoundId), byRound = new Map(ids.map((id) => [id, []]));
+    for (const r of await deps.db.settles(ids)) {
+      const s = decodeSettle(r.data);
+      if (s) byRound.get(r.roundId)?.push({ kind: s.kind, outcome: s.outcome, price: s.price.toString(), observationsTimestamp: s.observationsTimestamp, reportHash: s.reportHash,
+        source: s.source, block: r.block, txHash: r.txHash, logIndex: r.logIndex });
+    }
+    // Kind 1 opens a round; 2 resolves it and 3 voids it.
+    return starts.map((start, i) => ({ start, registryRoundId: ids[i], open: byRound.get(ids[i]).find((s) => s.kind === 1) ?? null, settle: byRound.get(ids[i]).findLast((s) => s.kind !== 1) ?? null }));
+  };
+  const clock = (r) => {
+    try { const c = decodeClock(r.data); return { tick: c.tick.toString(), block: Number(c.block), timestamp: c.timestamp, applied: c.applied, skipped: c.skipped, deposits: c.deposits, txHash: r.txHash, logIndex: r.logIndex }; }
+    catch { return null; }
+  };
+
+  const routes = {
+    async "GET /v1/live"(params, now) {
+      only(params, []);
+      const start = Math.floor(now / ROUND) * ROUND;
+      const [head, last, list, latest] = await Promise.all([deps.db.head(), deps.db.clock(), rounds([start - ROUND, start, start + ROUND]), deps.db.latestPrice()]);
+      return [{ head, clock: last && clock(last), rounds: list, price: price(latest) }, SHORT];
+    },
+    async "GET /v1/btc"(params, now) {
+      only(params, ["minutes", "from", "to"]);
+      const minute = Math.floor(now / 60) * 60;
+      let from, to;
+      if (params.has("from") || params.has("to")) {
+        if (params.has("minutes")) throw refuse(400, "Ask for minutes or for from and to.");
+        from = int(params.get("from")); to = int(params.get("to"));
+        if (!(from % 60 === 0 && to % 60 === 0 && from <= to && to - from <= MAX_MINUTES * 60)) throw refuse(400, `from and to: minute starts at most ${MAX_MINUTES} minutes apart.`);
+      } else {
+        const n = params.has("minutes") ? int(params.get("minutes")) : PRICE_MINUTES;
+        if (!(n >= 1 && n <= MAX_MINUTES)) throw refuse(400, `minutes: 1 to ${MAX_MINUTES}.`);
+        to = minute; from = minute - n * 60;
+      }
+      // The body /api/btc serves: { prices: [[unixSeconds, usd], …] }, oldest first.
+      return [{ prices: (await deps.db.prices(from, to)).map(price) }, to < minute - 300 ? FIXED(3_600) : "public, max-age=0, s-maxage=2, stale-while-revalidate=30"];
+    },
+    async "GET /v1/rounds"(params, now) {
+      only(params, ["from", "to"]);
+      let from, to;
+      if (params.has("from") || params.has("to")) {
+        from = int(params.get("from")); to = int(params.get("to"));
+        if (!(from % ROUND === 0 && to % ROUND === 0 && from <= to && (to - from) / ROUND < MAX_ROUNDS)) throw refuse(400, `from and to: round starts, at most ${MAX_ROUNDS} rounds.`);
+      } else { to = Math.floor(now / ROUND) * ROUND; from = to - RESULTS_ROUNDS * ROUND; } // the last 24 hours and the current round
+      const starts = Array.from({ length: (to - from) / ROUND + 1 }, (_, i) => from + i * ROUND);
+      const [head, list] = await Promise.all([deps.db.head(), rounds(starts)]);
+      return [{ head, rounds: list }, to + ROUND + 7_200 < now ? FIXED(300) : "public, max-age=0, s-maxage=1, stale-while-revalidate=5"];
+    },
+    async "GET /v1/status"(params, now) {
+      only(params, []);
+      const [s, chain] = await Promise.all([deps.db.status(), deps.chain().catch(() => null)]);
+      const behindBlocks = chain && s.horizen ? chain.head - s.horizen.block : null, ageSeconds = s.minute === null ? null : now - s.minute;
+      const balances = chain && Object.fromEntries(Object.entries(chain.balances).map(([role, b]) => [role, { address: b.address, wei: b.wei.toString(), low: b.wei < LOW[role] }]));
+      // An uptime monitor can watch for `"alerts":[]`.
+      const alerts = [...(chain ? [] : ["chain unread"]), ...(behindBlocks > 30 ? ["horizen indexing behind"] : []), ...(ageSeconds === null || ageSeconds > 180 ? ["prices behind"] : []),
+        ...Object.entries(balances ?? {}).filter(([, b]) => b.low).map(([role]) => `${role} balance low`)];
+      return [{ horizen: s.horizen && { ...s.horizen, chainHead: chain?.head ?? null, behindBlocks }, solana: { minute: s.minute, ageSeconds }, balances, dbBytes: s.dbBytes, alerts }, FIXED(5)];
+    },
+    async "POST /v1/account"(params, _now, req) {
+      only(params, []);
+      if (req.headers.origin !== deps.origin) throw refuse(403, "Origin not allowed.");
+      let p;
+      try { p = JSON.parse(await readBody(req)); } catch (e) { throw e.status ? e : refuse(400, "Malformed request."); }
+      if (!p || typeof p !== "object" || Array.isArray(p) || Object.keys(p).some((k) => !KEYS.has(k))) throw refuse(400, "Expected { address, before?, limit? }.");
+      if (typeof p.address !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(p.address)) throw refuse(400, "address: 0x and 40 hex digits.");
+      const b = p.before;
+      if (b !== undefined && !(b && typeof b === "object" && Object.keys(b).sort().join() === "block,logIndex" && count(b.block) && count(b.logIndex))) throw refuse(400, "before: { block, logIndex }.");
+      const limit = p.limit ?? PAGE;
+      if (!(Number.isSafeInteger(limit) && limit >= 1 && limit <= MAX_PAGE)) throw refuse(400, `limit: 1 to ${MAX_PAGE}.`);
+      const [head, items] = await Promise.all([deps.db.head(), deps.db.account(p.address.toLowerCase(), b, limit + 1)]);
+      return [{ head, more: items.length > limit, requests: items.slice(0, limit) }, "no-store"];
+    },
+  };
+
+  return async (req, res) => {
+    const nowMs = deps.now(), method = req.method === "POST" ? "POST" : "GET";
+    // Keys: Railway's edge appends the address that connected to it, so the last X-Forwarded-For entry cannot be forged (the
+    // site's requests share Vercel's), and the one before it is the visitor as Vercel saw them (forgeable only by a direct
+    // caller, whom the per-edge window still bounds). README: the header check after a deploy, from each new entry count logged.
+    const xff = String(req.headers["x-forwarded-for"] ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+    if (!counted.has(xff.length) && counted.size < 8) { counted.add(xff.length); deps.log({ xffEntries: xff.length }); }
+    const edge = xff.at(-1) ?? req.socket?.remoteAddress ?? "", client = xff.at(-2) ?? edge;
+    let route = null;
+    try {
+      if (!perEdge(edge, nowMs) || !perClient[method](client, nowMs)) {
+        res.setHeader("retry-after", String(10 - Math.floor(nowMs / 1_000) % 10));
+        throw refuse(429, "Too many requests; slow down.");
+      }
+      const url = URL.parse(req.url ?? "/", "http://indexer");
+      if (!url) throw refuse(400, "Malformed URL.");
+      route = `${req.method} ${url.pathname}`;
+      if (!routes[route]) throw refuse(Object.keys(routes).some((r) => r.endsWith(` ${url.pathname}`)) ? 405 : 404, "Not found.");
+      const [body, cache] = await routes[route](url.searchParams, Math.floor(nowMs / 1_000), req);
+      send(req, res, 200, body, cache);
+    } catch (e) {
+      // Only a known route gets here without a status: never caller text.
+      if (!e.status) deps.log({ api: route, error: /^[A-Za-z0-9_]{1,40}$/.test(String(e?.code)) ? e.code : "UNKNOWN" });
+      if (!res.headersSent) send(req, res, e.status ?? 503, { error: e.status ? e.message : "Unavailable." }, "no-store");
+    }
+  };
+}

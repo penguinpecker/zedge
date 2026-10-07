@@ -15,6 +15,15 @@ jobs:
   frontend:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    services:
+      # A throwaway database for services/indexer/store.test.mjs.
+      postgres:
+        image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24 # 17.11
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: --health-cmd pg_isready --health-interval 2s --health-timeout 5s --health-retries 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -28,6 +37,9 @@ jobs:
       - run: npm run test:keeper
       - run: node --test services/market-maker/*.test.mjs
       - run: node --test services/payout-signer/*.test.mjs
+      - run: node --experimental-strip-types --test services/indexer/*.test.mjs
+        env:
+          TEST_DATABASE_URL: postgres://postgres@localhost:5432/postgres
       - run: node --test contracts/scripts/*.test.mjs
       # The Vela SDK in the private-trading chunk retains elliptic/GHSA-848j-6mx2-7j84 (low, no fix exists),
       # as in the sdk-crypto-evaluation job. See security/README.md. A passing job is not a clean audit claim.
