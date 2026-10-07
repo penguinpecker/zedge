@@ -161,6 +161,11 @@ test("plan: no cancel for an order expiring within max(12, 2 cycles), the self-c
   const noBid = { ...q, orders: q.orders.filter((o) => o.id !== id(q, "buy", "up")) };
   assert.deepEqual(plan(noBid, round, 9_041, 0.53, S1, { cycle: 6 }), { op: "cancel_order", orderId: id(q, "sell", "up") }, "self-trade prevention would cancel the new bid");
   assert.equal(plan(noBid, round, 9_041, 0.53, S1, { cycle: 10 }), null, "the Up ask expires within 20 s: wait for it");
+  // A slow queue: a refilled quote outlives two request cycles, or it could reach its commit already expired ("invalid order").
+  const noAsk = { ...four, orders: four.orders.filter((o) => o.id !== id(four, "sell", "up")) };
+  assert.equal(plan(noAsk, round, 9_001, 0.5, S).expiry, 9_060, "a normal cycle: the next grid slot, 59 s on");
+  assert.equal(plan(noAsk, round, 9_029, 0.5, S).expiry, 9_060, "31 s on is still more than two 6 s cycles");
+  assert.equal(plan(noAsk, round, 9_029, 0.5, S, { cycle: 20 }).expiry, 9_120, "20 s cycles: 31 s is too close, so the slot after");
 });
 
 /** The bot against a model exchange over one round: one request in flight at a time, each taking d() seconds; a command

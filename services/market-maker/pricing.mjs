@@ -138,7 +138,9 @@ export function plan(view, round, now, p, s, { cycle = 6, optional = true } = {}
     const own = mine.find((o) => o.outcome === outcome && o.side !== side && (side === "buy" ? price >= o.price : price <= o.price));
     if (own) { if (own.expiry > soon) return { op: "cancel_order", orderId: own.id }; continue; } // self-trade prevention would cancel the new one
     // Side k expires on its own grid, k quarter-lifetimes apart and 0.5 to 1.5 lifetimes ahead, so rotations never fall due together.
-    const x = now + Math.ceil(L / 2), phase = SIDES.indexOf(entry) * Math.floor(L / 4);
+    // Never sooner than SOON: a deep endpoint queue can commit a request 30 s or more after it is sent, and an order already
+    // expired at its commit is refused ("invalid order", counted toward the round's refusals).
+    const x = Math.max(now + Math.ceil(L / 2), soon), phase = SIDES.indexOf(entry) * Math.floor(L / 4);
     const order = { op: "place_order", roundId: round.id, outcome, side, price, quantity: Q, tif: "gtc", expiry: Math.min(x + (((phase - x) % L) + L) % L, round.cutoff - 60) };
     // mintSets sets, or only the shares this ask lacks when cash is short, so a small house still rests asks
     const lack = side === "sell" && held[outcome] < Q ? (v.cash >= s.mintSets * SHARE ? s.mintSets * SHARE : Q - held[outcome]) : 0;
