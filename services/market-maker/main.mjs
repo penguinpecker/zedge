@@ -9,6 +9,7 @@
 // Base gas); withdraw asks the engine for a payout to the house on Base, which the payout signer pays.
 import { createHash } from "node:crypto";
 import { closeSync, lstatSync, openSync, readFileSync, unlinkSync, writeSync } from "node:fs";
+import { createServer } from "node:http";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -55,6 +56,19 @@ function fail(message) { throw Object.assign(new Error(message), { refused: true
 /** The endpoint's shared queue is too full for this request. A cancel_all still goes out until one slot is left (the endpoint
  * refuses at 10): the relayer admits users up to 6 pending, and their requests must not keep stale house quotes alive. */
 export function queueFull(queue, op) { return queue >= (op === "cancel_all" ? 9n : 5n); }
+
+/** The /quotes body (README "Quotes for the site"): per outcome, the lowest resting sell (ask) and the highest resting buy (bid) of
+ * `view` in round r ({ id, start }) at chain time `now`, as { cents, shares }, or null where none rests; `at` in ms. */
+export function houseQuotes(view, r, now, at) {
+  const mine = view.orders.filter((o) => o.roundId === r.id && o.expiry > now && o.remaining > 0);
+  const best = (outcome, side) => {
+    const os = mine.filter((o) => o.outcome === outcome && o.side === side);
+    if (!os.length) return null;
+    const cents = (side === "sell" ? Math.min : Math.max)(...os.map((o) => o.price));
+    return { cents, shares: os.filter((o) => o.price === cents).reduce((n, o) => n + o.remaining, 0) / SHARE };
+  };
+  return { at, start: r.start, up: { ask: best("up", "sell"), bid: best("up", "buy") }, down: { ask: best("down", "sell"), bid: best("down", "buy") } };
+}
 
 /** --mainnet, or --fork with a loopback http URL. Nothing else runs. */
 export function target(a) {
@@ -413,7 +427,21 @@ async function main(argv) {
   const nap = () => new Promise((done) => { const timer = setTimeout(done, s.pollSeconds * 1000); wake = () => { clearTimeout(timer); done(); }; });
   let noted = "";
   const note = (reason, fields) => { if (reason !== noted) log("waiting", { reason, ...fields }); noted = reason; };
-  let r = null, errors = 0, beat = 0;
+  let r = null, errors = 0, beat = 0, clock = null; // clock: the latest decision's chain time and when it was read (ms)
+  // GET /quotes for the indexer on the private network: the house's resting quotes only, never balances or keys. Not under --dry-run,
+  // whose orders are simulated. Built per request from the latest view (a receipt shows at once) at the chain time now, the last read
+  // plus the time since, so a quote that expires while the bot waits on a request or an error drops out. A server error is logged
+  // and the bot quotes on without it.
+  if (process.env.HOUSE_QUOTES_PORT && !dry) {
+    const server = createServer((req, res) => {
+      if (req.method !== "GET" || req.url !== "/quotes") return res.writeHead(404).end();
+      const body = clock && houseQuotes(view, r, clock.now + Math.floor((Date.now() - clock.at) / 1000), clock.at);
+      res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" }).end(JSON.stringify(body));
+    });
+    const serverError = (e) => log("quotes server error", { code: e.code ?? e.name });
+    server.on("error", serverError);
+    try { server.listen(Number(process.env.HOUSE_QUOTES_PORT), "::", () => log("serving quotes", { port: server.address().port })); } catch (e) { serverError(e); }
+  }
   /** Queue and gas guards, read just before a request. A cancel_all goes out below the ETH floor while it can. */
   async function clear(c) {
     const [queue, eth] = await Promise.all([endpoint.getPendingRequestsSize(), provider.getBalance(account)]);
@@ -431,6 +459,7 @@ async function main(argv) {
       if (r) log("round done", { start: r.start, requests: r.requests, refusals: r.refusals, rpcCalls: rpcCalls - r.calls0, ethBefore: r.eth0, ethAfter: r.eth });
       r = { ...roundAt(start), blocked, requests: 0, refusals: 0, calls0: rpcCalls, open: null, sigma: null, crossChecked: !cross, crossChecks: 0, crossAt: 0 };
     }
+    clock = { now, at: Date.now() };
     if (stopping) { // cancel what rests in the open round, then exit
       if (!dry && view.orders.some((o) => o.roundId === r.id && o.expiry > now) && now < r.cutoff && (await clear({ op: "cancel_all" }))) await send({ op: "cancel_all", roundId: r.id });
       log("stopped", summary(view));

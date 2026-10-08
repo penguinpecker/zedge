@@ -110,6 +110,29 @@ With `--fork`, also give the fork's deployment. Every address must be lowercase.
 - **Errors.** Five network errors in a row stop the bot.
 - **Stopping.** On the first SIGTERM or SIGINT the bot finishes the request in flight, sends `cancel_all` if quotes still rest in the open round, and exits. A second signal exits at once.
 
+## Quotes for the site
+
+With `HOUSE_QUOTES_PORT` set (`deploy/railway/start.sh` sets 8080 unless it is set already), `run` serves `GET /quotes` on that port
+on every interface (`::`, so Railway's private network reaches it); anything else is a 404. The indexer reads it every second
+(`INDEXER_HOUSE_URL`) and passes it on as `house` in `/v1/live`, so the site shows the house's real prices.
+
+```
+{ "at": 1791400003000, "start": 1791399600,
+  "up":   { "ask": { "cents": 55, "shares": 10 }, "bid": { "cents": 47, "shares": 10 } },
+  "down": { "ask": { "cents": 53, "shares": 10 }, "bid": null } }
+```
+
+- **What it holds.** The house's resting orders in the open round as the bot knows them (its latest receipt, a staged command
+  applied whole), expired ones left out. Per outcome, `ask` is the lowest resting sell and `bid` the highest resting buy, with the
+  shares left at that price, or `null`. `at` is the time (ms) of the bot's latest decision, `start` the round. No balances, holdings
+  or keys.
+- **When it changes.** It is built at each request from the bot's latest view, so it changes right after every receipt (placed,
+  cancelled, a fill it learns about) and at each round change, when it starts empty. Expiry is checked at the chain time now (the
+  latest read plus the time since), so a quote that expires while the bot waits on a request drops out at once. It is `null` until
+  the first decision.
+- **Never in the way.** Not served under `--dry-run`, whose orders are simulated. A server error (a port in use, a bad port) is
+  logged as `quotes server error` and the bot quotes on without it.
+
 ## Logs
 
 Logs are one JSON line per event. They include the house's private view (cash, orders, holdings, stake), which is the operator's own data, so do not send these logs to a third party. A `round done` line records the round's requests, refusals, JSON-RPC calls and the house's ETH before and after.
@@ -128,6 +151,7 @@ The test runs offline in under a second. It checks:
 - **Round behaviour:** the mint, the four quotes, re-placing expired quotes, the drift cancel, the stake cap, and the last two minutes.
 - **The start guard:** a non-loopback or HTTPS fork URL, a loopback node that is not Anvil, no target named, and both targets named are each refused.
 - **The settings example.**
+- **Quotes for the site:** the lowest resting sell and the highest resting buy per outcome, expired, filled and other-round orders left out.
 
 ## Not yet proven
 

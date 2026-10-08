@@ -13,7 +13,7 @@ import postgres from "postgres";
 import { privateFile } from "../keeper/journal.mjs";
 import { SOLANA_RPC, SOURCES } from "../keeper/solana.mjs";
 import { parseOrderbookManifest } from "../../src/chain/orderbook-manifest.ts";
-import { handler } from "./api.mjs";
+import { handler, parseHouse } from "./api.mjs";
 import { RANGE, step } from "./follow.mjs";
 import { pricesStep } from "./prices.mjs";
 import { rows } from "./rows.mjs";
@@ -67,6 +67,8 @@ async function main(argv) {
   if (/calderachain/i.test(env.INDEXER_HORIZEN_RPC_URL) && !/\/infra-partner-http\//.test(env.INDEXER_HORIZEN_RPC_URL)) fail("use a private endpoint, never the operator's Caldera endpoint");
   const solanaUrl = env.INDEXER_SOLANA_RPC_URL || SOLANA_RPC;
   if (!/^https:\/\/\S+$/.test(solanaUrl)) fail("INDEXER_SOLANA_RPC_URL: an https:// endpoint");
+  const houseUrl = env.INDEXER_HOUSE_URL || null; // optional: the house bot's GET /quotes on the private network
+  if (houseUrl && !/^https?:\/\/\S+$/.test(houseUrl)) fail("INDEXER_HOUSE_URL: an http:// or https:// URL");
   const book = parseOrderbookManifest(JSON.parse(await readFile(new URL("../../public/deployments/26514-orderbook.json", import.meta.url), "utf8")));
   if (book.status !== "configured") fail("the order-book manifest is planned: nothing to index yet");
   const horizen = jsonRpc(env.INDEXER_HORIZEN_RPC_URL), solana = jsonRpc(solanaUrl);
@@ -86,7 +88,22 @@ async function main(argv) {
     const [head, ...wei] = await horizen([{ method: "eth_blockNumber", params: [] }, ...Object.values(roles).map((r) => ({ method: "eth_getBalance", params: [r, "latest"] }))]);
     return { head: Number(head), balances: Object.fromEntries(Object.entries(roles).map(([role, address], i) => [role, { address, wei: BigInt(wei[i]) }])) };
   });
-  const server = createServer(handler({ db: reads(sql), book, origin: book.application.origin, now: Date.now, chain, log }));
+  // The house's resting quotes for /v1/live: the latest good copy and when it was fetched. Every instance reads them, one request a second.
+  const house = { copy: null, at: 0 };
+  if (houseUrl) (async () => {
+    for (let ok = null; !state.stopping;) {
+      const t = Date.now();
+      try {
+        const r = await fetch(houseUrl, { redirect: "error", signal: AbortSignal.timeout(800) });
+        if (r.status !== 200) { await r.body?.cancel().catch(() => {}); throw Object.assign(new Error("house"), { code: `HOUSE_HTTP_${r.status}` }); }
+        Object.assign(house, { copy: parseHouse(await r.json()), at: Date.now() });
+        if (ok !== true) log({ house: "reading" });
+        ok = true;
+      } catch (e) { if (ok !== false) log({ house: "unread", error: codeOf(e) }); ok = false; } // a change of state only, not every second
+      await sleep(t + 1_000 - Date.now());
+    }
+  })();
+  const server = createServer(handler({ db: reads(sql), book, origin: book.application.origin, now: Date.now, chain, log, house: () => house }));
   server.requestTimeout = 15_000;
   server.listen(Number(process.env.PORT) || 8080);
 

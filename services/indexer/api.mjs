@@ -7,6 +7,7 @@ import { engineRound } from "../../src/chain/orderbook-manifest.ts";
 import { decodeSettle } from "../../src/chain/vault.ts";
 
 export const ROUND = 900, MAX_ROUNDS = 200, RESULTS_ROUNDS = 96, PRICE_MINUTES = 120, MAX_MINUTES = 1_440, PAGE = 50, MAX_PAGE = 100, MAX_BODY = 1_024;
+export const HOUSE_MS = 20_000; // the house's quotes are left out of /v1/live once the latest good copy was fetched longer ago than this
 /** Balances below these get an alert in /v1/status (wei). The relayer's: twice its refusal floor (server/relay.ts RELAY_MIN_BALANCE_WEI). */
 export const LOW = { operator: 5_000_000_000_000_000n, house: 5_000_000_000_000_000n, relayer: 1_000_000_000_000_000n };
 const SHORT = "public, max-age=0, s-maxage=1, stale-while-revalidate=4";
@@ -26,6 +27,22 @@ function windowed(limit, ms = 10_000) {
     seen.set(key, k);
     return k <= limit;
   };
+}
+
+const exactly = (v, keys) => Boolean(v) && typeof v === "object" && !Array.isArray(v) && Object.keys(v).sort().join() === keys;
+/** The house bot's /quotes answer (services/market-maker README), checked field by field: another service's output. Null when it has
+ * none yet; anything malformed throws. */
+export function parseHouse(v) {
+  if (v === null) return null;
+  const need = (ok) => { if (!ok) throw Object.assign(new Error("INDEXER_HOUSE_SHAPE"), { code: "INDEXER_HOUSE_SHAPE" }); };
+  const level = (q) => {
+    if (q === null) return null;
+    need(exactly(q, "cents,shares") && Number.isInteger(q.cents) && q.cents >= 1 && q.cents <= 99 && Number.isFinite(q.shares) && q.shares > 0);
+    return { cents: q.cents, shares: q.shares };
+  };
+  const side = (x) => { need(exactly(x, "ask,bid")); return { ask: level(x.ask), bid: level(x.bid) }; };
+  need(exactly(v, "at,down,start,up") && Number.isSafeInteger(v.at) && v.at > 0 && Number.isSafeInteger(v.start));
+  return { at: v.at, start: v.start, up: side(v.up), down: side(v.down) };
 }
 
 function only(params, allowed) {
@@ -49,7 +66,8 @@ function readBody(req) {
   });
 }
 
-/** `deps`: { db (store.mjs reads), book, origin, now() in ms, chain() → { head, balances: { role: { address, wei } } }, log }. */
+/** `deps`: { db (store.mjs reads), book, origin, now() in ms, chain() → { head, balances: { role: { address, wei } } }, log,
+ * house?() → { copy (parseHouse's), at (ms it was fetched) } }. */
 export function handler(deps) {
   const perClient = { GET: windowed(120), POST: windowed(20) }, perEdge = windowed(2_000);
   const counted = new Set();
@@ -74,7 +92,8 @@ export function handler(deps) {
       only(params, []);
       const start = Math.floor(now / ROUND) * ROUND;
       const [head, last, list, latest] = await Promise.all([deps.db.head(), deps.db.clock(), rounds([start - ROUND, start, start + ROUND]), deps.db.latestPrice()]);
-      return [{ head, clock: last && clock(last), rounds: list, price: price(latest) }, SHORT];
+      const h = deps.house?.(), house = h && deps.now() - h.at <= HOUSE_MS && h.copy?.start === start ? h.copy : null;
+      return [{ head, clock: last && clock(last), rounds: list, price: price(latest), house }, SHORT];
     },
     async "GET /v1/btc"(params, now) {
       only(params, ["minutes", "from", "to"]);

@@ -33,7 +33,7 @@ JSON; big integers are decimal strings; hashes and addresses 0x hex; ciphertexts
 
 | Route | Body | Cache-Control |
 | --- | --- | --- |
-| `GET /v1/live` | `{ head: {block,time}, clock: {tick,block,timestamp,applied,skipped,deposits,txHash,logIndex} \| null, rounds: [previous, current, next], price: [minute, usd] \| null }` | `s-maxage=1, stale-while-revalidate=4` |
+| `GET /v1/live` | `{ head: {block,time}, clock: {tick,block,timestamp,applied,skipped,deposits,txHash,logIndex} \| null, rounds: [previous, current, next], price: [minute, usd] \| null, house }` | `s-maxage=1, stale-while-revalidate=4` |
 | `GET /v1/btc` · `?minutes=N` (≤ 1,440) · `?from=&to=` (minute starts, ≤ 1,440 minutes apart) | `{ prices: [[minute, usd], …] }`, oldest first: `/api/btc`'s body; the default is its 120 minutes | `s-maxage=2, stale-while-revalidate=30`; a range ending over 5 min ago that the follower has read past (a price held 2 min after its end) `s-maxage=3600` |
 | `GET /v1/rounds` · `?from=&to=` (round starts, ≤ 200 rounds) | `{ head, rounds }`; the default is the last 24 h and the current round | `s-maxage=1, stale-while-revalidate=5`; rounds ended over 2 h before the indexed head `s-maxage=300` |
 | `POST /v1/account` `{ address, before?: {block,logIndex}, limit? }` (≤ 100, default 50; `Origin` must be the site's; body ≤ 1 KB) | `{ head, more, requests: [{ requestId, block, logIndex, txHash, completed: {block,txHash,status,errorCode,errorMessage} \| null, ciphertexts: [base64] }] }`, newest first | `no-store` |
@@ -43,6 +43,13 @@ A round is `{ start, registryRoundId, open, settle }`; `open` (kind 1) and `sett
 `settle` records `{ kind, outcome, price, observationsTimestamp, reportHash, source, block, txHash, logIndex }`. An uptime
 monitor on `/v1/status` can alert on anything but `"alerts":[]` (low balances: operator and house below 0.005 ETH, relayer below
 0.001 ETH; indexing more than 30 blocks behind; prices older than 3 minutes).
+
+`house` is the house's resting quotes, `null | { at, start, up: { ask, bid }, down: { ask, bid } }`: `at` the time (ms) of the house
+bot's latest order state, `start` the round they belong to, `ask` its lowest resting sell and `bid` its highest resting buy on that
+side, each `{ cents, shares }` or `null`. Every instance reads the bot's `GET /quotes` (services/market-maker README) once a second
+with an 800 ms timeout, checks each field (cents an integer 1 to 99, shares above 0, start an integer, no other field) and keeps the
+latest good answer. `house` is `null` when that answer was fetched over 20 s ago, belongs to another round, or `INDEXER_HOUSE_URL`
+is not set. Display only, like the rest of this API.
 
 Rate limits, per 10 s window: 120 GETs and 20 POSTs per visitor, 2,000 requests per edge address. The edge address is the
 last `X-Forwarded-For` entry (the one Railway's proxy appends, which a caller cannot forge); the visitor is the entry before
@@ -62,9 +69,11 @@ A 0600 file, written by `deploy/railway/start.sh` from Railway variables:
 DATABASE_URL=postgresql://…@postgres.railway.internal:5432/railway   # ${{Postgres.DATABASE_URL}}: private network only
 INDEXER_HORIZEN_RPC_URL=https://…                                      # a private endpoint, never the operator's Caldera one
 INDEXER_SOLANA_RPC_URL=https://…                                       # optional; the public mainnet endpoint otherwise
+INDEXER_HOUSE_URL=http://house-bot.railway.internal:8080/quotes        # optional; /v1/live's house is null without it
 ```
 
 Railway service `indexer`: `ZEDGE_SERVICE=indexer`, `DATABASE_URL` (reference), `ZEDGE_HORIZEN_RPC`, `ZEDGE_SOLANA_RPC` (sealed),
+`ZEDGE_HOUSE_QUOTES_URL` (optional, not a secret: becomes `INDEXER_HOUSE_URL`),
 health check `/v1/status`, a public domain on `$PORT`, no volume. Addresses come from `public/deployments/26514-orderbook.json`;
 the allowed origin is its `application.origin`. The site reaches the API through a Vercel rewrite of `/v1/*`.
 
