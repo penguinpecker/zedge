@@ -9,7 +9,7 @@ import { commandBody, commandId, syncBody, syncRequestId, type EngineCommand, ty
 import { padBody } from "../../../adapters/vela/crypto/pad.ts";
 import { ASSOCIATEKEY, LOT, OPERATOR_KEYS_CHANGED, PROCESS, ZERO_ADDRESS, endpointAbi, engineRound, normalizeSignature, requestTypedData, type VerifiedOrderbook } from "../orderbook-manifest.ts";
 import { SUBTYPES, decodeCredit, decodePayout, decodeSettle, inboxAbi, usdcAbi, usdcPermitTypedData, vaultAbi } from "../vault.ts";
-import type { AccountPage, Head, Live } from "../read-api.ts";
+import type { AccountPage, ApiRound, Head, Live } from "../read-api.ts";
 
 export type Book = VerifiedOrderbook["manifest"];
 export type TypedData = ReturnType<typeof requestTypedData> | ReturnType<typeof usdcPermitTypedData>;
@@ -155,6 +155,28 @@ export function inferReceipt(before: View | null, after: View | null, order: { r
   return { sequence: 0, status: rests ? "resting" : "ioc_complete", fills: quantity ? [{ orderId: "", role: "taker", side: "", roundId: order.roundId ?? "", outcome: order.outcome ?? "", price: 0, quantity, fee: 0 }] : [] };
 }
 const fillsText = (fills: NonNullable<NonNullable<Outcome["receipt"]>["fills"]>) => `Filled · ${fills.map((f) => `${f.side} ${f.quantity / 1e6} ${f.outcome} at ${f.price}¢`).join(", ")}`;
+/** A settled round this account held: its start, outcome (1 Up, 2 Down, 3 Void) and what it paid, in atoms. */
+export type LastResult = { start: number; outcome: number; paid: number };
+/** What a holding collects when its round settles (the engine's redeem): the winning side's shares, half of each side when voided. */
+const payout = (h: View["holdings"][number], outcome: number) => {
+  const up = h.up + h.reservedUp, down = h.down + h.reservedDown;
+  return outcome === 1 ? up : outcome === 2 ? down : Math.floor(up / 2) + Math.floor(down / 2);
+};
+/** The newest settled round of `rounds` this account held when it settled, and what it paid: its holding in the newest of `views`
+ * (receipt views, each with the block its request completed in) from before the block of the round's settle record. The settlement
+ * sweep empties the holding in that same transition, so only an earlier receipt still shows it. Null when none held one or the views
+ * do not reach back that far. Simplification: a resting order filled after the last receipt before settlement is not counted. */
+export function lastResult(views: { block: number; view: View }[], rounds: ApiRound[], idOf: (start: number) => string): LastResult | null {
+  for (const r of rounds.filter((x) => x.settle).sort((a, b) => b.start - a.start)) {
+    const s = r.settle!, before = views.filter((v) => v.block < s.block).sort((a, b) => b.block - a.block)[0];
+    const h = before?.view.holdings.find((x) => x.roundId === idOf(r.start));
+    if (!h || h.up + h.reservedUp + h.down + h.reservedDown === 0) continue;
+    const outcome = s.kind === 3 ? 3 : s.outcome;
+    return { start: r.start, outcome, paid: payout(h, outcome) };
+  }
+  return null;
+}
+
 /** Shares (atoms) a buy of `pay` atoms can take at `price` cents, in whole lots. Notional = floor(quantity / 100) · price. */
 export function sharesFor(pay: number, price: number): number {
   if (!isInt(pay) || !isInt(price, 99) || price < 1) return 0;
@@ -164,8 +186,8 @@ export function sharesFor(pay: number, price: number): number {
 /** `wallet`: Base USDC at the account's own address, ready to deposit. `historyMore`: History has older blocks to read ("Load older"),
  * and `historyHours` is how far back it has read. `behind`: a deposit was credited after the last view was read, so the balance
  * shown is short until the next sync. `cached`: `view` is the newest readable receipt the read API had, shown read-only while the
- * unlock sync runs; `unlocked` is still false. */
-export type Snapshot = { unlocked: boolean; registered: boolean; view: View | null; fingerprint: string | null; actions: ActionState[]; history: HistoryEntry[]; historyMore: boolean; historyHours: number; wallet: bigint | null; error: string; behind: boolean; cached: boolean };
+ * unlock sync runs; `unlocked` is still false. `lastResult`: the newest settled round this account held (checkResults, loadLastResult). */
+export type Snapshot = { unlocked: boolean; registered: boolean; view: View | null; fingerprint: string | null; actions: ActionState[]; history: HistoryEntry[]; historyMore: boolean; historyHours: number; wallet: bigint | null; error: string; behind: boolean; cached: boolean; lastResult: LastResult | null };
 /** One History page: about six hours of Horizen's ~1 s blocks. */
 export const HISTORY_PAGE = 21_600n;
 
@@ -173,7 +195,7 @@ export class PrivateAccount {
   readonly account: Address;
   #session: EvaluationSession;
   #queue: Promise<unknown> = Promise.resolve();
-  #state: Snapshot = { unlocked: false, registered: false, view: null, fingerprint: null, actions: [], history: [], historyMore: false, historyHours: 0, wallet: null, error: "", behind: false, cached: false };
+  #state: Snapshot = { unlocked: false, registered: false, view: null, fingerprint: null, actions: [], history: [], historyMore: false, historyHours: 0, wallet: null, error: "", behind: false, cached: false, lastResult: null };
   /** History read so far: blocks `oldest` to `head`, the account's requests there in chain order, and its request count at `head`. */
   #scan: { head: bigint; oldest: bigint; total: bigint; logged: Logged[] } | null = null;
   /** History from the read API instead: its entries newest first, each with its log index (the next page's cursor), and whether
@@ -270,18 +292,36 @@ export class PrivateAccount {
   async #cachedView() {
     const page = await this.#chain.requests?.(this.account, undefined, 10);
     for (const r of page?.requests ?? []) {
-      for (const ciphertext of r.ciphertexts) {
-        const o = await this.#session.openReceipt(ciphertext);
-        let view: View | null = null;
-        try { view = o.status === "readable" ? readView((o.envelope.body as ReceiptBody).view) : null; } catch { /* unreadable: the next one */ }
-        if (!view) continue;
-        const held = this.#state.view;
-        // Never over a fresh view: the sync may have landed first.
-        if (this.#unlocking && !this.#closed && (!held || view.sequence > held.sequence)) this.#set({ view, cached: true });
-        return;
-      }
+      const view = await this.#receiptView(r.ciphertexts);
+      if (!view) continue;
+      const held = this.#state.view;
+      // Never over a fresh view: the sync may have landed first.
+      if (this.#unlocking && !this.#closed && (!held || view.sequence > held.sequence)) this.#set({ view, cached: true });
+      return;
     }
   }
+  /** The view in the first of a request's receipts this key opens, or null. */
+  async #receiptView(ciphertexts: Uint8Array[]): Promise<View | null> {
+    for (const ciphertext of ciphertexts) {
+      const o = await this.#session.openReceipt(ciphertext);
+      try { const view = o.status === "readable" ? readView((o.envelope.body as ReceiptBody).view) : null; if (view) return view; } catch { /* unreadable: the next one */ }
+    }
+    return null;
+  }
+
+  /** Sets `lastResult` from this account's 20 newest receipts in the read API (lastResult), for when the page did not see the round
+   * settle (a reload): the settlement sweep has already emptied the holding. `rounds`: the read API's, with their settle records.
+   * Display only. */
+  async loadLastResult(rounds: ApiRound[]): Promise<void> {
+    const page = await this.#chain.requests?.(this.account, undefined, 20), views: { block: number; view: View }[] = [];
+    for (const r of page?.requests ?? []) {
+      const view = r.completed && await this.#receiptView(r.ciphertexts);
+      if (view) views.push({ block: Number(r.completed!.block), view });
+    }
+    const found = lastResult(views, rounds, (start) => engineRound(this.#book, start).id);
+    if (found) this.#keepResult(found);
+  }
+  #keepResult(r: LastResult) { if (r.start > (this.#state.lastResult?.start ?? -1)) this.#set({ lastResult: r }); }
 
   sync(): Promise<ReceiptBody> { return this.#serial(() => this.#sync("Sync")); }
 
@@ -624,10 +664,10 @@ export class PrivateAccount {
       const view = this.#state.view, ms = this.#now(), now = Math.floor(ms / 1000);
       if (!view || ms < this.#resultsAfter) return;
       // The guest's `settle` record names a round by its registry round ID; holdings name it by the engine's.
-      const ended = new Map<Hex, { id: string; h: View["holdings"][number]; end: number }>();
+      const ended = new Map<Hex, { id: string; h: View["holdings"][number]; start: number; end: number }>();
       for (let k = 1, last = Math.floor(now / 900) * 900; k <= 96; k++) {
         const r = engineRound(this.#book, last - k * 900), h = view.holdings.find((x) => x.roundId === r.id);
-        if (h && !this.#reported.has(r.id)) ended.set(r.spec.registryRoundId.toLowerCase() as Hex, { id: r.id, h, end: r.spec.end });
+        if (h && !this.#reported.has(r.id)) ended.set(r.spec.registryRoundId.toLowerCase() as Hex, { id: r.id, h, start: r.spec.start, end: r.spec.end });
       }
       if (!ended.size) return;
       // Simplification: 900 s stands for the 1,000-block window at Horizen's ~1 s blocks; an older round's event can no longer be read.
@@ -653,10 +693,10 @@ export class PrivateAccount {
         const { id, h } = e;
         this.#reported.add(id);
         shown++;
-        const up = h.up + h.reservedUp, down = h.down + h.reservedDown;
-        const paid = s.outcome === 1 ? up : s.outcome === 2 ? down : Math.floor((up + down) / 2);
+        const paid = payout(h, s.outcome);
         const name = s.outcome === 1 ? "Up won" : s.outcome === 2 ? "Down won" : "Round voided";
         this.#action("Round result")("done", paid ? `${name} · ${usd(paid)} credited` : `${name} · nothing to collect`);
+        this.#keepResult({ start: e.start, outcome: s.outcome, paid });
       }
       // Not when a receipt read since then already shows the round settled.
       const due = [...ended].filter(([key, e]) => (failed || !readable.includes(key)) && !this.#reported.has(e.id) && !this.#synced.has(e.id) && now >= e.end + 60 && this.#readAt < (e.end + 60) * 1000).map(([, e]) => e);

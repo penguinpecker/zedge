@@ -1,7 +1,8 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { askCents, clockPhase, countdownLine, ORDER_MARGIN, roundResults, tradable, versus } from "./market-view.ts";
-import type { ApiRound, SettleRef } from "./read-api.ts";
+import { askCents, clockPhase, countdownLine, HOUSE_STALE_MS, houseFor, ORDER_MARGIN, roundResults, sidePrice, tradable, versus } from "./market-view.ts";
+import { sharesFor } from "./private/client.ts";
+import type { ApiRound, House, SettleRef } from "./read-api.ts";
 
 const house = await import(new URL("../../services/market-maker/pricing.mjs", import.meta.url).href) as {
   quotes(p: number, h: number): { up: { ask: number }; down: { ask: number } };
@@ -77,4 +78,23 @@ test("the results strip lists the rounds that ended in the last 24 hours, oldest
     { start: 99 * 900, outcome: "void", open: 10n, close: null },
   ], "older than a day and not yet ended are left out");
   assert.deepEqual(roundResults(listed, [], now).map((x) => x.outcome), ["down", null], "no result recorded yet");
+});
+
+test("with the house's quotes for the round the ticket trades at them: the ask is the buy's limit exactly, the bid the close's; else the estimate", () => {
+  const house: House = { at: 1_000_000, start: 900, up: { ask: { cents: 14, shares: 50_000_000 }, bid: { cents: 12, shares: 20_000_000 } }, down: { ask: null, bid: { cents: 84, shares: 10_000_000 } } };
+  const up = sidePrice(house, 0.57, "up");
+  assert.deepEqual(up, { ask: 14, buy: 14, sell: 12, est: false }, "no slack over the shown price, whatever the fair value");
+  // 5 USDC at 14¢: whole lots of shares whose cost at that limit stays within the stake.
+  const quantity = sharesFor(5_000_000, up.buy!);
+  assert.deepEqual([quantity, Math.floor(quantity / 100) * up.buy!], [35_714_000, 4_999_960]);
+  assert.deepEqual(sidePrice(house, 0.57, "down"), { ask: null, buy: null, sell: 84, est: false }, "no seller: nothing to buy, not an estimate");
+  // No quotes (the read API down, stale, or of another round): the estimate and the one-click slack, marked est.
+  assert.deepEqual(sidePrice(null, 0.57, "up"), { ask: 60, buy: 65, sell: 49, est: true });
+  assert.deepEqual(sidePrice(null, 0.57, "down"), { ask: 46, buy: 51, sell: 35, est: true });
+  assert.deepEqual(sidePrice(null, null, "up"), { ask: null, buy: null, sell: null, est: true });
+  assert.equal(houseFor(house, 900, 1_000_000 + HOUSE_STALE_MS), house);
+  assert.equal(houseFor(house, 900, 1_000_001 + HOUSE_STALE_MS), null, "stale: a read API that stopped answering");
+  assert.equal(houseFor(house, 1800, 1_000_000), null, "another round");
+  assert.equal(houseFor(house, null, 1_000_000), null, "no round open");
+  assert.equal(houseFor(null, 900, 1_000_000), null);
 });

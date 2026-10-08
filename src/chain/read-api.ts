@@ -3,7 +3,7 @@
  * signs is checked on chain first (confirmSettle). Every read answers its checked value, or null for anything else (no answer, a
  * timeout, a refusal, a malformed field): null is the signal to read the chain as before. An address goes only in a POST body. */
 import { parseEventLogs, type Hex, type PublicClient } from "viem";
-import { endpointAbi, type VerifiedOrderbook } from "./orderbook-manifest.ts";
+import { endpointAbi, LOT, type VerifiedOrderbook } from "./orderbook-manifest.ts";
 import { SUBTYPES, decodeSettle } from "./vault.ts";
 
 /** A price observation: `t` in milliseconds since the epoch (the report's observation time), `p` in USD. */
@@ -12,8 +12,14 @@ export type Tick = { t: number; p: number };
 export type SettleRef = { kind: number; outcome: number; price: bigint; observationsTimestamp: number; reportHash: Hex; source: number; block: number; txHash: Hex; logIndex: number };
 export type ApiRound = { start: number; registryRoundId: Hex; open: SettleRef | null; settle: SettleRef | null };
 export type Head = { block: number; time: number };
-/** The previous, current and next rounds and the latest minute price. */
-export type Live = { head: Head; rounds: ApiRound[]; price: Tick | null };
+/** A resting price level: cents, and share atoms (whole lots). */
+export type Quote = { cents: number; shares: number };
+/** The house's lowest resting sell (`ask`) and highest resting buy (`bid`) on each side, null where it has none, for the round that
+ * starts at `start` (unix seconds), as of `at` (ms, the house bot's latest order state). */
+export type House = { at: number; start: number; up: { ask: Quote | null; bid: Quote | null }; down: { ask: Quote | null; bid: Quote | null } };
+/** The previous, current and next rounds, the latest minute price and the house's quotes (null when the indexer's copy is over 20 s
+ * old or of another round). */
+export type Live = { head: Head; rounds: ApiRound[]; price: Tick | null; house: House | null };
 export type ApiRequest = { requestId: Hex; block: bigint; logIndex: number; txHash: Hex; completed: { block: bigint; txHash: Hex; status: number } | null; ciphertexts: Uint8Array[] };
 /** One page of an account's requests, newest first; `more` when older ones exist. */
 export type AccountPage = { head: Head; more: boolean; requests: ApiRequest[] };
@@ -53,10 +59,30 @@ const rounds = (v: unknown, max: number): ApiRound[] => list(v, max).map((x) => 
   need(start % 900 === 0);
   return { start, registryRoundId: hash(r.registryRoundId), open: settleRef(r.open), settle: settleRef(r.settle) };
 });
+const quote = (value: unknown): Quote | null => {
+  if (value === null) return null;
+  const q = obj(value);
+  need(Number.isSafeInteger(q.cents) && (q.cents as number) >= 1 && (q.cents as number) <= 99 && Number.isSafeInteger(q.shares) && (q.shares as number) > 0 && (q.shares as number) % LOT === 0);
+  return { cents: q.cents as number, shares: q.shares as number };
+};
+const quotes = (value: unknown) => {
+  const s = obj(value), ask = quote(s.ask), bid = quote(s.bid);
+  need(!ask || !bid || bid.cents < ask.cents);
+  return { ask, bid };
+};
+/** The house's quotes, or null: when absent, and when malformed, which costs only the quotes (the ticket then estimates), not the read. */
+function house(value: unknown): House | null {
+  if (value === null || value === undefined) return null;
+  try {
+    const h = obj(value), start = count(h.start);
+    need(start % 900 === 0 && Number.isSafeInteger(h.at) && (h.at as number) > 0);
+    return { at: h.at as number, start, up: quotes(h.up), down: quotes(h.down) };
+  } catch { return null; }
+}
 function live(body: unknown): Live {
   const v = obj(body), price = v.price === null ? null : toTicks({ prices: [v.price] })[0];
   need(price !== undefined);
-  return { head: head(v.head), rounds: rounds(v.rounds, 4), price };
+  return { head: head(v.head), rounds: rounds(v.rounds, 4), price, house: house(v.house) };
 }
 function page(body: unknown): AccountPage {
   const v = obj(body);

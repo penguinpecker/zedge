@@ -236,7 +236,7 @@
 .chain-book-row { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; align-items: center; border-bottom: 1px solid var(--line); font: 11px var(--mono); padding: 11px 22px; }
 .chain-book-row span:not(:first-child) { text-align: right; }
 .chain-book-row .chain-text-button { margin-left: 12px; }
-.chain-private-list > .button, .chain-private-list > p, .chain-private-list > form, .chain-private-list > dl { margin: 16px 22px; }
+.chain-private-list > .button, .chain-private-list > p, .chain-private-list > dl { margin: 16px 22px; }
 .chain-drawer select { padding: 13px; width: 100%; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; color: var(--text); }
 .chain-deposit-address { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px; align-items: start; margin: 0 0 18px; }
 /* The whole address, so every character can be checked before money is sent (a 0x1234…abcd form passes lookalike addresses). */
@@ -252,7 +252,13 @@
 .chain-quick button:hover:not(:disabled) { color: var(--text); border-color: #45503d; }
 .chain-reason { margin-top: 8px; color: var(--coral); font-size: 11px; }
 .chain-ticket-cost { margin: -12px 0 16px; font-size: 11px; line-height: 1.6; }
-.chain-position { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-top: 12px; font-size: 12px; }
+.chain-position { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-top: 10px; font-size: 12px; line-height: 1.6; }
+.chain-position .button { flex-shrink: 0; }
+.chain-position-block { margin-top: 16px; padding: 12px; border: 1px solid var(--line); border-radius: 7px; }
+.chain-position-block h3 { font-size: 11px; font-weight: 600; color: var(--muted); }
+.chain-last-result { margin-top: 12px; }
+.chain-position b.up, .chain-book-row b.up, .chain-last-result b.up { color: var(--lime); }
+.chain-position b.down, .chain-book-row b.down, .chain-last-result b.down { color: var(--coral); }
 .chain-balance { display: grid; justify-items: end; gap: 2px; line-height: 1.15; padding: 7px 13px; border: 1px solid var(--line); border-radius: 8px; font-size: 13px; color: var(--text); background: var(--panel); white-space: nowrap; }
 .chain-balance strong { font: 600 13px var(--mono); }
 .chain-balance small { font-size: 11px; color: var(--muted); }

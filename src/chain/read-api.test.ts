@@ -46,6 +46,23 @@ test("live, rounds and account answers are checked field by field; anything malf
   assert.equal(await answering({ head: { block: 1, time: 1 }, more: false, requests: [oversized] }).account("0x00000000000000000000000000000000000000aa"), null, "a receipt over 16 KiB");
 });
 
+test("the house's quotes are checked field by field; a malformed one costs only the quotes, never the rest of the live read", async () => {
+  const q = (cents: number, shares = 10_000_000) => ({ cents, shares });
+  const good = { at: (START + 700) * 1000, start: START, up: { ask: q(14), bid: q(12) }, down: { ask: null, bid: q(84, 2_000) } };
+  assert.deepEqual((await answering(liveBody({ house: good })).live())?.house, good);
+  assert.equal((await answering(liveBody()).live())?.house, null, "an indexer without the field");
+  const broken = [
+    { ...good, start: START + 1 }, { ...good, at: 0 }, { ...good, at: "1" }, { ...good, down: undefined }, [good],
+    { ...good, up: { ask: q(0), bid: null } }, { ...good, up: { ask: q(100), bid: null } }, { ...good, up: { ask: q(14.5), bid: null } },
+    { ...good, up: { ask: q(14, 1_500), bid: null } }, { ...good, up: { ask: q(14, 0), bid: null } }, { ...good, up: { ask: q(14) } },
+    { ...good, up: { ask: q(12), bid: q(12) } },
+  ];
+  for (const house of broken) {
+    const live = await answering(liveBody({ house })).live();
+    assert.deepEqual([live?.house, live?.rounds.length], [null, 3], JSON.stringify(house));
+  }
+});
+
 test("the page's live read is shared: one request per 1.5 s, however many parts of the page ask", async () => {
   let reads = 0, t = 0;
   const live = sharedLive(async () => { reads++; return null; }, () => t);
