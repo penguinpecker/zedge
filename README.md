@@ -67,7 +67,7 @@ flowchart LR
 **Site** ([`src/`](src)). A React and Vite app. Signing in with Google or X through Privy creates an embedded wallet; its address is your deposit address on Base. The site derives a trading key from one wallet signature, registers its public key with the order book, encrypts each request in the browser, and decrypts your receipts. It verifies the pinned deployment manifests in [`public/deployments/`](public/deployments) against both chains before showing round state. The paper demo and the help and policy pages (`/terms`, `/privacy`, `/risk-disclosure`, `/market-rules`, `/support`) are part of the same app.
 
 **Vercel functions** ([`api/`](api) with logic and tests in [`server/`](server)).
-- `/api/relay` is the relayer. It checks your Privy sign-in, your own EIP-712 signature and the exact request shape, then sends your USDC permit to the vault on Base, or your key registration or encrypted request to the Vela endpoint on Horizen. It pays the gas and the request fee. It never signs for you, and it rate-limits per user and overall. By default it serves only invited accounts.
+- `/api/relay` is the relayer. It checks your Privy sign-in, your own EIP-712 signature and the exact request shape, then sends your USDC permit to the vault on Base, a USDC transfer you confirmed in your wallet from your Base address to another address, or your key registration or encrypted request to the Vela endpoint on Horizen. It pays the gas and the request fee. It never signs for you, and it rate-limits per user and overall. By default it serves only invited accounts.
 - `/api/btc` serves recent Chainlink BTC/USD prices, read from public Solana transactions, for the chart and the displayed fair value. It does not settle anything.
 - `/api/horizen` is a read-only Horizen RPC proxy for the site: allowed methods only, this site's origin only, and a per-visitor budget.
 
@@ -98,11 +98,12 @@ flowchart LR
 | Step | What happens | Who pays gas |
 | --- | --- | --- |
 | Fund | Send native USDC on Base to your deposit address (your Privy wallet). USDC on other networks and other tokens are not credited. | You, from wherever you send it |
-| Deposit | Your wallet signs a USDC permit. The relayer calls `depositWithPermit`; the vault takes 1 to 500 USDC, numbers the deposit and sends a native message to the Horizen inbox. | Relayer |
+| Deposit | Automatic while the site is open and you are signed in: USDC that reached your deposit address from anyone but the vault is deposited (withdrawals and refunds stay on Base). Your wallet signs a USDC permit. The relayer calls `depositWithPermit`; the vault takes 1 to 500 USDC, numbers the deposit and sends a native message to the Horizen inbox. | Relayer |
 | Credit | On the next tick the trigger hands new inbox records to the guest, which credits each deposit to your private balance exactly once, or refunds it to Base if it cannot be credited. This usually takes about a minute. | Keeper and operator |
 | Trade | Your browser encrypts the order and pads it to 2,048 bytes, and your wallet signs the request. The relayer submits it to the Vela endpoint. The guest stages it and applies it at the next tick's chain time. Your receipt comes back encrypted to your key. | Relayer (gas and request fee) |
 | Settle | At the boundary the keeper sends the Chainlink report. The guest checks the signatures, resolves the round and pays winning shares into private balances. If that report does not arrive, the round settles from the registry's record. | Keeper |
 | Withdraw | You send a private withdrawal request through the relayer. The guest publishes a payout record. The payout signer checks it and the vault pays USDC to your address on Base, up to 1,000 USDC per withdrawal. | Relayer, then payout signer |
+| Send | From your Base address to any other address: you confirm the destination and amount in your wallet (a USDC `transferWithAuthorization`), and the relayer sends it. At least 0.10 USDC. | Relayer |
 
 The operator pays for every state update on Horizen. Once your USDC is at your deposit address, you pay no network fees.
 

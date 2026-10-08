@@ -5,7 +5,8 @@ import { encodeAbiParameters, encodeEventTopics, hexToBytes, keccak256, parseAbi
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { decrypt, encrypt, exportPublicKeyToHex, generateKeyPair, importPublicKeyFromHex } from "@horizen/vela-common-ts";
 import { KEY_CHALLENGE_START, endpointAbi, engineRound, parseOrderbookManifest, requestTypedData, signable, type VerifiedOrderbook } from "../orderbook-manifest.ts";
-import { usdcPermitTypedData } from "../vault.ts";
+import { usdcPermitTypedData, usdcTransferTypedData } from "../vault.ts";
+import type { Transfer } from "../deposit-amount.ts";
 import { HISTORY_PAGE, KEY_CHANGED, NOT_SUBMITTED, PrivateAccount, PublicError, describeOutcome, fetchRelay, indexedChain, readView, relayText, sharesFor, viemChain, type Chain, type Completion, type Logged, type Relay, type RelayBody, type Settled, type Signer, type Snapshot, type Submission } from "./client.ts";
 import type { AccountPage, ApiRound, Live } from "../read-api.ts";
 
@@ -16,7 +17,7 @@ const ROUND = 1_791_301_500;
 
 /** The operator and the chain in one: it decrypts requests with its own enclave key, keeps each account's view, and answers with
  * encrypted receipts in the guest's shapes. The relay checks each signature as submitRequestFor would. */
-async function stack(options: { relayRefuses?: (body: RelayBody) => { code: string; retryAfter?: number } | null; keyChanged?: boolean; activateAfter?: number; noReceipt?: boolean } = {}) {
+async function stack(options: { relayRefuses?: (body: RelayBody) => { code: string; retryAfter?: number } | null; keyChanged?: boolean; activateAfter?: number; noReceipt?: boolean; transfers?: boolean } = {}) {
   const enclave = await generateKeyPair();
   const hex = await exportPublicKeyToHex(enclave.publicKey);
   const enclaveKey = (hex.startsWith("0x") ? hex : `0x${hex}`).toLowerCase() as Hex;
@@ -34,6 +35,8 @@ async function stack(options: { relayRefuses?: (body: RelayBody) => { code: stri
   let baseBlock = 500n, wallet = 50_000_000n, ordinals = 0n;
   const deposits: { owner: string; amount: bigint; block: bigint; txHash: Hex }[] = [], credits = new Map<bigint, { status: number; amount: bigint }>();
   const approved = new Set<bigint>(), paid = new Map<bigint, Hex>(), settles: Settled[] = [];
+  // `transfers`: the address's Base USDC history, as a transfer index lists it; sends by authorization nonce.
+  const history: Transfer[] = [], authorizations = new Map<Hex, Hex>();
   const seal = async (account: string, requestId: string, domain: unknown, body: unknown) => {
     const env = { version: 1, domain, account, epoch: "1", requestId, kind: "receipt", body };
     return encrypt(enclave.privateKey, keys.get(account)!, encoder.encode(JSON.stringify(env)));
@@ -111,6 +114,8 @@ async function stack(options: { relayRefuses?: (body: RelayBody) => { code: stri
       const d = deposits.findIndex((x) => x.owner === owner && x.block > fromBlock);
       return d < 0 ? null : { index: BigInt(d + 1), txHash: deposits[d].txHash };
     },
+    async transferred(_owner, nonce) { return authorizations.get(nonce) ?? null; },
+    transfers: options.transfers ? async () => [...history] : undefined,
     async arrived(index) { return index <= BigInt(deposits.length); },
     async credited(index) { return credits.get(index) ?? null; },
     async approved(ordinal) { return approved.has(ordinal); },
@@ -130,10 +135,21 @@ async function stack(options: { relayRefuses?: (body: RelayBody) => { code: stri
         const txHash = keccak256(toHex(`base:${sent.length}`));
         deposits.push({ owner: body.owner, amount: BigInt(body.amount), block: ++baseBlock, txHash });
         wallet -= BigInt(body.amount);
+        history.push({ from: body.owner, to: book.custody.vault.address, value: BigInt(body.amount) });
         const v = views.get(body.owner);
         if (v) { v.cash += Number(body.amount); sequence++; }
         credits.set(BigInt(deposits.length), { status: v ? 1 : 2, amount: BigInt(body.amount) });
         log.push(`deposit ${body.amount}`);
+        return { ok: true, status: 200, txHash };
+      }
+      if (body.kind === "base-transfer") {
+        const typed = usdcTransferTypedData(book.custody, { from: body.from, to: body.to, value: BigInt(body.amount), validAfter: 0n, validBefore: BigInt(body.validBefore), nonce: body.nonce });
+        assert.equal((await recoverTypedDataAddress({ ...typed, signature: body.signature })).toLowerCase(), body.from, "the transfer is the owner's");
+        const txHash = keccak256(toHex(`send:${sent.length}`));
+        authorizations.set(body.nonce, txHash);
+        wallet -= BigInt(body.amount);
+        history.push({ from: body.from, to: body.to, value: BigInt(body.amount) });
+        log.push(`send ${body.amount}`);
         return { ok: true, status: 200, txHash };
       }
       const nonce = nonces.get(body.sender) ?? 0n;
@@ -149,7 +165,7 @@ async function stack(options: { relayRefuses?: (body: RelayBody) => { code: stri
   };
   /** Cash credited outside this client (a deposit made earlier); the account sees it with its next receipt. */
   const fund = (account: string, amount: number) => { views.get(account)!.cash += amount; sequence++; };
-  return { book, chain, relay, sent, log, views, fund, settles, nonces, wallet: () => wallet };
+  return { book, chain, relay, sent, log, views, fund, settles, nonces, history, wallet: () => wallet };
 }
 
 function wallet(key = generatePrivateKey(), sign?: (m: string) => Promise<Hex>): Signer & { calls: number } {
@@ -233,6 +249,28 @@ test("one-click deposit: a silent permit to the vault, sent by the relayer, then
   await assert.rejects(account.depositFromBase(999_999n), /Deposits are 1 USDC to 500 USDC/);
   await assert.rejects(account.depositFromBase(40_000_000n), /holds less than this deposit/);
   assert.equal(s.log.filter((x) => x.startsWith("deposit")).length, 1);
+});
+
+test("the automatic deposit takes only USDC from outside the vault, once; a send is confirmed in the wallet and read back from the chain", async () => {
+  const s = await stack({ transfers: true }), signer = wallet(), friend = "0x00000000000000000000000000000000000000cc";
+  // The wallet's 50 USDC: 30 from a friend, 20 a payout from the vault.
+  s.history.push({ from: friend, to: signer.address, value: 30_000_000n }, { from: s.book.custody.vault.address, to: signer.address, value: 20_000_000n });
+  const { account, phases } = open(s, signer);
+  await account.unlock();
+  await account.refreshFunds();
+  await account.autoDeposit();
+  await account.autoDeposit();
+  assert.deepEqual(s.log.filter((x) => x.startsWith("deposit")), ["deposit 30000000"], "the payout stays on Base");
+  assert.deepEqual([account.snapshot.held, account.snapshot.wallet, account.snapshot.view?.cash, account.snapshot.auto], [20_000_000n, 20_000_000n, 30_000_000, true]);
+  await assert.rejects(account.sendFromBase(friend, 5_000_000n), /cannot confirm a send/, "never through the silent signature");
+  const confirmed: string[] = [];
+  signer.confirmTypedData = async (data, text) => { confirmed.push(text); return signer.signTypedData(data); };
+  await account.sendFromBase(friend, 5_000_000n);
+  assert.deepEqual(confirmed, [`Send 5 USDC on Base to ${friend}`]);
+  assert.deepEqual(phases("Send"), ["Confirm in your wallet", "Sending", "Sent on Base · 5 USDC"]);
+  assert.equal(account.snapshot.actions.find((x) => x.action === "Send")?.chain, 8453);
+  await account.autoDeposit();
+  assert.deepEqual([s.log.filter((x) => x.startsWith("deposit")).length, account.snapshot.held], [1, 15_000_000n], "the send spent held USDC; nothing more goes in");
 });
 
 test("a credit whose sync fails leaves the balance marked behind until a view is read, so the ticket offers a refresh, not a second deposit", async () => {
@@ -695,6 +733,33 @@ test("settling on the relayer's transaction: it and its receipt in one batch, us
     assert.equal(await settle(), "pending", Object.keys(change)[0]);
     assert.deepEqual(calls.slice(2), ["block", "nonce"], "the nonce path decides");
   }
+});
+
+test("the Base USDC history is read both ways from Alchemy's index, page by page, once per transfer, in chain order; a bad row fails the read", async () => {
+  const s = await stack(), me = wallet().address, usdc = s.book.custody.usdc.address, friend = "0x00000000000000000000000000000000000000cc";
+  const row = (block: number, log: string, from: string, to: string, value: number) => ({ blockNum: toHex(block), uniqueId: `${keccak256(toHex(block))}:log:${log}`, from, to, rawContract: { value: toHex(value), address: usdc } });
+  // Incoming: two pages; a transfer to itself is listed both ways. Outgoing: a deposit in the same block as an inflow, after it.
+  const pages: Record<string, { transfers: unknown[]; pageKey?: string }[]> = {
+    toAddress: [{ transfers: [row(10, "0", friend, me, 5), row(12, "3", friend, me, 2)], pageKey: "next" }, { transfers: [row(14, "1", me, me, 9)] }],
+    fromAddress: [{ transfers: [row(12, "0x4", me, s.book.custody.vault.address, 5), row(14, "1", me, me, 9)] }],
+  };
+  const asked: string[] = [];
+  let bad = false;
+  const client = { request: async ({ method, params: [q] }: { method: string; params: [Record<string, unknown>] }) => {
+    assert.equal(method, "alchemy_getAssetTransfers");
+    assert.deepEqual([q.category, q.contractAddresses, q.order], [["erc20"], [usdc], "asc"]);
+    const side = q.fromAddress ? "fromAddress" : "toAddress";
+    asked.push(`${side}:${q.pageKey ?? ""}`);
+    const page = pages[side][q.pageKey ? 1 : 0];
+    return bad ? { transfers: [{ ...row(1, "0", friend, me, 1), rawContract: { value: "1.5", address: usdc } }] } : page;
+  } } as unknown as PublicClient;
+  const chain = viemChain(client, s.book, client, { assetTransfers: true });
+  assert.deepEqual(await chain.transfers!(me), [
+    { from: friend, to: me, value: 5n }, { from: friend, to: me, value: 2n }, { from: me, to: s.book.custody.vault.address, value: 5n }, { from: me, to: me, value: 9n }]);
+  assert.deepEqual(asked, ["fromAddress:", "toAddress:", "toAddress:next"]);
+  bad = true;
+  await assert.rejects(chain.transfers!(me), /Unreadable transfer history/);
+  assert.equal(viemChain(client, s.book, client).transfers, undefined, "no index: no automatic deposits");
 });
 
 test("History reads 1,000-block ranges at most five a second, stops at the account's first request, and can be stopped", async () => {
