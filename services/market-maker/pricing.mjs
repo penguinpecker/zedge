@@ -75,41 +75,73 @@ function release(view, gone) {
   return view;
 }
 
-/** The view as if command c had been applied whole: a mint adds sets, a place_order rests unfilled, a cancel_all
- * releases the round's orders. The model for a staged command until its outcome comes back (and for --dry-run). */
+/** The view once orders with expiry ≤ t are gone: a tick's checkpoint at t releases them before it activates anything. */
+export function expire(view, t) {
+  return release(structuredClone(view), (o) => o.expiry <= t);
+}
+
+/** The view as if command c had been applied whole: a mint adds sets, a place_order rests unfilled under its command ID
+ * `c.id`, a cancel_order releases that order, a cancel_all the round's orders. The model for a staged command until its
+ * outcome comes back (and for --dry-run). */
 export function apply(view, c) {
   const v = structuredClone(view);
   if (c.op === "mint") { v.cash -= c.quantity; const h = holding(v, c.roundId); h.up += c.quantity; h.down += c.quantity; return v; }
   if (c.op === "cancel_all") return release(v, (o) => o.roundId === c.roundId);
+  if (c.op === "cancel_order") return release(v, (o) => o.id === c.orderId);
   if (c.op !== "place_order") return v;
-  const o = { roundId: c.roundId, outcome: c.outcome, side: c.side, price: c.price, remaining: c.quantity, reservedCash: 0, expiry: c.expiry };
+  const o = { id: c.id, roundId: c.roundId, outcome: c.outcome, side: c.side, price: c.price, remaining: c.quantity, reservedCash: 0, expiry: c.expiry };
   if (c.side === "buy") { o.reservedCash = Math.floor(c.quantity / 100) * c.price; v.cash -= o.reservedCash; v.reservedCash += o.reservedCash; }
   else { const h = holding(v, c.roundId); h[c.outcome] -= c.quantity; h[reservedKey(c.outcome)] += c.quantity; }
   v.orders.push(o);
   return v;
 }
 
+// Simplification: Horizen stamps blocks +1 s, so a request sent at head h is committed, and its tick runs, at T ≥ h + 2.
+// Must be 0 on a chain that can repeat a timestamp.
+const LEAD = 2;
+const SIDES = [["up", "sell"], ["down", "sell"], ["up", "buy"], ["down", "buy"]];
+
 /**
  * The next command for the open round, or null. `view` is the house's view (its latest receipt, staged commands
- * applied), `round` { id, cutoff }, `now` chain time, `p` the fair Up probability or null when pricing is refused.
+ * applied), `round` { id, cutoff }, `now` chain time, `p` the fair Up probability or null when pricing is refused,
+ * `cycle` the measured seconds from sending a request to its receipt, `optional` whether a requote that only helps
+ * users may go out now. An order expiring by now + LEAD counts as gone: its replacement is sent before it expires and
+ * activates after the checkpoint released it, so no fifth order and no cancel. In order:
  *   from cutoff − 120: no new orders; in [cutoff − 90, cutoff) a cancel_all if anything still rests;
- *   a cancel_all when a resting quote is `requoteDriftCents` or more from 100p;
- *   otherwise the first missing quote of askUp, askDown, bidUp, bidDown (minting sets first for an ask), each
- *   expiring at min(now + lifetime, cutoff − 60) and skipped if the total worst stake would pass maxStakeUsdc.
+ *   a cancel_order of the quote furthest in the trader's favour, by requoteDriftCents or more (an ask below the fresh
+ *   ask, a bid above the fresh bid);
+ *   the first missing quote of askUp, askDown, bidUp, bidDown (minting sets first for an ask), skipped if the total worst
+ *   stake would pass maxStakeUsdc; or a cancel_order of the house's own quote that the new one would cross;
+ *   only if optional, no side is missing and no rotation falls due within one cycle: a cancel_order of the quote
+ *   drifted furthest the house's way (it fails users' one-click orders).
+ * A cancel never targets an order expiring within SOON = max(12, 2 cycles): it would land after the order is gone and be
+ * refused, and since a refusal uses no nonce, the next command would be refused too. That order rotates instead.
  */
-export function plan(view, round, now, p, s) {
-  const v = release(structuredClone(view), (o) => o.expiry <= now); // the next tick's checkpoint releases these first
+export function plan(view, round, now, p, s, { cycle = 6, optional = true } = {}) {
+  const v = expire(view, now + LEAD); // gone before anything sent now activates
   const mine = v.orders.filter((o) => o.roundId === round.id);
   if (now >= round.cutoff - 120) return mine.length && now >= round.cutoff - 90 && now < round.cutoff ? { op: "cancel_all", roundId: round.id } : null;
   if (p === null) return null;
-  const h = s.halfSpreadCents, cents = Math.round(p * 1e8) / 1e6; // 100p as quotes() reads it
-  const implied = (o) => { const x = o.side === "sell" ? o.price - h : o.price + h; return o.outcome === "up" ? x : 100 - x; };
-  if (mine.some((o) => Math.abs(implied(o) - cents) >= s.requoteDriftCents)) return { op: "cancel_all", roundId: round.id };
-  const q = quotes(p, h), Q = s.quoteShares * SHARE, expiry = Math.min(now + s.quoteLifetimeSeconds, round.cutoff - 60);
+  const q = quotes(p, s.halfSpreadCents), Q = s.quoteShares * SHARE, L = s.quoteLifetimeSeconds, soon = now + Math.max(12, 2 * cycle);
+  const fresh = (outcome, side) => q[outcome][side === "sell" ? "ask" : "bid"];
+  const against = (o) => (o.side === "sell" ? fresh(o.outcome, o.side) - o.price : o.price - fresh(o.outcome, o.side)); // > 0: the trader's favour
+  const pull = (sign) => {
+    const o = mine.filter((x) => sign * against(x) >= s.requoteDriftCents && x.expiry > soon).sort((a, b) => sign * (against(b) - against(a)))[0];
+    return o ? { op: "cancel_order", orderId: o.id } : null;
+  };
+  const adverse = pull(1);
+  if (adverse) return adverse;
   const held = v.holdings.find((x) => x.roundId === round.id) ?? { up: 0, down: 0 };
-  for (const [outcome, side] of [["up", "sell"], ["down", "sell"], ["up", "buy"], ["down", "buy"]]) {
-    if (mine.some((o) => o.outcome === outcome && o.side === side)) continue;
-    const order = { op: "place_order", roundId: round.id, outcome, side, price: q[outcome][side === "sell" ? "ask" : "bid"], quantity: Q, tif: "gtc", expiry };
+  const missing = SIDES.filter(([outcome, side]) => !mine.some((o) => o.outcome === outcome && o.side === side));
+  for (const entry of missing) {
+    const [outcome, side] = entry, price = fresh(outcome, side);
+    const own = mine.find((o) => o.outcome === outcome && o.side !== side && (side === "buy" ? price >= o.price : price <= o.price));
+    if (own) { if (own.expiry > soon) return { op: "cancel_order", orderId: own.id }; continue; } // self-trade prevention would cancel the new one
+    // Side k expires on its own grid, k quarter-lifetimes apart and 0.5 to 1.5 lifetimes ahead, so rotations never fall due together.
+    // Never sooner than SOON: a deep endpoint queue can commit a request 30 s or more after it is sent, and an order already
+    // expired at its commit is refused ("invalid order", counted toward the round's refusals).
+    const x = Math.max(now + Math.ceil(L / 2), soon), phase = SIDES.indexOf(entry) * Math.floor(L / 4);
+    const order = { op: "place_order", roundId: round.id, outcome, side, price, quantity: Q, tif: "gtc", expiry: Math.min(x + (((phase - x) % L) + L) % L, round.cutoff - 60) };
     // mintSets sets, or only the shares this ask lacks when cash is short, so a small house still rests asks
     const lack = side === "sell" && held[outcome] < Q ? (v.cash >= s.mintSets * SHARE ? s.mintSets * SHARE : Q - held[outcome]) : 0;
     const mint = lack ? { op: "mint", roundId: round.id, quantity: lack } : null;
@@ -118,5 +150,6 @@ export function plan(view, round, now, p, s) {
     if (worstStake(apply(mint ? apply(v, mint) : v, order)) > s.maxStakeUsdc * SHARE) continue; // a mint itself changes no stake
     return mint ?? order;
   }
-  return null;
+  if (!optional || missing.length || mine.some((o) => o.expiry - LEAD <= now + cycle)) return null;
+  return pull(-1);
 }
