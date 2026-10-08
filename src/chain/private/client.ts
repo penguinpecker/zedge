@@ -88,6 +88,15 @@ type Step = (phase: Phase, text: string, tx?: Hex, chain?: 8453 | 26514, stage?:
 type Submitted = { step: Step; submission: Submission; ctx: AuthContext };
 export type HistoryEntry = { requestId: Hex; block: bigint; txHash: Hex; text: string; readable: boolean };
 export type Order = { roundStart: number; outcome: "up" | "down"; side: "buy" | "sell"; price: number; quantity: number; tif: "ioc" | "gtc"; expiry: number };
+/** How long (s) a one-click order waits for the house's price: the house re-quotes by cancelling and placing again, which leaves a
+ * side empty for several seconds. */
+const ORDER_WAIT = 20;
+/** A one-click order resting: when its wait ends by this client's clock (ms), and how long it was (s). */
+type Wait = { until: number; seconds: number };
+/** The account's order still resting at chain time `now` (s), if any. One-click orders go one at a time, so a user never stacks them
+ * toward the account's four-order limit. */
+export const waitingOrder = (view: View | null, now: number) => view?.orders.find((o) => o.expiry > now);
+const notFilled = (c: EngineCommand, seconds: number) => `Not filled: no ${c.side === "buy" ? "seller" : "buyer"} at ${c.price}¢ within ${seconds} s`;
 
 const DEADLINE_SECONDS = 120n;
 const STILL_WAITING = "Still waiting for the operator. Nothing is resent; your request is on chain.";
@@ -502,8 +511,9 @@ export class PrivateAccount {
     return { domain: this.#book.application.engine.domain, id: commandId(this.account, nonce), nonce, account: this.account, ...fields };
   }
 
-  /** A direct command (applied at once) or a book command (staged, activated by its tick, outcome collected by a sync). */
-  #run(label: string, fields: Omit<EngineCommand, "domain" | "id" | "nonce" | "account">, book: boolean, quantity = 0): Promise<ReceiptBody> {
+  /** A direct command (applied at once) or a book command (staged, activated by its tick, outcome collected by a sync). `wait`: a
+   * one-click order, followed while it rests (#rest). */
+  #run(label: string, fields: Omit<EngineCommand, "domain" | "id" | "nonce" | "account">, book: boolean, quantity = 0, wait?: Wait): Promise<ReceiptBody> {
     return this.#serial(async () => {
       for (let attempt = 0; ; attempt++) {
         const c = this.#command(fields), before = this.#state.view;
@@ -552,9 +562,12 @@ export class PrivateAccount {
             return body;
           }
           const o: Outcome = outcome;
-          const final = describeOutcome(o.receipt || o.status !== "applied" || c.op !== "place_order" ? o : { ...o, receipt: inferReceipt(before, this.#state.view, c) }, quantity);
-          done.step(final.phase, final.text);
+          const shown = o.receipt || o.status !== "applied" || c.op !== "place_order" ? o : { ...o, receipt: inferReceipt(before, this.#state.view, c) };
           // A result that came with the command's own receipt leaves the piped sync unread: it still brings the newer view.
+          if (wait && shown.receipt?.status === "resting") { await collect().catch(() => null); await this.#rest(done.step, c, before, quantity, wait); return { ...body, outcome: o }; }
+          // A one-click order committed after its expiry (a slow network) is refused as invalid: it was simply not filled in time.
+          const final = wait && o.status === "rejected" && o.reason === "invalid order" ? { phase: "done" as const, text: notFilled(c, wait.seconds) } : describeOutcome(shown, quantity);
+          done.step(final.phase, final.text);
           await collect().catch(() => null);
           return { ...body, outcome: o };
         } finally {
@@ -567,6 +580,25 @@ export class PrivateAccount {
     });
   }
 
+  /** A one-click order resting after its arrival: its line counts down to the expiry, then syncs read what it did, since a maker learns
+   * of its fills and of its release only from its view. The engine releases the order, and its reservation, at the first tick at or
+   * past the expiry; a sync's view holds the ticks before it, so a second sync, behind the first one's own tick, finds it gone. What
+   * filled is the change in the round's shares of that outcome since before the order (inferReceipt, with its known limit).
+   * Simplification: no sync during the wait (each is a relayed request), so a fill early in it shows only once the wait ends. */
+  async #rest(step: Step, c: EngineCommand, before: View | null, quantity: number, wait: Wait) {
+    for (let left = wait.until - this.#now(); left > 0; left = wait.until - this.#now()) {
+      this.#alive();
+      step("waiting", `Waiting for a ${c.side === "buy" ? "seller" : "buyer"} at ${c.price}¢ · ${Math.ceil(left / 1000)} s`);
+      await this.#sleep(1_000);
+    }
+    step("collecting", "Collecting result");
+    const rests = () => Boolean(this.#state.view?.orders.some((x) => x.id === c.id));
+    for (let i = 0; i < 2 && rests(); i++) await this.#sync("Collect result").catch(() => undefined);
+    if (rests()) return step("done", "Result not back yet · it shows with your next request");
+    const filled = inferReceipt(before, this.#state.view, c)?.fills?.[0]?.quantity ?? 0;
+    step("done", filled >= quantity ? "Filled" : filled ? `Partly filled · ${filled / 1e6} of ${quantity / 1e6} shares · the rest expired, its ${c.side === "buy" ? "cash" : "shares"} released` : notFilled(c, wait.seconds));
+  }
+
   /** Opens the account in the engine before any money is sent, so a full exchange (`account capacity`) is known first.
    * Nothing to do once the account has a view. */
   async register(): Promise<ReceiptBody | null> {
@@ -574,10 +606,19 @@ export class PrivateAccount {
     return this.#run("Register account", { op: "register" }, false);
   }
 
-  placeOrder(o: Order) {
+  placeOrder(o: Order, wait?: Wait) {
     const round = engineRound(this.#book, o.roundStart);
     if (o.expiry > round.spec.cutoff) throw new PublicError("Orders can rest only until the round's cutoff.");
-    return this.#run(`${o.side === "buy" ? "Buy" : "Sell"} ${o.outcome === "up" ? "Up" : "Down"}`, { op: "place_order", roundId: round.id, outcome: o.outcome, side: o.side, price: o.price, quantity: o.quantity, tif: o.tif, expiry: o.expiry }, true, o.quantity);
+    return this.#run(`${o.side === "buy" ? "Buy" : "Sell"} ${o.outcome === "up" ? "Up" : "Down"}`, { op: "place_order", roundId: round.id, outcome: o.outcome, side: o.side, price: o.price, quantity: o.quantity, tif: o.tif, expiry: o.expiry }, true, o.quantity, wait);
+  }
+  /** One-click buy: a GTC at exactly `price` (the ask shown) that rests up to ORDER_WAIT s from chain time `now`, never past the
+   * cutoff, so it still fills when the house puts its price back during a re-quote. It fills at that price or better. */
+  buy(roundStart: number, outcome: "up" | "down", price: number, quantity: number, now: number) { return this.#oneClick({ roundStart, outcome, side: "buy", price, quantity }, now); }
+  #oneClick(o: Omit<Order, "tif" | "expiry">, now: number) {
+    const rest = waitingOrder(this.#state.view, now);
+    if (rest) throw new PublicError(`Your order at ${rest.price}¢ is still waiting.`);
+    const expiry = Math.min(Math.floor(now) + ORDER_WAIT, engineRound(this.#book, o.roundStart).spec.cutoff);
+    return this.placeOrder({ ...o, tif: "gtc", expiry }, { until: this.#now() + (expiry - now) * 1000, seconds: expiry - Math.floor(now) });
   }
   cancelOrder(orderId: string) { return this.#run("Cancel order", { op: "cancel_order", orderId }, true); }
   cancelAll(roundStart: number) { return this.#run("Cancel all", { op: "cancel_all", roundId: engineRound(this.#book, roundStart).id }, true); }
@@ -783,12 +824,12 @@ export class PrivateAccount {
     });
   }
 
-  /** One-click close: an IOC sell of all this account's free shares of one side in one round, at `price` or better. */
-  close(roundStart: number, outcome: "up" | "down", price: number, expiry: number) {
+  /** One-click close: as buy, a sell of all this account's free shares of one side in one round at exactly `price` (the bid shown). */
+  close(roundStart: number, outcome: "up" | "down", price: number, now: number) {
     const id = engineRound(this.#book, roundStart).id, h = this.#state.view?.holdings.find((x) => x.roundId === id);
     const quantity = Math.floor((outcome === "up" ? h?.up ?? 0 : h?.down ?? 0) / LOT) * LOT;
     if (!quantity) throw new PublicError("Nothing to close in this round.");
-    return this.placeOrder({ roundStart, outcome, side: "sell", price, quantity, tif: "ioc", expiry });
+    return this.#oneClick({ roundStart, outcome, side: "sell", price, quantity }, now);
   }
 
   /** History in pages of HISTORY_PAGE blocks, newest first, never below `floor`: the first open reads the latest page, a reopen only
