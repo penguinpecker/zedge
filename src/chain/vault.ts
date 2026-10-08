@@ -10,6 +10,9 @@ export const EIP712_DOMAIN = [{ name: "name", type: "string" }, { name: "version
 // EIP712Domain is listed explicitly: some wallets hash an absent domain type as an empty struct.
 export const PERMIT_TYPES = { EIP712Domain: EIP712_DOMAIN, Permit: [
   { name: "owner", type: "address" }, { name: "spender", type: "address" }, { name: "value", type: "uint256" }, { name: "nonce", type: "uint256" }, { name: "deadline", type: "uint256" }] } as const;
+/** EIP-3009, as Base USDC implements it: a transfer the owner signs and anyone may send, once per random nonce. */
+export const TRANSFER_TYPES = { EIP712Domain: EIP712_DOMAIN, TransferWithAuthorization: [
+  { name: "from", type: "address" }, { name: "to", type: "address" }, { name: "value", type: "uint256" }, { name: "validAfter", type: "uint256" }, { name: "validBefore", type: "uint256" }, { name: "nonce", type: "bytes32" }] } as const;
 export function permitDomainSeparator(name: string, version: string, token: Address, chainId = 26514): Hex {
   return keccak256(encodeAbiParameters(parseAbiParameters("bytes32, bytes32, bytes32, uint256, address"), [
     keccak256(stringToHex("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)")), keccak256(stringToHex(name)), keccak256(stringToHex(version)), BigInt(chainId), token]));
@@ -24,6 +27,8 @@ export const VAULT_EIP712 = { name: "ZEDGE Vault", version: "1" } as const;
 export const PAYOUT_TYPES = { EIP712Domain: EIP712_DOMAIN, Payout: [
   { name: "applicationId", type: "uint64" }, { name: "ordinal", type: "uint64" }, { name: "account", type: "address" }, { name: "to", type: "address" }, { name: "amount", type: "uint256" }] } as const;
 export const CUSTODY_MISMATCH = "Custody checks did not pass.";
+/** The smallest send out of a user's Base wallet: 0.10 USDC. */
+export const MIN_SEND = 100_000n;
 
 // ---------------------------------------------------------------- the manifest's `custody` section
 
@@ -84,6 +89,11 @@ export function usdcPermitTypedData(custody: Pick<Custody, "usdc" | "vault">, f:
   return { domain: { name: custody.usdc.permit.name, version: custody.usdc.permit.version, chainId: BigInt(BASE_CHAIN_ID), verifyingContract: custody.usdc.address }, types: PERMIT_TYPES,
     primaryType: "Permit" as const, message: { owner: f.owner, spender: custody.vault.address, value: f.value, nonce: f.nonce, deadline: f.deadline } };
 }
+/** The user's send out of the Base wallet (the wallet popup's send form): a USDC transfer the user confirms in the wallet. */
+export function usdcTransferTypedData(custody: Pick<Custody, "usdc">, f: { from: Address; to: Address; value: bigint; validAfter: bigint; validBefore: bigint; nonce: Hex }) {
+  return { domain: { name: custody.usdc.permit.name, version: custody.usdc.permit.version, chainId: BigInt(BASE_CHAIN_ID), verifyingContract: custody.usdc.address }, types: TRANSFER_TYPES,
+    primaryType: "TransferWithAuthorization" as const, message: { from: f.from, to: f.to, value: f.value, validAfter: f.validAfter, validBefore: f.validBefore, nonce: f.nonce } };
+}
 
 export const vaultAbi = parseAbi([
   "function depositWithPermit(address account, uint256 amount, uint256 deadline, uint8 v, bytes32 r, bytes32 s) returns (uint64 index)",
@@ -106,6 +116,8 @@ export const inboxAbi = parseAbi([
 ]);
 export const usdcAbi = parseAbi([
   "function nonces(address owner) view returns (uint256)", "function balanceOf(address owner) view returns (uint256)",
+  "function transferWithAuthorization(address from, address to, uint256 value, uint256 validAfter, uint256 validBefore, bytes32 nonce, uint8 v, bytes32 r, bytes32 s)",
+  "event Transfer(address indexed from, address indexed to, uint256 value)", "event AuthorizationUsed(address indexed authorizer, bytes32 indexed nonce)",
 ]);
 
 // ---------------------------------------------------------------- the guest's public app events (data = 32-byte words; subtype = SHA-256 of the label)

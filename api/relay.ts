@@ -26,7 +26,7 @@ export async function POST(request: Request): Promise<Response> {
     config, store: redisStore(env.KV_REST_API_URL, env.KV_REST_API_TOKEN), signer: signerFromEnv(env.RELAYER_PRIVATE_KEY),
     // The thirdweb gateway by default: the operator keeps Caldera to itself.
     wire: config ? viemWire(env.HORIZEN_RPC_URL ?? "https://26514.rpc.thirdweb.com", config.book) : null,
-    // Base carries the vault deposits; a private endpoint is advised over the public default.
+    // Base carries the vault deposits and users' sends; a private endpoint is advised over the public default.
     base: config ? viemWire(env.BASE_RPC_URL ?? "https://mainnet.base.org", config.book) : null,
     log: (line) => console.log(line),
   });
