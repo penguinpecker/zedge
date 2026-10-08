@@ -92,7 +92,7 @@ With `--fork`, also give the fork's deployment. Every address must be lowercase.
 5. **Pull a stale quote.** Each decision, in this order:
    - **A quote in the trader's favour** by `requoteDriftCents` or more (an ask below the price it would get now, a bid above it) is pulled first with `cancel_order`, the furthest first, even before an empty side is refilled.
    - **Empty sides** are then refilled. If the new quote would meet the house's own quote on the other side of that book, that quote is pulled instead: the engine's self-trade prevention would cancel the new one.
-   - **A quote drifted the house's way** (it fails users' one-click orders, which allow 5¢ of slack) is pulled only when no side is empty (even one the stake cap or cash leaves empty), no rotation falls due within one request cycle, at most once per 15 s, and only while the endpoint queue is empty, so user trades are not queued behind it.
+   - **A quote drifted the house's way** (users pay above the fresh price for it) is pulled only when no side is empty (even one the stake cap or cash leaves empty), no rotation falls due within one request cycle, at most once per 15 s, and only while the endpoint queue is empty, so user trades are not queued behind it.
    - **Near expiry, nothing is cancelled.** No quote expiring within max(12 s, 2 request cycles) is cancelled: the cancel would land after it is gone and be refused (`unknown active order`), and since a refusal uses no nonce, the next command would be refused too. It rotates instead. The request cycle is a moving average of submission to completion (the `round done` line prints it).
 6. **Wind down.** From cutoff − 120 it places nothing new. Between cutoff − 90 and cutoff − 60 it sends a `cancel_all` if anything still rests, as a backstop.
 7. **Settle.** The engine's settlement sweep redeems the house's shares in the round. The house's next command after a sweep is usually refused for its nonce. That refusal is private and costs one request, and its receipt carries the right nonce for the next one.
@@ -183,7 +183,7 @@ A house request costs 1,684,953 to 1,685,044 gas at 1,000,252 wei, about **0.000
 | Round | House requests per round | House ETH per round | House ETH per day |
 | --- | --- | --- | --- |
 | Calm: 1 mint, 4 quotes, about 47 rotations, the wind-down `cancel_all` (simulated) | ~53 | ~0.00009 | ~0.009 |
-| Busy: the simulator's random walks above | 75 to 90 | 0.00013 to 0.00015 | 0.012 to 0.015 |
+| Busy: the simulator's random walks above, 2 to 8 s per request | 70 to 100 | 0.00012 to 0.00017 | 0.011 to 0.017 |
 | Ceiling: one request in flight for the whole round at the measured 3.1 s per request | ~250 | ~0.00042 | ~0.040 |
 
 The operator pays about 0.5 to 0.7 times these figures again. At least 0.1 ETH in the house wallet lasts about 2.5 days at the ceiling and about 11 days in calm rounds; the `minEthWei` floor (0.0002 ETH) leaves room for about 100 cancels.

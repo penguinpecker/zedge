@@ -113,7 +113,7 @@ const SIDES = [["up", "sell"], ["down", "sell"], ["up", "buy"], ["down", "buy"]]
  *   the first missing quote of askUp, askDown, bidUp, bidDown (minting sets first for an ask), skipped if the total worst
  *   stake would pass maxStakeUsdc; or a cancel_order of the house's own quote that the new one would cross;
  *   only if optional, no side is missing and no rotation falls due within one cycle: a cancel_order of the quote
- *   drifted furthest the house's way (it fails users' one-click orders).
+ *   drifted furthest the house's way (users pay above the fresh price for it).
  * A cancel never targets an order expiring within SOON = max(12, 2 cycles): it would land after the order is gone and be
  * refused, and since a refusal uses no nonce, the next command would be refused too. That order rotates instead.
  */
