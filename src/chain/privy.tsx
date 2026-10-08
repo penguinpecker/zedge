@@ -74,10 +74,11 @@ function PrivyBridge({ children }: { children: ReactNode }) {
     onComplete: () => setError(""),
     onError: (code: string) => setError(SIGN_IN_ERRORS[code] ?? "Sign-in did not finish. Try again."),
   }), []));
-  const { wallets } = useWallets();
+  const { wallets, ready: walletsReady } = useWallets();
   const { signMessage } = useSignMessage();
   const { signTypedData } = useSignTypedData();
-  const embedded = authenticated ? wallets.find((w) => w.walletClientType === "privy") ?? null : null;
+  // Not before Privy reports its wallets ready: a signature asked for earlier may be refused ("Session is no longer active").
+  const embedded = authenticated && walletsReady ? wallets.find((w) => w.walletClientType === "privy") ?? null : null;
   const address = embedded?.address.toLowerCase() as Address | undefined;
   const value = useMemo<ChainWallet>(() => {
     // Silent: only ZEDGE's own signatures reach these calls (use-private.ts checks each one first).

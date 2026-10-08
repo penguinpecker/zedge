@@ -64,7 +64,8 @@ export function usePrivate(wallet: ChainWallet, orderbook: VerifiedOrderbook | n
       setSnapshot(created.snapshot);
       void created.refreshFunds().catch(() => undefined);
       // One click less: the first account after sign-in unlocks itself (one silent signature, then a sync). After Lock it waits for a click.
-      if (generation === 0) void run((a) => a.unlock());
+      // Refused right after sign-in, it is tried once more (10-08: the wallet service once answered "Session is no longer active").
+      if (generation === 0) void run((a) => a.unlock()).then((ok) => { if (!ok && live) setTimeout(() => { if (live) void run((a) => a.unlock()); }, 2_000); });
     }, () => { if (live) setError("Private features could not load. Refresh to try again."); });
     // The Base balance is shown live while signed in: USDC sent from elsewhere appears within 10 s. Not while the tab is hidden.
     const funds = setInterval(() => { if (!document.hidden) void created?.refreshFunds().catch(() => undefined); }, 10_000);
