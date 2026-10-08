@@ -25,11 +25,12 @@ async function stack(options: { relayRefuses?: (body: RelayBody) => { code: stri
   raw.authenticator.enclavePublicKey = enclaveKey;
   const book = parseOrderbookManifest(raw) as VerifiedOrderbook["manifest"];
   const keys = new Map<string, CryptoKey>(), nonces = new Map<string, bigint>(), permitNonces = new Map<string, bigint>();
-  type Account = { nonce: number; cash: number; up: number; down: number; round?: string; staged?: { command: Record<string, never>; wait: number }; outcome?: unknown };
+  type Rest = { id: string; roundId: string; outcome: "up" | "down"; side: "buy" | "sell"; price: number; original: number; remaining: number; filled: number; filledNotional: number; feePaid: number; maxFee: number; reservedCash: number; sequence: number; expiry: number };
+  type Account = { nonce: number; cash: number; up: number; down: number; round?: string; staged?: { command: Record<string, never>; wait: number }; outcome?: unknown; orders?: Rest[] };
   const views = new Map<string, Account>();
   // Submissions by signature: the chain answers settle() from the calldata, whatever the relayer said.
   const submissions = new Map<string, Submission>(), completions = new Map<Hex, Completion>();
-  const sent: RelayBody[] = [], log: string[] = [];
+  const sent: RelayBody[] = [], log: string[] = [], commands: Record<string, unknown>[] = [];
   let block = 100n, ticks = 0, time = 1_791_301_500n, sequence = 1;
   // Base and the vault: deposits by index, the guest's credits and payouts, the vault's payments.
   let baseBlock = 500n, wallet = 50_000_000n, ordinals = 0n;
@@ -42,15 +43,24 @@ async function stack(options: { relayRefuses?: (body: RelayBody) => { code: stri
     return encrypt(enclave.privateKey, keys.get(account)!, encoder.encode(JSON.stringify(env)));
   };
   const viewOf = (account: string) => {
-    const v = views.get(account)!;
-    return { account, sequence, nonce: v.nonce, cash: v.cash, reservedCash: 0, holdings: v.up || v.down || v.round ? [{ roundId: v.round ?? "r", up: v.up, down: v.down, reservedUp: 0, reservedDown: 0 }] : [], orders: [], withdrawals: [] };
+    const v = views.get(account)!, orders = v.orders ?? [];
+    const offered = (outcome: string) => orders.filter((o) => o.side === "sell" && o.outcome === outcome).reduce((n, o) => n + o.remaining, 0);
+    return { account, sequence, nonce: v.nonce, cash: v.cash, reservedCash: orders.reduce((n, o) => n + o.reservedCash, 0), holdings: v.up || v.down || v.round ? [{ roundId: v.round ?? "r", up: v.up, down: v.down, reservedUp: offered("up"), reservedDown: offered("down") }] : [], orders: orders.map((o) => ({ ...o })), withdrawals: [] };
   };
   // A tick activates the staged order against a house ask of 55; its result waits for the account's next request.
   const activate = (account: string, v: Account) => {
     const c = v.staged!.command as Record<string, never>;
-    v.staged = undefined; v.nonce++; sequence++;
+    v.staged = undefined;
+    // The engine admits an order only before its expiry; a refusal consumes no nonce.
+    if (c.op === "place_order" && time >= BigInt(c.expiry)) { v.outcome = { account, commandId: c.id, tick: ticks, status: "rejected", reason: "invalid order" }; return; }
+    v.nonce++; sequence++;
     const fills = c.side === "buy" && c.price >= 55 ? [{ orderId: c.id, role: "taker", side: "buy", roundId: c.roundId, outcome: c.outcome, price: 55, quantity: c.quantity, fee: 0 }] : [];
     if (fills.length) { v.round = c.roundId; v[c.outcome === "up" ? "up" : "down"] += c.quantity; v.cash -= Math.floor(c.quantity / 100) * 55; }
+    else if (c.tif === "gtc") {
+      const reservedCash = c.side === "buy" ? Math.floor(c.quantity / 100) * c.price : 0;
+      if (c.side === "buy") v.cash -= reservedCash; else v[c.outcome === "up" ? "up" : "down"] -= c.quantity;
+      (v.orders ??= []).push({ id: c.id, roundId: c.roundId, outcome: c.outcome, side: c.side, price: c.price, original: c.quantity, remaining: c.quantity, filled: 0, filledNotional: 0, feePaid: 0, maxFee: 0, reservedCash, sequence, expiry: c.expiry });
+    }
     const receipt = { sequence: 2, commandId: c.id, status: fills.length ? "filled" : c.tif === "ioc" ? "ioc_complete" : "resting", fills };
     v.outcome = { account, commandId: c.id, tick: ticks, status: "applied", ...(options.noReceipt ? {} : { receipt }) };
   };
@@ -62,6 +72,9 @@ async function stack(options: { relayRefuses?: (body: RelayBody) => { code: stri
     if (type === 3) { keys.set(sender, await importPublicKeyFromHex(payload.slice(2))); views.set(sender, views.get(sender) ?? { nonce: 0, cash: 0, up: 0, down: 0 }); log.push("associate"); return done(0, 0, "", []); }
     if (!keys.has(sender)) { log.push("no key"); return done(1, 9, "no Secp521r1_PubKey found", []); }
     const v = views.get(sender)!;
+    // The engine's checkpoint before this request releases orders at or past their expiry, and their reservations.
+    for (const o of (v.orders ?? []).filter((x) => time >= BigInt(x.expiry))) { if (o.side === "buy") v.cash += o.reservedCash; else v[o.outcome] += o.remaining; }
+    v.orders = (v.orders ?? []).filter((x) => time < BigInt(x.expiry));
     const env = JSON.parse(decoder.decode(await decrypt(enclave.privateKey, keys.get(sender)!, hexToBytes(payload))));
     assert.equal(hexToBytes(payload).length, 2076, "every request is one size");
     const tick = keccak256(toHex(`tick:${++ticks}`));
@@ -80,6 +93,7 @@ async function stack(options: { relayRefuses?: (body: RelayBody) => { code: stri
     }
     const c = JSON.parse(env.body.command);
     log.push(c.op);
+    commands.push(c);
     if (c.nonce !== v.nonce + 1) return reply({ type: "command", status: "rejected", reason: "replayed, conflicting or out-of-order nonce" });
     if (["place_order", "cancel_order", "cancel_all"].includes(c.op)) {
       v.staged = { command: c, wait: options.activateAfter ?? 0 };
@@ -165,7 +179,14 @@ async function stack(options: { relayRefuses?: (body: RelayBody) => { code: stri
   };
   /** Cash credited outside this client (a deposit made earlier); the account sees it with its next receipt. */
   const fund = (account: string, amount: number) => { views.get(account)!.cash += amount; sequence++; };
-  return { book, chain, relay, sent, log, views, fund, settles, nonces, history, wallet: () => wallet };
+  /** The house takes `quantity` of the account's resting order at its price; the account sees it with its next receipt. */
+  const trade = (account: string, quantity: number) => {
+    const v = views.get(account)!, o = v.orders![0], notional = Math.floor(quantity / 100) * o.price;
+    o.remaining -= quantity; o.filled += quantity; o.filledNotional += notional; sequence++;
+    if (o.side === "buy") { o.reservedCash -= notional; v.round = o.roundId; v[o.outcome] += quantity; } else v.cash += notional;
+    v.orders = v.orders!.filter((x) => x.remaining > 0);
+  };
+  return { book, chain, relay, sent, log, commands, views, fund, trade, settles, nonces, history, wallet: () => wallet, time: () => time, advance: (ms: number) => { time += BigInt(Math.ceil(ms / 1000)); } };
 }
 
 function wallet(key = generatePrivateKey(), sign?: (m: string) => Promise<Hex>): Signer & { calls: number } {
@@ -176,10 +197,10 @@ function wallet(key = generatePrivateKey(), sign?: (m: string) => Promise<Hex>):
   return s as Signer & { calls: number };
 }
 const memory = () => { const m = new Map<string, string>(); return { get: (k: string) => m.get(k) ?? null, set: (k: string, v: string) => void m.set(k, v), m }; };
-const open = (s: Awaited<ReturnType<typeof stack>>, signer: Signer, hints = memory()) => {
+const open = (s: Awaited<ReturnType<typeof stack>>, signer: Signer, hints = memory(), clock?: { now: () => number; sleep: (ms: number) => Promise<void> }) => {
   const snapshots: Snapshot[] = [];
   let t = 0;
-  const account = new PrivateAccount(s.book, signer, s.chain, s.relay, { hints, onChange: (x) => snapshots.push(x), now: () => (t += 1000), sleep: async () => {} });
+  const account = new PrivateAccount(s.book, signer, s.chain, s.relay, { hints, onChange: (x) => snapshots.push(x), now: () => (t += 1000), sleep: async () => {}, ...clock });
   const phases = (action: string) => snapshots.flatMap((x) => x.actions.filter((a) => a.action === action).slice(0, 1)).map((a) => a.text).filter((text, i, all) => text !== all[i - 1]);
   return { account, snapshots, phases, hints };
 };
@@ -319,6 +340,60 @@ test("a book order goes Signing, Sending, Submitted, Waiting, Staged, Matching, 
   assert.equal(resting.outcome?.receipt?.status, "resting");
   assert.equal(phases("Buy Down").at(-1), "Resting");
   assert.throws(() => account.placeOrder({ roundStart: ROUND, outcome: "up", side: "buy", price: 50, quantity: 1000, tif: "gtc", expiry: ROUND + 871 }), /cutoff/);
+});
+
+/** A clock that is the chain's: it moves only while the client sleeps, then `onSleep` runs. */
+const chainClock = (s: Awaited<ReturnType<typeof stack>>, onSleep: () => unknown = () => {}) => ({ now: () => Number(s.time()) * 1000, sleep: async (ms: number) => { s.advance(ms); await onSleep(); } });
+const order = (c: Record<string, unknown> | undefined) => c && { op: c.op, side: c.side, price: c.price, quantity: c.quantity, tif: c.tif, expiry: c.expiry };
+
+test("one-click buy and close: a GTC at exactly the price shown that rests 20 s from now, never past the cutoff; the line counts down, then says it did not fill", async () => {
+  const s = await stack(), at = Number(s.time());
+  const { account, phases } = open(s, wallet(), memory(), chainClock(s));
+  await account.unlock();
+  s.fund(account.account, 10_000_000);
+  await account.buy(ROUND, "up", 50, 2_000_000, at + 0.4);
+  assert.deepEqual(order(s.commands.at(-1)), { op: "place_order", side: "buy", price: 50, quantity: 2_000_000, tif: "gtc", expiry: at + 20 });
+  const buy = phases("Buy Up");
+  assert.deepEqual(buy.filter((t) => t.startsWith("Waiting for a")).filter((_, i, all) => i === 0 || i === all.length - 1), ["Waiting for a seller at 50¢ · 20 s", "Waiting for a seller at 50¢ · 1 s"]);
+  assert.deepEqual(buy.slice(-2), ["Collecting result", "Not filled: no seller at 50¢ within 20 s"]);
+  assert.deepEqual([account.snapshot.view?.orders.length, account.snapshot.view?.cash, account.snapshot.view?.reservedCash], [0, 10_000_000, 0], "expired: its cash is back");
+  // A close 10 s before the cutoff waits only until the cutoff.
+  await account.mint(ROUND, 3_000_000);
+  s.advance((ROUND + 860 - Number(s.time())) * 1000);
+  await account.close(ROUND, "up", 40, ROUND + 860);
+  assert.deepEqual(order(s.commands.at(-1)), { op: "place_order", side: "sell", price: 40, quantity: 3_000_000, tif: "gtc", expiry: ROUND + 870 });
+  assert.equal(phases("Sell Up").at(-1), "Not filled: no buyer at 40¢ within 10 s");
+  assert.deepEqual([account.snapshot.view?.holdings[0].up, account.snapshot.view?.holdings[0].reservedUp], [3_000_000, 0], "expired: its shares are back");
+  // One that reaches the book after its expiry (a slow network) is refused as invalid by the engine: it was not filled in time.
+  await account.buy(ROUND, "down", 30, 1_000_000, Number(s.time()) - 25);
+  assert.equal(phases("Buy Down").at(-1), "Not filled: no seller at 30¢ within 20 s");
+});
+
+test("a one-click order the house fills while it waits: all of it, or part with the rest expired and its cash released; one at a time, after a reload too", async () => {
+  const s = await stack(), signer = wallet();
+  let fill = 0, start = 0n, blocked: unknown = null;
+  const { account, phases } = open(s, signer, memory(), chainClock(s, async () => {
+    if (s.time() !== start + 5n) return;
+    s.trade(account.account, fill);
+    if (fill === 2_000_000) return;
+    // Another tab of this account unlocks while the rest still rests: its view lists the order, and it may not place another.
+    const other = open(s, signer, memory(), chainClock(s));
+    await other.account.unlock();
+    assert.deepEqual(other.account.snapshot.view?.orders.map((o) => o.remaining), [1_000_000]);
+    try { other.account.buy(ROUND, "down", 30, 1_000_000, Number(s.time())); } catch (e) { blocked = e; }
+  }));
+  await account.unlock();
+  s.fund(account.account, 10_000_000);
+  fill = 2_000_000; start = s.time();
+  await account.buy(ROUND, "up", 50, 2_000_000, Number(start));
+  assert.equal(phases("Buy Up").at(-1), "Filled");
+  fill = 1_000_000; start = s.time();
+  await account.buy(ROUND, "up", 50, 2_000_000, Number(start));
+  assert.equal(phases("Buy Up").at(-1), "Partly filled · 1 of 2 shares · the rest expired, its cash released");
+  assert.match((blocked as Error)?.message, /^Your order at 50¢ is still waiting\.$/);
+  assert.deepEqual([account.snapshot.view?.cash, account.snapshot.view?.reservedCash, account.snapshot.view?.holdings[0].up], [8_500_000, 0, 3_000_000]);
+  // Once it is gone, the next one goes.
+  assert.equal(s.commands.filter((c) => c.op === "place_order").length, 2);
 });
 
 test("a book order's collect sync goes out as soon as the order is submitted, before the operator runs it: two requests, then its fills", async () => {

@@ -15,7 +15,7 @@ import { createPriceFeed } from "./price-feed.ts";
 import { engineRound, LOT, OPERATOR_KEYS_CHANGED, type OrderbookManifest, type VerifiedOrderbook } from "./orderbook-manifest.ts";
 import { usePrivate, type PrivateState } from "./private/use-private.ts";
 import { ActionLine, DepositSteps, PrivateHistory, PrivateOrders, PrivatePortfolio, shares, usdc } from "./PrivatePanels.tsx";
-import { sharesFor } from "./private/client.ts";
+import { sharesFor, waitingOrder } from "./private/client.ts";
 import type { DeploymentManifest, VerifiedDeployment } from "./manifest.ts";
 import { STREAMS_MISMATCH_REASON, STREAMS_PLANNED_REASON, StreamsMismatchError } from "./streams-manifest.ts";
 import { rpcCooldownRemaining } from "./rpc.ts";
@@ -91,11 +91,11 @@ function RoundResults({ results }: { results: RoundResult[] }) {
 }
 
 type TicketRound = { start: number; cutoff: number; end: number; opening: string | null };
-/** One click to enter (an IOC buy), one click to close (an IOC sell of the whole side); the engine decides every fill, at the
- * resting order's price. With the house's quotes for this round the Up and Down buttons show its ask, the buy's limit exactly, and
- * Close its bid. Without them, the house's ask for its fair value (the display feed and the Chainlink opening price), marked as an
- * estimate, with the one-click slack on the limits (market-view.ts sidePrice). `slot`: the current round, whose position shows
- * until it ends. */
+/** One click to enter (a buy), one click to close (a sell of the whole side), each a GTC that waits up to 20 s for its price
+ * (client.ts buy), one at a time; the engine decides every fill, at the resting order's price. With the house's quotes for this
+ * round the Up and Down buttons show its ask, the buy's limit exactly, and Close its bid. Without them, the house's ask for its
+ * fair value (the display feed and the Chainlink opening price), marked as an estimate, with the one-click slack on the limits
+ * (market-view.ts sidePrice). `slot`: the current round, whose position shows until it ends. */
 function Ticket({ priv, orderbook, wallet, round, slot, now, up, house, outcome, onOutcome, loading, onAccount, onFunds }: { priv: PrivateState; orderbook: VerifiedOrderbook | null; wallet: ChainWallet; round: TicketRound | null; slot: number; now: number; up: number | null; house: House | null; outcome: Side; onOutcome: (side: Side) => void; loading: boolean; onAccount: () => void; onFunds: () => void }) {
   const [stake, setStake] = useState("5");
   const [depositing, setDepositing] = useState(false);
@@ -111,13 +111,14 @@ function Ticket({ priv, orderbook, wallet, round, slot, now, up, house, outcome,
   const offered = house?.[outcome].ask?.shares ?? Infinity;
   const wanted = limit && pay > 0 ? sharesFor(pay, limit) : 0, quantity = Math.min(wanted, room, offered);
   const toCutoff = round ? round.cutoff - now : null;
-  const trading = Boolean(book && unlocked && round && toCutoff !== null && toCutoff > ORDER_MARGIN && !priv.busy);
+  const rest = waitingOrder(view, now);
+  const trading = Boolean(book && unlocked && round && toCutoff !== null && toCutoff > ORDER_MARGIN && !priv.busy && !rest);
   const held = view && book ? view.holdings.find((h) => h.roundId === engineRound(book, round?.start ?? slot).id) : undefined;
   const free = (side: Side) => Math.floor((side === "up" ? held?.up ?? 0 : held?.down ?? 0) / LOT) * LOT;
   const total = (side: Side) => side === "up" ? (held?.up ?? 0) + (held?.reservedUp ?? 0) : (held?.down ?? 0) + (held?.reservedDown ?? 0);
   const name = outcome === "up" ? "Up" : "Down";
-  const buy = () => { if (round && limit && quantity) void priv.run((a) => a.placeOrder({ roundStart: round.start, outcome, side: "buy", price: limit, quantity, tif: "ioc", expiry: round.cutoff })); };
-  const close = (side: Side) => { const p = quote(side).sell; if (round && p !== null) void priv.run((a) => a.close(round.start, side, p, round.cutoff)); };
+  const buy = () => { if (round && limit && quantity) void priv.run((a) => a.buy(round.start, outcome, limit, quantity, now)); };
+  const close = (side: Side) => { const p = quote(side).sell; if (round && p !== null) void priv.run((a) => a.close(round.start, side, p, now)); };
   // Until the buy deposits for itself: the stake, from the wallet's USDC on Base, in one click (within the vault's deposit limits).
   const limits = book?.custody.vault.limits, least = BigInt(limits?.minDeposit ?? 0), most = limits && onBase !== null ? onBase < BigInt(limits.maxDeposit) ? onBase : BigInt(limits.maxDeposit) : 0n;
   const want = pay > 0 ? BigInt(pay) : least, offer = limits && most > 0n && most >= least ? want < least ? least : want > most ? most : want : null;
@@ -137,7 +138,7 @@ function Ticket({ priv, orderbook, wallet, round, slot, now, up, house, outcome,
     : limit === null ? [house ? "No seller right now" : "Price unavailable", buy, false]
     : [chosen.est ? `Buy ${name} · up to ${limit}¢` : `Buy ${name} · ${limit}¢`, buy, trading && quantity > 0 && pay <= cash] as const;
   const short = unlocked && cash > 0 && pay > cash;
-  const reason = pay < 0 ? "Enter an amount like 2.5" : short ? "Not enough balance" : wanted > 0 && room === 0 ? "Round limit reached"
+  const reason = rest ? `Your order at ${rest.price}¢ is still waiting` : pay < 0 ? "Enter an amount like 2.5" : short ? "Not enough balance" : wanted > 0 && room === 0 ? "Round limit reached"
     : quantity < wanted ? quantity === offered ? `Only ${shares(offered)} shares on offer at ${limit}¢` : "Capped at this round's limit" : "";
   const last = priv.snapshot?.lastResult ?? null;
   return <aside id="chain-ticket" className="chain-panel chain-ticket" aria-label="Order ticket"><div className="chain-panel-heading"><h2>Make your call</h2><span className="chain-pill">Up / Down</span></div>
