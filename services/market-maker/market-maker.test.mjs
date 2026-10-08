@@ -170,8 +170,8 @@ test("plan: no cancel for an order expiring within max(12, 2 cycles), the self-c
 
 /** The bot against a model exchange over one round: one request in flight at a time, each taking d() seconds; a command
  * applies at T = sent + d after the tick's checkpoint released orders with expiry ≤ T; idle, the bot looks again every
- * pollSeconds; an optional requote at most once per 15 s. Returns what the engine would refuse and the longest stretch
- * any side had no live order from the first full set to cutoff − 120. */
+ * pollSeconds; an optional requote at most once per 15 s. Returns what the engine would refuse, the longest stretch any side
+ * had no live order and the most sides empty at one time, from the first full set to cutoff − 120. */
 function simulate(r, from, price, d, cycle) {
   let v = funded(200), t = from, last = -Infinity, requests = 0;
   const flags = [], live = new Map(); // order ID → [side, from, to)
@@ -193,17 +193,21 @@ function simulate(r, from, price, d, cycle) {
   const covered = (side, x) => [...live.values()].some(([s, a, b]) => s === side && a <= x && x < b), sides = ["sell up", "sell down", "buy up", "buy down"];
   let x = from;
   while (!sides.every((side) => covered(side, x))) x++;
-  let gap = 0;
+  let gap = 0, most = 0;
   for (const side of sides) for (let y = x, empty = 0; y < r.cutoff - 120; y++) gap = Math.max(gap, (empty = covered(side, y) ? 0 : empty + 1));
-  return { flags, gap, requests };
+  for (let y = x; y < r.cutoff - 120; y++) most = Math.max(most, sides.filter((side) => !covered(side, y)).length);
+  return { flags, gap, requests, most };
 }
 
-test("rotation: one request in flight never leaves a side empty longer than the request takes, and nothing is refused", () => {
+test("rotation: a re-quote empties one side at a time, never longer than the request takes, and nothing is refused", () => {
   const r = { id: "r", cutoff: 870 }; // start 0, cutoff buffer 30
-  for (const d of [2, 6]) {
-    const { flags, gap, requests } = simulate(r, 10, () => 0.5, () => d, d);
+  for (const d of [2, 3, 6]) {
+    const { flags, gap, requests, most } = simulate(r, 10, () => 0.5, () => d, d);
     assert.deepEqual(flags, [], `d ${d}`);
-    assert.ok(gap <= d, `d ${d}: a side was empty for ${gap} s`);
+    // The old quote must be released before its replacement activates (four orders at most), and the replacement goes out
+    // at expiry − 2 or, between 2 s polls, expiry − 1: a side is empty for the request's time beyond that, and only that side.
+    assert.ok(most <= 1, `d ${d}: ${most} sides were empty at once`);
+    assert.ok(gap <= d - 1, `d ${d}: a side was empty for ${gap} s`);
     assert.ok(requests >= 50 && requests <= 60, `d ${d}: ${requests} requests in a calm round`); // README gas estimate
   }
   // A seeded random walk (±1 cent steps, ±8 cent jumps), each request taking 2 to 8 s: no refusal of any kind.
@@ -256,6 +260,8 @@ test("settings: the example parses; a fork deployment only with --fork; unknown 
   assert.deepEqual(Object.entries(example).filter(([k, v]) => k !== "minEthWei" && S[k] !== v), []);
   assert.equal(settingsFrom({ maxRpcPerRound: 20_000 }, "mainnet", configured).maxRpcPerRound, 20_000);
   assert.throws(() => settingsFrom({ maxRpcPerRound: 20_001 }, "mainnet", configured), /maxRpcPerRound/);
+  const railway = JSON.parse(readFileSync(new URL("railway.settings.json", import.meta.url), "utf8"));
+  assert.deepEqual(settingsFrom(railway, "mainnet", configured), S, "Railway runs the defaults: the brake, not a lower budget");
 });
 
 test("the queue guard: quotes and syncs wait at 5 pending requests, a needed cancel goes out until 9, an optional one only into an empty queue", () => {
@@ -273,4 +279,11 @@ test("quotes for the site: per outcome the lowest resting sell and the highest r
   assert.deepEqual(houseQuotes(view, r, 9_100, 123), { at: 123, start: 9_000,
     up: { ask: { cents: 55, shares: 5.5 }, bid: { cents: 44, shares: 2 } }, down: { ask: null, bid: { cents: 40, shares: 10 } } }, "expired, other-round and filled orders left out");
   assert.deepEqual(houseQuotes(EMPTY, { id: "s", start: 9_900 }, 9_900, 124), { at: 124, start: 9_900, up: { ask: null, bid: null }, down: { ask: null, bid: null } });
+  // A rotation: at 9058 the Up ask (53¢ until 9060) counts as gone and its replacement is staged. A click sent now commits at
+  // 9060 or later, after the checkpoint released the old ask, so it meets the replacement: that is the ask shown.
+  const four = run(apply(funded(200), mint), 9_000, 0.5).v, next = plan(four, round, 9_058, 0.53, S), at = { ...round, start: 9_000 };
+  assert.deepEqual([next.side, next.outcome, next.price], ["sell", "up", 56]);
+  assert.deepEqual(houseQuotes(apply(four, { ...next, id: "n" }), at, 9_058, 1).up.ask, { cents: 56, shares: 10 });
+  assert.equal(houseQuotes(four, at, 9_058, 1).up.ask, null, "no replacement sent yet: nothing a click can still reach");
+  assert.deepEqual(houseQuotes(four, at, 9_057, 1).up.ask, { cents: 53, shares: 10 }, "3 s before its expiry the old ask still counts");
 });

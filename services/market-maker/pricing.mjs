@@ -98,7 +98,7 @@ export function apply(view, c) {
 
 // Simplification: Horizen stamps blocks +1 s, so a request sent at head h is committed, and its tick runs, at T ≥ h + 2.
 // Must be 0 on a chain that can repeat a timestamp.
-const LEAD = 2;
+export const LEAD = 2;
 const SIDES = [["up", "sell"], ["down", "sell"], ["up", "buy"], ["down", "buy"]];
 
 /**

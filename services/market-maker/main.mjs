@@ -14,7 +14,7 @@ import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
-import { SHARE, apply, expire, fairUp, plan, quotes, realizedSigma, spotCheck, worstStake } from "./pricing.mjs";
+import { LEAD, SHARE, apply, expire, fairUp, plan, quotes, realizedSigma, spotCheck, worstStake } from "./pricing.mjs";
 
 const CHAIN = 26514, BASE = 8453, DURATION = 900, PROCESS = 1, ASSOCIATEKEY = 3, PUB_KEY_NOT_REGISTERED = 9, MAX_REFUSALS = 3;
 const BASE_USDC = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913";
@@ -61,9 +61,10 @@ const pulls = (op, optional) => !optional && (op === "cancel_all" || op === "can
 export function queueFull(queue, op, optional = false) { return queue >= (optional ? 1n : pulls(op) ? 9n : 5n); }
 
 /** The /quotes body (README "Quotes for the site"): per outcome, the lowest resting sell (ask) and the highest resting buy (bid) of
- * `view` in round r ({ id, start }) at chain time `now`, as { cents, shares }, or null where none rests; `at` in ms. */
+ * `view` in round r ({ id, start }) at chain time `now`, as { cents, shares }, or null where none rests; `at` in ms. An order
+ * expiring by now + LEAD is left out, as plan() leaves it out: no order sent now can reach it, and its replacement is in `view`. */
 export function houseQuotes(view, r, now, at) {
-  const mine = view.orders.filter((o) => o.roundId === r.id && o.expiry > now && o.remaining > 0);
+  const mine = view.orders.filter((o) => o.roundId === r.id && o.expiry > now + LEAD && o.remaining > 0);
   const best = (outcome, side) => {
     const os = mine.filter((o) => o.outcome === outcome && o.side === side);
     if (!os.length) return null;

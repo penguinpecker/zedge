@@ -128,13 +128,14 @@ on every interface (`::`, so Railway's private network reaches it); anything els
 ```
 
 - **What it holds.** The house's resting orders in the open round as the bot knows them (its latest receipt, a staged command
-  applied whole), expired ones left out. Per outcome, `ask` is the lowest resting sell and `bid` the highest resting buy, with the
-  shares left at that price, or `null`. `at` is the time (ms) of the bot's latest decision, `start` the round. No balances, holdings
-  or keys.
+  applied whole). An order expiring within 2 s is left out, as the bot counts it gone ([One round](#one-round), step 4): no
+  order sent now can reach it, and its replacement, once sent, is in the view. Per outcome, `ask` is the lowest resting sell and
+  `bid` the highest resting buy, with the shares left at that price, or `null`. `at` is the time (ms) of the bot's latest
+  decision, `start` the round. No balances, holdings or keys.
 - **When it changes.** It is built at each request from the bot's latest view, so it changes right after every receipt (placed,
   cancelled, a fill it learns about) and at each round change, when it starts empty. Expiry is checked at the chain time now (the
-  latest read plus the time since), so a quote that expires while the bot waits on a request drops out at once. It is `null` until
-  the first decision.
+  latest read plus the time since), so a quote drops out 2 s before it expires even while the bot waits on a request. It is
+  `null` until the first decision.
 - **Never in the way.** Not served under `--dry-run`, whose orders are simulated. A server error (a port in use, a bad port) is
   logged as `quotes server error` and the bot quotes on without it.
 
@@ -155,11 +156,11 @@ The test runs offline in under a second. It checks:
 - **Stake:** the fork-round stake case gives exactly 100 shares. That case is mint 120, ask Up 50 at 55¢, ask Down 50 at 55¢ and bid Up 50 at 45¢.
 - **Round behaviour:** the mint, the four quotes on their expiry grids, the rotation sent at expiry − 2 (not − 3), the stake cap, and the last two minutes.
 - **Stale quotes:** 3¢ of drift keeps the quotes and 4¢ pulls one by ID; after a jump with one side filled, the cancel of the quote in the trader's favour is the first command; quotes drifted the house's way are optional and wait while a rotation is due within one cycle or a side is empty (also one the stake cap leaves empty); nothing expiring within max(12, 2 cycles) is cancelled, the self-cross target included; an ask clamped at 99¢ never loops.
-- **A simulated round** (one request in flight, each taking d seconds, the checkpoint before activation): at a constant price no side is empty longer than d (d = 2 and d = 6) and a round takes 50 to 60 requests; over seeded random walks with requests taking 2 to 8 s, no `order capacity`, self-cross, `unknown active order` or expired-on-arrival activation.
+- **A simulated round** (one request in flight, each taking d seconds, the checkpoint before activation): at a constant price only one side is empty at a time, for at most d − 1 s (d = 2, 3 and 6) and a round takes 50 to 60 requests; over seeded random walks with requests taking 2 to 8 s, no `order capacity`, self-cross, `unknown active order` or expired-on-arrival activation.
 - **Guards:** `cancel_order` passes the queue guard like `cancel_all`, an optional requote only into an empty queue.
 - **The start guard:** a non-loopback or HTTPS fork URL, a loopback node that is not Anvil, no target named, and both targets named are each refused.
 - **The settings example** holds the defaults; `maxRpcPerRound` takes up to 20,000.
-- **Quotes for the site:** the lowest resting sell and the highest resting buy per outcome, expired, filled and other-round orders left out.
+- **Quotes for the site:** the lowest resting sell and the highest resting buy per outcome, expired, filled and other-round orders left out; during a rotation, the staged replacement, not the ask expiring within 2 s.
 
 ## Not yet proven
 
