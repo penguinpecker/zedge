@@ -17,7 +17,7 @@ house-bot)
   [ -z "${ZEDGE_HORIZEN_RPC:-}" ] || put .config/zedge/horizen.url "$ZEDGE_HORIZEN_RPC"
   unset ZEDGE_HOUSE_KEY ZEDGE_THIRDWEB_ID ZEDGE_ALCHEMY_KEY ZEDGE_HORIZEN_RPC
   export HOME="$d" # main.mjs reads $HOME/.config/zedge/*; its pid lock lands here, never on the volume
-  set -- node --experimental-strip-types services/market-maker/main.mjs ${MM_ARGS:-run --mainnet} ;;
+  set -- node --experimental-strip-types services/market-maker/main.mjs ${MM_ARGS:-run --mainnet --settings services/market-maker/railway.settings.json} ;;
 payout-signer)
   put payout-signer.key "${PAYOUT_SIGNER_KEY:-}"
   put64 payout-signer.env "${PAYOUT_SIGNER_ENV_B64:-}"
