@@ -7,10 +7,10 @@ import SiteFooter from "../components/SiteFooter";
 import { price } from "../lib/market";
 import { BASE_RPC, DEFAULT_NETWORK, isNetworkId, NETWORKS, parseAtomicAmount, type NetworkId } from "./networks.ts";
 import { useChainWallet, WalletBoundary, type ChainWallet } from "./privy.tsx";
-import { buyLimit, fairUp, realizedSigma, sellLimit, stakeRoom } from "./fair.ts";
+import { fairUp, realizedSigma, stakeRoom } from "./fair.ts";
 import { chainClient, checkDeployment, checkOrderbook, loadManifest, loadOrderbook, observationPrice, exactObservationPrice, PHASES, priceCaptions, readChain, readRound, type ChainSnapshot, type RoundRead, type RoundState } from "./gateway.ts";
-import { askCents, clockPhase, countdownLine, ORDER_MARGIN, roundResults, tradable, versus, type RoundResult, type RoundTimes } from "./market-view.ts";
-import { confirmSettle, liveNow, readApi, type ApiRound, type Live } from "./read-api.ts";
+import { clockPhase, countdownLine, houseFor, ORDER_MARGIN, roundResults, sidePrice, tradable, versus, type RoundResult, type RoundTimes } from "./market-view.ts";
+import { confirmSettle, liveNow, readApi, type ApiRound, type House, type Live } from "./read-api.ts";
 import { createPriceFeed } from "./price-feed.ts";
 import { engineRound, LOT, OPERATOR_KEYS_CHANGED, type OrderbookManifest, type VerifiedOrderbook } from "./orderbook-manifest.ts";
 import { usePrivate, type PrivateState } from "./private/use-private.ts";
@@ -91,30 +91,33 @@ function RoundResults({ results }: { results: RoundResult[] }) {
 }
 
 type TicketRound = { start: number; cutoff: number; end: number; opening: string | null };
-/** One click to enter (an IOC buy at the house's fair price plus slack), one click to close (an IOC sell of the whole side). Prices are
- * the house's own fair value from the display feed and the Chainlink opening price; the engine decides every fill. The Up and Down
- * buttons show the house's ask for that fair value, marked as an estimate. */
-function Ticket({ priv, orderbook, wallet, round, now, up, outcome, onOutcome, loading, onAccount, onFunds }: { priv: PrivateState; orderbook: VerifiedOrderbook | null; wallet: ChainWallet; round: TicketRound | null; now: number; up: number | null; outcome: Side; onOutcome: (side: Side) => void; loading: boolean; onAccount: () => void; onFunds: () => void }) {
+/** One click to enter (an IOC buy), one click to close (an IOC sell of the whole side); the engine decides every fill, at the
+ * resting order's price. With the house's quotes for this round the Up and Down buttons show its ask, the buy's limit exactly, and
+ * Close its bid. Without them, the house's ask for its fair value (the display feed and the Chainlink opening price), marked as an
+ * estimate, with the one-click slack on the limits (market-view.ts sidePrice). `slot`: the current round, whose position shows
+ * until it ends. */
+function Ticket({ priv, orderbook, wallet, round, slot, now, up, house, outcome, onOutcome, loading, onAccount, onFunds }: { priv: PrivateState; orderbook: VerifiedOrderbook | null; wallet: ChainWallet; round: TicketRound | null; slot: number; now: number; up: number | null; house: House | null; outcome: Side; onOutcome: (side: Side) => void; loading: boolean; onAccount: () => void; onFunds: () => void }) {
   const [stake, setStake] = useState("5");
   const [depositing, setDepositing] = useState(false);
   const book = orderbook?.manifest, view = priv.snapshot?.view ?? null, unlocked = Boolean(priv.snapshot?.unlocked), cash = view?.cash ?? 0, onBase = priv.snapshot?.wallet ?? null;
-  const fair = (side: Side) => up === null ? null : side === "up" ? up : 1 - up;
-  const ask = (side: Side) => { const p = fair(side); return p === null ? null : askCents(p); };
-  const value = fair(outcome), limit = value === null ? null : buyLimit(value);
+  const quote = (side: Side) => sidePrice(house, up, side), chosen = quote(outcome), limit = chosen.buy;
   let pay = 0;
   try { pay = stake ? Number(parseAtomicAmount(stake, 6)) : 0; } catch { pay = -1; }
   const roundId = book && round ? engineRound(book, round.start).id : null;
   // Before a first deposit there is no view: the room is then the account's whole stake limit.
   const cap = book ? Number(book.application.stakeLimits.account) : 0;
   const room = book && roundId ? view ? stakeRoom(view, roundId, outcome, cap) : cap : 0;
-  const wanted = limit && pay > 0 ? sharesFor(pay, limit) : 0, quantity = Math.min(wanted, room);
+  // A buy at the house's ask can fill only the shares resting there; any more would not fill.
+  const offered = house?.[outcome].ask?.shares ?? Infinity;
+  const wanted = limit && pay > 0 ? sharesFor(pay, limit) : 0, quantity = Math.min(wanted, room, offered);
   const toCutoff = round ? round.cutoff - now : null;
   const trading = Boolean(book && unlocked && round && toCutoff !== null && toCutoff > ORDER_MARGIN && !priv.busy);
-  const held = view && roundId ? view.holdings.find((h) => h.roundId === roundId) : undefined;
+  const held = view && book ? view.holdings.find((h) => h.roundId === engineRound(book, round?.start ?? slot).id) : undefined;
   const free = (side: Side) => Math.floor((side === "up" ? held?.up ?? 0 : held?.down ?? 0) / LOT) * LOT;
+  const total = (side: Side) => side === "up" ? (held?.up ?? 0) + (held?.reservedUp ?? 0) : (held?.down ?? 0) + (held?.reservedDown ?? 0);
   const name = outcome === "up" ? "Up" : "Down";
   const buy = () => { if (round && limit && quantity) void priv.run((a) => a.placeOrder({ roundStart: round.start, outcome, side: "buy", price: limit, quantity, tif: "ioc", expiry: round.cutoff })); };
-  const close = (side: Side) => { const p = fair(side); if (round && p !== null) void priv.run((a) => a.close(round.start, side, sellLimit(p), round.cutoff)); };
+  const close = (side: Side) => { const p = quote(side).sell; if (round && p !== null) void priv.run((a) => a.close(round.start, side, p, round.cutoff)); };
   // Until the buy deposits for itself: the stake, from the wallet's USDC on Base, in one click (within the vault's deposit limits).
   const limits = book?.custody.vault.limits, least = BigInt(limits?.minDeposit ?? 0), most = limits && onBase !== null ? onBase < BigInt(limits.maxDeposit) ? onBase : BigInt(limits.maxDeposit) : 0n;
   const want = pay > 0 ? BigInt(pay) : least, offer = limits && most > 0n && most >= least ? want < least ? least : want > most ? most : want : null;
@@ -131,13 +134,15 @@ function Ticket({ priv, orderbook, wallet, round, now, up, outcome, onOutcome, l
       : offer ? [`Deposit ${usdc(offer)} to trade`, deposit, true] : ["Deposit to trade", onFunds, true]
     : !round ? ["Waiting for the next round", buy, false]
     : toCutoff !== null && toCutoff <= ORDER_MARGIN ? ["This round no longer takes orders", buy, false]
-    : limit === null ? ["Price unavailable", buy, false]
-    : [`Buy ${name} · up to ${limit}¢`, buy, trading && quantity > 0 && pay <= cash] as const;
+    : limit === null ? [house ? "No seller right now" : "Price unavailable", buy, false]
+    : [chosen.est ? `Buy ${name} · up to ${limit}¢` : `Buy ${name} · ${limit}¢`, buy, trading && quantity > 0 && pay <= cash] as const;
   const short = unlocked && cash > 0 && pay > cash;
-  const reason = pay < 0 ? "Enter an amount like 2.5" : short ? "Not enough balance" : wanted > 0 && room === 0 ? "Round limit reached" : quantity < wanted ? "Capped at this round's limit" : "";
+  const reason = pay < 0 ? "Enter an amount like 2.5" : short ? "Not enough balance" : wanted > 0 && room === 0 ? "Round limit reached"
+    : quantity < wanted ? quantity === offered ? `Only ${shares(offered)} shares on offer at ${limit}¢` : "Capped at this round's limit" : "";
+  const last = priv.snapshot?.lastResult ?? null;
   return <aside id="chain-ticket" className="chain-panel chain-ticket" aria-label="Order ticket"><div className="chain-panel-heading"><h2>Make your call</h2><span className="chain-pill">Up / Down</span></div>
     <p className="chain-copy">One click to enter, one click to close.</p>
-    <div className="chain-outcomes">{(["up", "down"] as const).map((side) => <button key={side} className={side} aria-pressed={outcome === side} onClick={() => onOutcome(side)}>{side === "up" ? <ArrowUpRight size={23} /> : <ArrowDownRight size={23} />}<strong>{side === "up" ? "Up" : "Down"}</strong><span>{cents(ask(side))}{ask(side) !== null && <small>est.</small>}</span></button>)}</div>
+    <div className="chain-outcomes">{(["up", "down"] as const).map((side) => { const q = quote(side); return <button key={side} className={side} aria-pressed={outcome === side} onClick={() => onOutcome(side)}>{side === "up" ? <ArrowUpRight size={23} /> : <ArrowDownRight size={23} />}<strong>{side === "up" ? "Up" : "Down"}</strong><span>{cents(q.ask)}{q.ask !== null && q.est && <small>est.</small>}</span></button>; })}</div>
     <label htmlFor="chain-stake">Stake · USDC</label>
     <input id="chain-stake" inputMode="decimal" value={stake} onChange={(event) => setStake(event.target.value)} aria-invalid={pay < 0 || short} aria-describedby={reason ? "chain-stake-reason" : undefined} autoComplete="off" />
     <div className="chain-quick">{[1, 5, 10].map((n) => <button key={n} type="button" onClick={() => setStake(formatUnits(BigInt(Math.max(0, pay)) + BigInt(n) * 1_000_000n, 6))}>+${n}</button>)}
@@ -145,14 +150,26 @@ function Ticket({ priv, orderbook, wallet, round, now, up, outcome, onOutcome, l
     {reason && <p id="chain-stake-reason" className="chain-reason">{reason}</p>}
     <dl className="chain-account-values">{wallet.session && <><div><dt>On Base</dt><dd>{onBase === null ? "—" : usdc(onBase)}</dd></div><div><dt>Trading balance</dt><dd>{unlocked ? usdc(cash) : <><LockKey size={12} /> Locked</>}</dd></div></>}
       <div><dt>Shares / pays if right</dt><dd>{quantity ? `${shares(quantity)} / ${usdc(quantity)}` : "—"}</dd></div></dl>
-    {quantity > 0 && limit !== null && <p className="chain-copy chain-ticket-cost">Est. cost {usdc(quantity * (ask(outcome) ?? limit) / 100)} · at most {usdc(quantity * limit / 100)}</p>}
+    {quantity > 0 && limit !== null && <p className="chain-copy chain-ticket-cost">{chosen.est ? `Est. cost ${usdc(quantity * (chosen.ask ?? limit) / 100)} · at most ${usdc(quantity * limit / 100)}` : `Cost at most ${usdc(quantity * limit / 100)}`}</p>}
     <button className="button primary chain-full" disabled={!enabled} onClick={action}>{label}</button>
     {unlocked && cash === 0 && <DepositSteps snapshot={priv.snapshot} />}
-    {(["up", "down"] as const).filter((side) => free(side) > 0).map((side) => <div className="chain-position" key={side}><span>You hold {shares(free(side))} {side === "up" ? "Up" : "Down"}</span>
-      <button className="button" disabled={!trading || fair(side) === null} onClick={() => close(side)}>Close · at least {fair(side) === null ? "—" : `${sellLimit(fair(side)!)}¢`}</button></div>)}
+    {(total("up") > 0 || total("down") > 0) && <div className="chain-position-block" role="group" aria-label="Your position"><h3>Your position</h3>
+      {(["up", "down"] as const).filter((side) => total(side) > 0).map((side) => {
+        const q = quote(side), worth = q.est || q.sell === null ? null : Math.floor(total(side) / 100) * q.sell;
+        return <div className="chain-position" key={side}><span><b className={side}>{side === "up" ? "Up" : "Down"}</b> {shares(total(side))} shares · pays {usdc(total(side))} if right{worth !== null && ` · worth ${usdc(worth)} now`}</span>
+          <button className="button" disabled={!trading || q.sell === null || free(side) === 0} onClick={() => close(side)}>{q.sell === null ? house ? "No buyer right now" : "Close · —" : q.est ? `Close · at least ${q.sell}¢` : `Close · ${q.sell}¢`}</button></div>;
+      })}</div>}
+    {last && <p className="chain-copy chain-last-result">Last round {viewer(last.start)}–{viewer(last.start + 900)} · <b className={last.outcome === 3 ? "" : last.paid > 0 ? "up" : "down"}>{last.outcome === 3 ? `Voided · ${usdc(last.paid)} back` : last.paid > 0 ? `You won ${usdc(last.paid)}` : "You lost"}</b></p>}
     <ActionLine snapshot={priv.snapshot} names={["Buy Up", "Buy Down", "Sell Up", "Sell Down", "Order result", "Round result"]} />
     {priv.error && <p className="chain-error" role="alert">{priv.error}</p>}
     <div className="chain-ticket-account"><button onClick={onAccount}><Wallet size={17} /> Account <CaretRight /></button><button onClick={onFunds}><ArrowsDownUp size={17} /> Deposit or withdraw <CaretRight /></button></div></aside>;
+}
+
+/** The house's quotes for the open round (Ticket's): on each side its lowest sell (ask) and highest buy (bid). Display only. */
+function HouseQuotes({ house }: { house: House | null }) {
+  const rows = house ? (["up", "down"] as const).flatMap((side) => (["ask", "bid"] as const).flatMap((kind) => { const q = house[side][kind]; return q ? [{ side, kind, ...q }] : []; })) : [];
+  if (!rows.length) return <div className="chain-empty chain-book-empty"><ChartLine size={24} /><h3>No quotes right now</h3></div>;
+  return rows.map((r) => <div className="chain-book-row" key={r.side + r.kind}><span><b className={r.side}>{r.side === "up" ? "Up" : "Down"}</b> {r.kind === "ask" ? "Ask" : "Bid"} {r.cents}¢</span><span>{shares(r.shares)}</span><span>{usdc(Math.floor(r.shares / 100) * r.cents)}</span></div>);
 }
 
 export default function ChainApp() {
@@ -327,6 +344,15 @@ function ChainMarkets() {
     void readApi().rounds().then((r) => { if (on && r) setListed(r.rounds); });
     return () => { on = false; };
   }, [page, slotStart]);
+  // The last round's result from the account's receipts (client.ts loadLastResult), on unlocking and each time a round settles: after
+  // a reload, or a round whose result the page did not see, the settlement has already emptied the holding the result is read from.
+  const knownRounds = [...listed, ...(indexed?.rounds ?? [])];
+  const lastSettled = Math.max(0, ...knownRounds.filter((r) => r.settle).map((r) => r.start));
+  const { run } = priv;
+  useEffect(() => {
+    if (unlocked && lastSettled) void run((a) => a.loadLastResult(knownRounds), { quiet: true });
+    // Once per settled round: `knownRounds` is read when `lastSettled` moves.
+  }, [unlocked, lastSettled, run]);
 
   useEffect(() => {
     if (!verification) return;
@@ -435,7 +461,9 @@ function ChainMarkets() {
   const spotLive = spot !== null && (feed?.status === undefined || feed.status === "live") && clock - spot.t < 120_000;
   let up: number | null = null;
   try { if (spot && spotLive && feed && ticketRound?.opening) up = fairUp(spot.p, Number(ticketRound.opening), realizedSigma(feed.closes), ticketRound.end - chainNow); } catch { up = null; }
-  const askOf = (side: Side) => up === null ? null : askCents(side === "up" ? up : 1 - up);
+  // The house's own quotes for the round being traded (the live read), when fresh: its real prices instead of the estimate.
+  const house = houseFor(indexed?.house, ticketRound?.start ?? null, clock + skew);
+  const askOf = (side: Side) => sidePrice(house, up, side).ask;
   const nowDelta = versus(spot?.p ?? null, openingExact);
   const liveLine = countdownLine(liveTimes, now);
   const onMarket = (next: MarketFeed) => setFeed((last) => last?.spot?.t === next.spot?.t && last?.closes.length === next.closes.length && last?.status === (next as { status?: string }).status ? last : next);
@@ -481,7 +509,7 @@ function ChainMarkets() {
       {(connectionError || (!verified && (planned || offline))) && <div className={`chain-status-banner ${connectionError ? "warn" : ""}`}>{connectionError ? <Warning size={21} /> : <Info size={21} />}<div><strong>{connectionError ? "Market checks unavailable" : planned ? "Public markets not available yet" : "Public markets unavailable"}</strong><p>{connectionError || offline}</p></div><button className="icon-button" aria-label="Refresh markets" disabled={refreshing || cooldownRemaining(network) > 0} onClick={refreshMarkets}><ArrowsClockwise size={20} /></button></div>}
       {page === "markets" ? <>
         <section className="chain-market-cards" aria-label="Choose a market">{MARKETS.map((item, index) => <button className={`chain-market-card ${marketIndex === index ? "selected" : ""}`} key={item.id} aria-pressed={marketIndex === index} onClick={() => chooseMarket(index)}><span className="chain-card-heading"><span className={`coin ${item.asset.toLowerCase()} small`}><CurrencyBtc weight="bold" /></span><strong>{item.name}</strong><span className="chain-duration">{item.duration / 60}m</span></span><span className="chain-card-question">Higher or lower?</span>
-          <span className="chain-card-prices"><span>Up <b title="Estimated price">{index === marketIndex ? cents(askOf("up")) : "—"}</b></span><span>Down <b title="Estimated price">{index === marketIndex ? cents(askOf("down")) : "—"}</b></span></span>
+          <span className="chain-card-prices"><span>Up <b title={house ? undefined : "Estimated price"}>{index === marketIndex ? cents(askOf("up")) : "—"}</b></span><span>Down <b title={house ? undefined : "Estimated price"}>{index === marketIndex ? cents(askOf("down")) : "—"}</b></span></span>
           <span className="chain-card-foot">{index === marketIndex && <span className={`chain-card-time ${liveLine.urgent ? "urgent" : ""}`}><Clock size={13} />{liveLine.time}</span>}<span>{loading ? "Loading…" : verified ? "View round" : "Unavailable"}<CaretRight /></span></span></button>)}</section>
         <div className="workspace-label"><div><span>CRYPTO</span><CaretRight size={11} /><span>{market.asset}</span><CaretRight size={11} /><strong>{market.duration / 60} MIN UP / DOWN</strong></div></div>
         <div className="chain-workspace">
@@ -503,11 +531,11 @@ function ChainMarkets() {
               {roundError && verified && <p className="chain-error" role="alert">{roundError} <button className="chain-text-button" onClick={() => setRoundAttempt((n) => n + 1)}>Retry</button></p>}
               <div className="chain-market-foot"><span>{snapshot ? `Updated ${utc(snapshot.timestamp)} UTC` : "Waiting for a network response"}</span><span>Winner 1 · Loser 0 · Void ½ collateral unit</span></div>
             </section>
-            <section className="chain-panel chain-book" aria-label="Order book"><div className="chain-panel-heading"><h2>Order book</h2><div className="chain-segment"><button aria-pressed={book === "quotes"} onClick={() => setBook("quotes")}>Public quotes</button><button aria-pressed={book === "orders"} onClick={() => setBook("orders")}>{unlocked ? <LockKeyOpen size={13} /> : <LockKey size={13} />}My orders</button></div></div>{book === "quotes" ? <><div className="chain-book-columns"><span>Price</span><span>Shares</span><span>Total</span></div><div className="chain-empty chain-book-empty"><ChartLine size={24} /><h3>Quotes unavailable</h3></div></> : orderbook && unlocked ? <PrivateOrders priv={priv} book={orderbook.manifest} roundStart={live?.round ? Number(live.start) : null} /> : <PrivateEmpty title="Your orders" onOpen={() => openAccount()} open={Boolean(orderbook)} />}</section>
+            <section className="chain-panel chain-book" aria-label="Order book"><div className="chain-panel-heading"><h2>Order book</h2><div className="chain-segment"><button aria-pressed={book === "quotes"} onClick={() => setBook("quotes")}>Public quotes</button><button aria-pressed={book === "orders"} onClick={() => setBook("orders")}>{unlocked ? <LockKeyOpen size={13} /> : <LockKey size={13} />}My orders</button></div></div>{book === "quotes" ? <><div className="chain-book-columns"><span>Price</span><span>Shares</span><span>Total</span></div><HouseQuotes house={house} /></> : orderbook && unlocked ? <PrivateOrders priv={priv} book={orderbook.manifest} roundStart={live?.round ? Number(live.start) : null} /> : <PrivateEmpty title="Your orders" onOpen={() => openAccount()} open={Boolean(orderbook)} />}</section>
           </div>
-          <Ticket priv={priv} orderbook={orderbook} wallet={wallet} round={ticketRound} now={now} up={up} outcome={outcome} onOutcome={setOutcome} loading={loading} onAccount={() => openAccount()} onFunds={() => openAccount("funds")} />
+          <Ticket priv={priv} orderbook={orderbook} wallet={wallet} round={ticketRound} slot={liveTimes.start} now={now} up={up} house={house} outcome={outcome} onOutcome={setOutcome} loading={loading} onAccount={() => openAccount()} onFunds={() => openAccount("funds")} />
         </div>
-      </> : <section className="chain-panel chain-private-page"><div className="chain-panel-heading"><h2>{page === "portfolio" ? "Positions & balances" : "Fills & account history"}</h2><span className="chain-pill">{unlocked ? <LockKeyOpen size={13} /> : <LockKey size={13} />}{unlocked ? "Unlocked" : "Locked"}</span></div>{orderbook && snapshot && (unlocked || (page === "portfolio" && priv.snapshot?.cached)) ? page === "portfolio" ? <PrivatePortfolio {...{ onDeposit: () => openAccount("funds") }} priv={priv} book={orderbook.manifest} chainNow={chainNow} openRound={ticketRound?.start ?? null} /> : <PrivateHistory priv={priv} fromBlock={later(snapshot.blockNumber > 604_800n ? snapshot.blockNumber - 604_800n : 0n, BigInt(orderbook.manifest.application.deployBlock))} /> : <PrivateEmpty title={page === "portfolio" ? "Your positions" : "Your records"} onOpen={() => openAccount()} open={Boolean(orderbook)} />}</section>}
+      </> : <section className="chain-panel chain-private-page"><div className="chain-panel-heading"><h2>{page === "portfolio" ? "Positions & balances" : "Fills & account history"}</h2><span className="chain-pill">{unlocked ? <LockKeyOpen size={13} /> : <LockKey size={13} />}{unlocked ? "Unlocked" : "Locked"}</span></div>{orderbook && snapshot && (unlocked || (page === "portfolio" && priv.snapshot?.cached)) ? page === "portfolio" ? <PrivatePortfolio {...{ onDeposit: () => openAccount("funds") }} priv={priv} book={orderbook.manifest} chainNow={chainNow} /> : <PrivateHistory priv={priv} fromBlock={later(snapshot.blockNumber > 604_800n ? snapshot.blockNumber - 604_800n : 0n, BigInt(orderbook.manifest.application.deployBlock))} /> : <PrivateEmpty title={page === "portfolio" ? "Your positions" : "Your records"} onOpen={() => openAccount()} open={Boolean(orderbook)} />}</section>}
       <details className="chain-details chain-deployment-details"><summary>Market details</summary><div className="chain-technical-grid"><dl><dt>Network</dt><dd>{NETWORKS[network].name} · {network}</dd><dt>Connection</dt><dd>{snapshot ? `Connected · block ${snapshot.blockNumber}` : "Not verified"}</dd><dt>Trading</dt><dd>{orderbook ? "Open (private order book)" : "Unavailable"}</dd><dt>Private access</dt><dd>{orderbook ? "Sign in to use" : active?.orderbookError || "Unavailable"}</dd></dl><dl><dt>Contract checks</dt><dd>{verified && verification ? `Matched release · checked ${verificationTime(verification.checkedAt)} UTC` : planned ? "Not available yet" : offline ? "Not available" : "Not verified"}</dd><dt>Roles and governance</dt><dd>{verified ? streams ? <>The round registry is upgradeable: its owner address <code>{streams.contracts.registry.owner}</code> can replace its code, including the round rules. The three price-route contracts are fixed. The registry’s code and owner and the upstream implementations and governance matched this release at the checked blocks, with no ownership transfer pending.</> : "Registry fixed; external provider governance requires separate review." : "Not verified"}</dd><dt>Private account</dt><dd>{unlocked ? "Unlocked" : "Locked"}</dd></dl></div>{verified && <><p>Release {verified.manifest.release}. Matching code and configuration does not verify private execution or imply a security audit.</p>{streams && <p><a href="https://github.com/penguinpecker/zedge/blob/feat/production-core/contracts/deployment/MAINNET.md" target="_blank" rel="noreferrer">Deployment record and source-verification details <ArrowSquareOut size={13} /></a></p>}<dl className="chain-address-list">{pins.map((pin) => <div key={pin.name}><dt>{pin.name.replace(/([A-Z])/g, " $1")} · {pin.chainId === 8453 ? "Base" : NETWORKS[network].name}</dt><dd><a href={`${pin.chainId === 8453 ? "https://basescan.org" : NETWORKS[network].blockExplorers.default.url}/address/${pin.address}`} target="_blank" rel="noreferrer">{pin.address}</a><code>{pin.runtimeCodeHash}</code></dd></div>)}</dl></>}</details>
       <SiteFooter mode="chain" status={<span>ZEDGE · {network === 2651420 ? "Testnet" : "Mainnet"}</span>} action={<button onClick={() => openAccount("security")}>Account security</button>} />
     </main>

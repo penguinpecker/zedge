@@ -6,7 +6,7 @@ import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { decrypt, encrypt, exportPublicKeyToHex, generateKeyPair, importPublicKeyFromHex } from "@horizen/vela-common-ts";
 import { KEY_CHALLENGE_START, endpointAbi, engineRound, parseOrderbookManifest, requestTypedData, signable, type VerifiedOrderbook } from "../orderbook-manifest.ts";
 import { usdcPermitTypedData } from "../vault.ts";
-import { HISTORY_PAGE, KEY_CHANGED, NOT_SUBMITTED, PrivateAccount, PublicError, describeOutcome, fetchRelay, indexedChain, readView, relayText, sharesFor, viemChain, type Chain, type Completion, type Logged, type Relay, type RelayBody, type Settled, type Signer, type Snapshot, type Submission } from "./client.ts";
+import { HISTORY_PAGE, KEY_CHANGED, NOT_SUBMITTED, PrivateAccount, PublicError, describeOutcome, fetchRelay, indexedChain, lastResult, readView, relayText, sharesFor, viemChain, type Chain, type Completion, type Logged, type Relay, type RelayBody, type Settled, type Signer, type Snapshot, type Submission, type View } from "./client.ts";
 import type { AccountPage, ApiRound, Live } from "../read-api.ts";
 
 const RELAYER: Address = "0x5555555555555555555555555555555555555555";
@@ -40,7 +40,7 @@ async function stack(options: { relayRefuses?: (body: RelayBody) => { code: stri
   };
   const viewOf = (account: string) => {
     const v = views.get(account)!;
-    return { account, sequence, nonce: v.nonce, cash: v.cash, reservedCash: 0, holdings: v.up || v.down ? [{ roundId: v.round ?? "r", up: v.up, down: v.down, reservedUp: 0, reservedDown: 0 }] : [], orders: [], withdrawals: [] };
+    return { account, sequence, nonce: v.nonce, cash: v.cash, reservedCash: 0, holdings: v.up || v.down || v.round ? [{ roundId: v.round ?? "r", up: v.up, down: v.down, reservedUp: 0, reservedDown: 0 }] : [], orders: [], withdrawals: [] };
   };
   // A tick activates the staged order against a house ask of 55; its result waits for the account's next request.
   const activate = (account: string, v: Account) => {
@@ -627,6 +627,7 @@ test("a held round's public result is shown once, with what it paid, and the bal
   s.settles.push({ roundId: engineRound(s.book, ROUND).spec.registryRoundId, outcome: 2 }); // the guest names the registry round
   await account.checkResults();
   assert.equal(account.snapshot.actions.find((x) => x.action === "Round result")?.text, "Down won · 2 USDC credited");
+  assert.deepEqual(account.snapshot.lastResult, { start: ROUND, outcome: 2, paid: 2_000_000 }, "kept for the market page");
   assert.equal(syncs(), before + 1);
   await account.checkResults();
   assert.equal(syncs(), before + 1, "shown once");
@@ -649,6 +650,23 @@ test("a held round's public result is shown once, with what it paid, and the bal
   f.settles.push({ roundId: engineRound(f.book, ROUND).spec.registryRoundId, outcome: 1 });
   await b.checkResults();
   assert.deepEqual([lines().map((x) => x.text), bSyncs()], [["Up won · 2 USDC credited"], bBefore + 2]);
+});
+
+test("a round closed before its end is no win or loss: the market page keeps no result for its emptied holding", async () => {
+  const s = await stack();
+  const account = new PrivateAccount(s.book, wallet(), s.chain, s.relay, { hints: memory(), now: () => (ROUND + 900 + 30) * 1000, sleep: async () => {} });
+  await account.unlock();
+  s.fund(account.account, 10_000_000);
+  await account.mint(ROUND, 2_000_000);
+  // Closed: the engine keeps the emptied holding until the round is archived.
+  const v = s.views.get(account.account)!;
+  v.up = 0; v.down = 0; v.cash += 2_000_000;
+  await account.sync();
+  assert.deepEqual(account.snapshot.view?.holdings.map((h) => h.up + h.down), [0]);
+  s.settles.push({ roundId: engineRound(s.book, ROUND).spec.registryRoundId, outcome: 2 });
+  await account.checkResults();
+  assert.equal(account.snapshot.actions.find((x) => x.action === "Round result")?.text, "Down won · nothing to collect");
+  assert.equal(account.snapshot.lastResult, null, "not 'You lost'");
 });
 
 test("settling from the chain: the request nonce first, then the calldata that carried the signature; 'absent' only past the deadline", async () => {
@@ -849,7 +867,7 @@ test("History from the read API: pages newest first, each receipt decrypted once
 
 test("held rounds' results come from the shared live read; the chain is read only for rounds it lacks or when it fails, at most every 5 s", async () => {
   const id = (n: number) => keccak256(toHex(`round:${n}`)), settle = { kind: 2, outcome: 2, price: 1n, observationsTimestamp: 0, reportHash: id(9), source: 1, block: 1, txHash: id(8), logIndex: 0 };
-  let live: Live | null = { head: { block: 1, time: 1 }, price: null, rounds: [{ start: 0, registryRoundId: id(1), open: null, settle }, { start: 900, registryRoundId: id(2), open: null, settle: null }] as ApiRound[] };
+  let live: Live | null = { head: { block: 1, time: 1 }, price: null, house: null, rounds: [{ start: 0, registryRoundId: id(1), open: null, settle }, { start: 900, registryRoundId: id(2), open: null, settle: null }] as ApiRound[] };
   let reads = 0, t = 0;
   const chain = { settled: async () => { reads++; return [{ roundId: id(3), outcome: 1 }]; } } as unknown as Chain;
   const indexed = indexedChain(chain, { account: async () => null, live: async () => live }, () => t);
@@ -862,7 +880,7 @@ test("held rounds' results come from the shared live read; the chain is read onl
   t += 1; assert.deepEqual(await indexed.settled([id(3)], 0n), [{ roundId: id(3), outcome: 1 }]);
   assert.equal(reads, 2);
   // A stuck or catching-up indexer (head over 30 s behind) answers "no result yet" for a round the chain has settled: the chain.
-  live = { head: { block: 1, time: 1 }, price: null, rounds: [{ start: 0, registryRoundId: id(1), open: null, settle: null }] as ApiRound[] };
+  live = { head: { block: 1, time: 1 }, price: null, house: null, rounds: [{ start: 0, registryRoundId: id(1), open: null, settle: null }] as ApiRound[] };
   t = 32_000;
   assert.deepEqual(await indexed.settled([id(1)], 0n), [{ roundId: id(3), outcome: 1 }]);
   assert.equal(reads, 3);
@@ -872,4 +890,33 @@ test("held rounds' results come from the shared live read; the chain is read onl
   assert.equal(await paged.requests!(who), null);
   assert.equal(await paged.requests!(who, { block: 5, logIndex: 0 }), page);
   t = 31_000; assert.equal(await paged.requests!(who), page, "30 s behind is still fresh");
+});
+
+test("the last round's result survives a reload: the holding in the newest receipt from before its settle record, as the sweep empties it", async () => {
+  const id = (start: number) => `round:${start}`, held = (start: number, up: number, down = 0) => ({ roundId: id(start), up, down, reservedUp: 0, reservedDown: 0 });
+  const v = (...holdings: ReturnType<typeof held>[]) => ({ holdings }) as unknown as View, H = keccak256(toHex("h"));
+  const settle = (block: number, kind: number, outcome: number) => ({ kind, outcome, price: 1n, observationsTimestamp: 0, reportHash: H, source: 1, block, txHash: H, logIndex: 0 });
+  const rounds: ApiRound[] = [{ start: 900, registryRoundId: H, open: null, settle: settle(50, 2, 2) }, { start: 1800, registryRoundId: H, open: null, settle: settle(80, 2, 1) },
+    { start: 2700, registryRoundId: H, open: null, settle: null }];
+  // 3 Up bought in round 1800, settled Up at block 80; the receipt at 85 is after the sweep emptied it.
+  assert.deepEqual(lastResult([{ block: 85, view: v() }, { block: 70, view: v(held(1800, 3_000_000)) }, { block: 40, view: v(held(900, 2_000_000)) }], rounds, id), { start: 1800, outcome: 1, paid: 3_000_000 });
+  assert.deepEqual(lastResult([{ block: 70, view: v(held(1800, 0, 3_000_000)) }], rounds, id), { start: 1800, outcome: 1, paid: 0 }, "held Down: lost");
+  assert.deepEqual(lastResult([{ block: 70, view: v(held(1800, 0)) }, { block: 40, view: v(held(900, 0, 2_000_000)) }], rounds, id), { start: 900, outcome: 2, paid: 2_000_000 }, "closed before the end: the round before");
+  assert.equal(lastResult([{ block: 85, view: v() }], rounds, id), null, "only receipts from after the settlement: unknown, not lost");
+  assert.deepEqual(lastResult([{ block: 70, view: v(held(1800, 3_000_000, 1_000_000)) }], [{ ...rounds[1], settle: settle(80, 3, 3) }], id), { start: 1800, outcome: 3, paid: 2_000_000 }, "a void pays half of each side");
+
+  // Through the client: a reload after the sweep reads it from the account's receipts in the read API.
+  const s = await stack(), signer = wallet(), { logged, requests } = recording(s);
+  const first = open(s, signer);
+  await first.account.unlock();
+  s.fund(first.account.account, 10_000_000);
+  await first.account.mint(ROUND, 2_000_000);
+  const minted = logged.at(-1)!.block, v2 = s.views.get(first.account.account)!;
+  v2.up = 0; v2.down = 0; v2.cash += 2_000_000;
+  await first.account.sync();
+  first.account.lock();
+  const reload = new PrivateAccount(s.book, signer, { ...s.chain, requests }, s.relay, { hints: first.hints, sleep: async () => {} });
+  await reload.unlock();
+  await reload.loadLastResult([{ start: ROUND, registryRoundId: H, open: null, settle: settle(Number(minted) + 1, 2, 2) }]);
+  assert.deepEqual(reload.snapshot.lastResult, { start: ROUND, outcome: 2, paid: 2_000_000 });
 });

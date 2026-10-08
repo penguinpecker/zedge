@@ -1,7 +1,8 @@
 /** Display rules of the live market page (ChainApp.tsx), free of React so they can be tested: the round's phase and countdown by
- * the 1 s clock, and the house's ask as a price estimate. */
+ * the 1 s clock, and the ticket's prices, the house's quotes or an estimate. */
 import { countdown } from "../lib/market.ts";
-import type { ApiRound } from "./read-api.ts";
+import { buyLimit, sellLimit } from "./fair.ts";
+import type { ApiRound, House } from "./read-api.ts";
 
 /** A round's start, order cutoff and end, in unix seconds. */
 export type RoundTimes = { start: number; cutoff: number; end: number };
@@ -36,8 +37,27 @@ export function countdownLine(t: RoundTimes, now: number): { label: string; time
 export const versus = (value: number | null, opening: string | null) => value === null || opening === null ? null : value - Number(opening);
 
 /** The house's ask for a side it values at `p` (services/market-maker/pricing.mjs quotes at its default 3¢ half-spread): what a
- * one-click buy most likely pays. Shown as an estimate until the house publishes its own quotes. */
+ * one-click buy most likely pays. Shown as an estimate while the house's own quotes are unavailable. */
 export const askCents = (p: number) => Math.min(99, Math.max(3, Math.ceil(Math.round(p * 1e8) / 1e6) + 3));
+
+/** How old the house's quotes may be by chain time: the indexer's own 20 s, the page's 2 s read and a margin. A read API that stops
+ * answering leaves its last answer on the page; this retires its quotes. */
+export const HOUSE_STALE_MS = 30_000;
+/** The house's quotes when they are for the round starting at `start` and fresh at `nowMs` (chain time), else null. */
+export const houseFor = (house: House | null | undefined, start: number | null, nowMs: number): House | null =>
+  house && house.start === start && nowMs - house.at <= HOUSE_STALE_MS ? house : null;
+
+/** One side on the ticket: the price shown, the buy's and the close's limits, and whether they are estimates. */
+export type SidePrice = { ask: number | null; buy: number | null; sell: number | null; est: boolean };
+/** With the house's quotes (houseFor): its ask, which is the buy's limit exactly, and its bid, the close's; null where it has none.
+ * A fill executes at the resting order's price (engine/matching.go), so a buy at the house's ask pays that ask or less, and a
+ * close at its bid gets that bid or more. Without them: the ask for the house's fair value `up` (askCents), marked est., and the
+ * one-click limits with their slack (fair.ts). */
+export function sidePrice(house: House | null, up: number | null, side: "up" | "down"): SidePrice {
+  if (house) { const q = house[side]; return { ask: q.ask?.cents ?? null, buy: q.ask?.cents ?? null, sell: q.bid?.cents ?? null, est: false }; }
+  const p = up === null ? null : side === "up" ? up : 1 - up;
+  return p === null ? { ask: null, buy: null, sell: null, est: true } : { ask: askCents(p), buy: buyLimit(p), sell: sellLimit(p), est: true };
+}
 
 /** The round the ticket trades and its opening price. The registry's while its trading window is open (by the clock, as the badge).
  * Before the registry records the opening (Not scheduled, Scheduled, Awaiting opening price), the engine's own opening for that slot,

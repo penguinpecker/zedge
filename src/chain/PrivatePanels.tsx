@@ -3,8 +3,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowSquareOut, Check } from "@phosphor-icons/react";
 import { formatUnits } from "viem";
-import { parseAtomicAmount, transactionExplorerUrl } from "./networks.ts";
-import { engineRound, LOT, type VerifiedOrderbook } from "./orderbook-manifest.ts";
+import { transactionExplorerUrl } from "./networks.ts";
+import { engineRound, type VerifiedOrderbook } from "./orderbook-manifest.ts";
 import type { Snapshot } from "./private/client.ts";
 import type { PrivateState } from "./private/use-private.ts";
 
@@ -53,8 +53,7 @@ export function PrivateOrders({ priv, book, roundStart }: { priv: PrivateState; 
   </div>;
 }
 
-export function PrivatePortfolio({ priv, book, chainNow, openRound, onDeposit }: { priv: PrivateState; book: Book; chainNow: number; openRound: number | null; onDeposit?: () => void }) {
-  const [amount, setAmount] = useState("");
+export function PrivatePortfolio({ priv, book, chainNow, onDeposit }: { priv: PrivateState; book: Book; chainNow: number; onDeposit?: () => void }) {
   const view = priv.snapshot?.view, unlocked = Boolean(priv.snapshot?.unlocked), { run } = priv;
   // A cached view (shown while the unlock syncs) is read-only: nothing is signed from it.
   const ready = unlocked && !priv.busy;
@@ -71,9 +70,6 @@ export function PrivatePortfolio({ priv, book, chainNow, openRound, onDeposit }:
   // Engine rounds are named by hashes; recompute them for the last day to show times.
   const starts = new Map<string, number>();
   for (let k = -96, base = Math.floor(chainNow / 900) * 900; k <= 2; k++) starts.set(engineRound(book, base + k * 900).id, base + k * 900);
-  let quantity = 0;
-  try { quantity = amount ? Number(parseAtomicAmount(amount, 6)) : 0; } catch { quantity = -1; }
-  const mintable = quantity > 0 && quantity % LOT === 0 && quantity <= view.cash;
   // Simplification: Redeem waits until the closing price can be recorded (end + observation window), when a round is normally settled;
   // gate it on the rounds the results check reports as settled once the client exposes them.
   const settleAfter = 900 + book.application.engine.oracle.observationWindow;
@@ -89,12 +85,7 @@ export function PrivatePortfolio({ priv, book, chainNow, openRound, onDeposit }:
           {start !== undefined && start + settleAfter <= chainNow && <button className="chain-text-button" disabled={!ready} onClick={() => void priv.run((a) => a.redeem(start))}>Redeem</button>}</span>
       </div>;
     })}
-    {openRound !== null && <form onSubmit={(event) => { event.preventDefault(); if (mintable && ready) void priv.run((a) => a.mint(openRound, quantity)).then((ok) => ok && setAmount("")); }}>
-      <label htmlFor="chain-mint-amount">Mint Up + Down sets for the open round · USDC</label>
-      <input id="chain-mint-amount" inputMode="decimal" value={amount} onChange={(event) => setAmount(event.target.value)} placeholder="Enter amount" autoComplete="off" aria-invalid={quantity < 0 || (quantity > 0 && !mintable)} />
-      <button className="button" type="submit" disabled={!mintable || !ready}>Mint</button>
-    </form>}
-    <ActionLine snapshot={priv.snapshot} names={["Unlock", "Sync", "Mint", "Merge", "Redeem"]} />
+    <ActionLine snapshot={priv.snapshot} names={["Unlock", "Sync", "Merge", "Redeem"]} />
     {error}
   </div>;
 }
