@@ -303,15 +303,17 @@ test("a book command whose wait fails holds the queue until its collect sync is 
   await account.unlock();
   s.fund(account.account, 10_000_000);
   const post = s.relay.post.bind(s.relay), completion = s.chain.completion;
-  let release!: () => void, order: Hex | undefined;
+  let release!: () => void, order: Hex | undefined, held = false;
   const gate = new Promise<void>((resolve) => { release = resolve; });
   // The order goes through; its collect sync is held at the relayer; the operator fails the order in public.
-  s.relay.post = async (b) => { if (order) await gate; const a = await post(b); order ??= a.ok ? a.requestId : undefined; return a; };
+  s.relay.post = async (b) => { if (order) { held = true; await gate; } const a = await post(b); order ??= a.ok ? a.requestId : undefined; return a; };
   s.chain.completion = async (id, from) => { const c = await completion(id, from); return c && id === order ? { ...c, status: 1, errorCode: 2, errorMessage: "malformed envelope" } : c; };
   let settled = false;
   const placed = account.placeOrder(ORDER).catch((e: Error) => e).finally(() => { settled = true; });
   const next = account.sync();
-  for (let i = 0; i < 50; i++) await new Promise((resolve) => setImmediate(resolve));
+  // Until the collect sync reaches the relayer, then a moment more for any wrong early step (signing included) to show.
+  for (let i = 0; i < 1_000 && !held; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+  await new Promise((resolve) => setTimeout(resolve, 50));
   assert.deepEqual([settled, s.log.at(-1)], [false, "place_order"], "neither the failure nor the next request before the sync is sent");
   release();
   assert.match((await placed as Error).message, /^Failed: malformed envelope/);
