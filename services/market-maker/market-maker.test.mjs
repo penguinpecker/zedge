@@ -261,7 +261,7 @@ test("settings: the example parses; a fork deployment only with --fork; unknown 
   assert.equal(settingsFrom({ maxRpcPerRound: 20_000 }, "mainnet", configured).maxRpcPerRound, 20_000);
   assert.throws(() => settingsFrom({ maxRpcPerRound: 20_001 }, "mainnet", configured), /maxRpcPerRound/);
   const railway = JSON.parse(readFileSync(new URL("railway.settings.json", import.meta.url), "utf8"));
-  assert.deepEqual(settingsFrom(railway, "mainnet", configured), S, "Railway runs the defaults: the brake, not a lower budget");
+  assert.deepEqual(settingsFrom(railway, "mainnet", configured), { ...S, quoteLifetimeSeconds: 120 }, "Railway runs the default brake, with 120 s quotes: half the rotations and their gas");
 });
 
 test("the queue guard: quotes and syncs wait at 5 pending requests, a needed cancel goes out until 9, an optional one only into an empty queue", () => {
