@@ -66,7 +66,7 @@ export default function LiveChart({ start, cutoff, end, priceToBeat, offset, onM
       localization: { priceFormatter: usd, tickmarksPriceFormatter: ticks, timeFormatter: axisTime },
       grid: { vertLines: { visible: false }, horzLines: { color: "rgba(255,255,255,0.04)" } },
       rightPriceScale: { borderVisible: false, scaleMargins: { top: 0.18, bottom: 0.12 } },
-      timeScale: { borderVisible: false, timeVisible: true, secondsVisible: false, lockVisibleTimeRangeOnResize: true, tickMarkFormatter: axisTime, fixLeftEdge: true, fixRightEdge: true },
+      timeScale: { borderVisible: false, timeVisible: true, secondsVisible: false, lockVisibleTimeRangeOnResize: true, tickMarkFormatter: axisTime, fixLeftEdge: true },
       crosshair: { mode: CrosshairMode.Magnet, horzLine: { visible: false, labelVisible: false }, vertLine: { color: "rgba(233,237,223,0.25)", style: LineStyle.Solid, labelBackgroundColor: "#2b322b" } },
       // Dragged sideways (mouse or touch) only: the wheel and vertical swipes keep scrolling the page.
       handleScroll: { mouseWheel: false, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false }, handleScale: false,
