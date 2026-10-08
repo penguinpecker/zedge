@@ -2,10 +2,10 @@ import { strict as assert } from "node:assert";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
 import { SignJWT, UnsecuredJWT, exportJWK, generateKeyPair } from "jose";
-import { decodeFunctionData, encodeAbiParameters, encodeEventTopics, keccak256, parseTransaction, stringToHex, toHex, type Address, type Hex, type Log } from "viem";
+import { decodeFunctionData, encodeAbiParameters, encodeEventTopics, getAddress, keccak256, parseTransaction, stringToHex, toHex, type Address, type Hex, type Log } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { endpointAbi, parseOrderbookManifest, requestTypedData } from "../src/chain/orderbook-manifest.ts";
-import { BASE_USDC, permitDomainSeparator, usdcPermitTypedData, vaultAbi } from "../src/chain/vault.ts";
+import { BASE_USDC, permitDomainSeparator, usdcAbi, usdcPermitTypedData, usdcTransferTypedData, vaultAbi } from "../src/chain/vault.ts";
 import { DEFAULT_LIMITS, configFromEnv, handle, signerFromEnv, type Answer, type ChainState, type DepositState, type RelayConfig, type Store, type Wire } from "./relay.ts";
 
 const RELAYER_KEY = generatePrivateKey();
@@ -88,6 +88,7 @@ function fakeChain(over: Partial<ChainState> = {}, chainId = 26514) {
     ds: { timestamp: CHAIN_TIME, baseFee: 5_000_000n, balance: 10n ** 16n, usdcBalance: 1_000_000_000n, allowance: 0n,
       limits: { minDeposit: 1_000_000n, maxDeposit: 500_000_000n, maxPayout: 1_000_000_000n, dailyPayoutCap: 10_000_000_000n } },
     deposited: (args: { account: Address; amount: bigint }) => args,
+    transferred: (args: { from: Address; to: Address; value: bigint }) => args,
   };
   const wire: Wire = {
     async state(sender) {
@@ -104,6 +105,7 @@ function fakeChain(over: Partial<ChainState> = {}, chainId = 26514) {
     async simulate(_from, to, data) {
       if (chain.simulate) return chain.simulate;
       if (to === VAULT) return { ok: true, gas: 560_000n };
+      if (to === BASE_USDC) return { ok: true, gas: 80_000n };
       const call = decodeFunctionData({ abi: endpointAbi, data });
       return { ok: true, gas: call.args[3] === 3 ? 330_000n : 1_700_000n };
     },
@@ -117,6 +119,7 @@ function fakeChain(over: Partial<ChainState> = {}, chainId = 26514) {
         usdcNonces.set(owner, (usdcNonces.get(owner) ?? 0n) + 1n);
         return;
       }
+      if (tx.to?.toLowerCase() === BASE_USDC) return;
       const call = decodeFunctionData({ abi: endpointAbi, data: tx.data! });
       if (call.functionName === "submitRequestFor") nonces.set((call.args[0] as string).toLowerCase(), (nonces.get((call.args[0] as string).toLowerCase()) ?? 0n) + 1n);
     },
@@ -130,6 +133,12 @@ function fakeChain(over: Partial<ChainState> = {}, chainId = 26514) {
         const log = { address: VAULT, topics: encodeEventTopics({ abi: vaultAbi, eventName: "Deposited", args: { index: ++chain.deposits, account: e.account } }),
           data: encodeAbiParameters([{ type: "uint256" }], [e.amount]) } as unknown as Log;
         return { status: "success", gasUsed: 560_000n, effectiveGasPrice: 6_000_000n, l1Fee: 30_000_000_000n, blockNumber: 52_270_000n, logs: [log] };
+      }
+      if (sent[i].to?.toLowerCase() === BASE_USDC) {
+        const [f, t, v] = decodeFunctionData({ abi: usdcAbi, data: sent[i].data! }).args as unknown as readonly [Address, Address, bigint];
+        const { from, to, value } = chain.transferred({ from: f, to: t, value: v });
+        const log = { address: BASE_USDC, topics: encodeEventTopics({ abi: usdcAbi, eventName: "Transfer", args: { from, to } }), data: encodeAbiParameters([{ type: "uint256" }], [value]) } as unknown as Log;
+        return { status: "success", gasUsed: 80_000n, effectiveGasPrice: 6_000_000n, l1Fee: 10_000_000_000n, blockNumber: 52_270_001n, logs: [log] };
       }
       const call = decodeFunctionData({ abi: endpointAbi, data: sent[i].data! });
       const logs = call.functionName === "submitRequestFor" ? [{ address: book.endpoint.address, data: encodeAbiParameters([{ type: "address" }], [signer.address]),
@@ -547,4 +556,58 @@ test("a deposit receipt without the vault's Deposited event for this owner and a
   const other = relay();
   other.base.deposited = (e) => ({ ...e, account: addr(bob) });
   assert.equal((await other.post(await deposit(), await auth())).body.code, "REVERTED");
+});
+
+// ---------------------------------------------------------------- sends out of the user's Base wallet (base-transfer)
+
+type Send = { who?: typeof alice; from?: Address; to?: Address; amount?: bigint; validBefore?: bigint };
+/** The wallet popup's send: the user's USDC transferWithAuthorization, confirmed in the wallet, with a random 32-byte nonce. */
+async function send(x: Send = {}) {
+  const who = x.who ?? alice, from = x.from ?? addr(who), to = x.to ?? fresh(), amount = x.amount ?? 5_000_000n, validBefore = x.validBefore ?? CHAIN_TIME + 1800n;
+  const nonce = toHex(crypto.getRandomValues(new Uint8Array(32)));
+  const signature = await who.signTypedData(usdcTransferTypedData(book.custody, { from, to, value: amount, validAfter: 0n, validBefore, nonce }));
+  return { kind: "base-transfer", from, to, amount: amount.toString(), validBefore: validBefore.toString(), nonce, signature };
+}
+
+test("a send goes to Base USDC as transferWithAuthorization(from, to, value, 0, validBefore, nonce, v, r, s); a replay is never sent again", async () => {
+  const r = relay(), headers = await auth(), body = await send();
+  const a = await r.post(body, headers);
+  assert.equal(a.status, 200, JSON.stringify(a.body));
+  assert.equal(r.chain.sent.length, 0, "nothing on Horizen");
+  const [tx] = r.base.sent;
+  assert.deepEqual([tx.chainId, tx.to?.toLowerCase(), tx.value ?? 0n, tx.gas], [8453, BASE_USDC, 0n, 96_000n]);
+  const call = decodeFunctionData({ abi: usdcAbi, data: tx.data! }), sig = body.signature;
+  assert.equal(call.functionName, "transferWithAuthorization");
+  assert.deepEqual(call.args, [alice.address, getAddress(body.to), 5_000_000n, 0n, CHAIN_TIME + 1800n, body.nonce, Number.parseInt(sig.slice(130), 16), `0x${sig.slice(2, 66)}`, `0x${sig.slice(66, 130)}`]);
+  const replay = await r.post(body, headers);
+  assert.deepEqual([replay.status, replay.body.duplicate, replay.body.txHash], [200, true, a.body.txHash]);
+  assert.equal(r.base.sent.length, 1, "the same signature is sent once");
+  assert.equal((await r.post(await send({ amount: 100_000n }), headers)).status, 200, "0.10 USDC is the smallest send");
+});
+
+test("a send is refused unless it is the signed-in user's own, at least 0.10 USDC, within the balance and an hour, and to someone else", async () => {
+  const r = relay(), headers = await auth();
+  const refused: [string, unknown, string][] = [
+    ["another user's wallet", await send({ who: bob }), "SENDER_NOT_LINKED"],
+    ["signed by someone else", await send({ who: bob, from: addr(alice) }), "SIGNATURE_MISMATCH"],
+    ["below 0.10 USDC", await send({ amount: 99_999n }), "AMOUNT_TOO_SMALL"],
+    ["to the vault", await send({ to: VAULT }), "BAD_REQUEST"],
+    ["to the zero address", await send({ to: "0x0000000000000000000000000000000000000000" }), "BAD_REQUEST"],
+    ["to the sender", await send({ to: addr(alice) }), "BAD_REQUEST"],
+    ["an extra field", { ...(await send()), validAfter: "0" }, "BAD_REQUEST"],
+    ["a short nonce", { ...(await send()), nonce: "0x1234" }, "BAD_REQUEST"],
+    ["above the balance", await send({ amount: 1_000_000_001n }), "AMOUNT_ABOVE_BALANCE"],
+    ["valid for over an hour", await send({ validBefore: CHAIN_TIME + 3601n }), "DEADLINE_OUT_OF_RANGE"],
+  ];
+  for (const [name, body, code] of refused) assert.equal((await r.post(body, headers)).body.code, code, name);
+  assert.ok(nothingSent(r));
+  assert.equal(await r.store.get("relay:spent:8453:20261006"), null);
+});
+
+test("a send receipt without USDC's Transfer of this amount from the user to this address reads as REVERTED", async () => {
+  for (const change of [(e: { from: Address; to: Address; value: bigint }) => ({ ...e, value: e.value - 1n }), (e: { from: Address; to: Address; value: bigint }) => ({ ...e, to: fresh() })]) {
+    const r = relay();
+    r.base.transferred = change;
+    assert.equal((await r.post(await send(), await auth())).body.code, "REVERTED");
+  }
 });

@@ -133,6 +133,9 @@
 .chain-popup .chain-qr { width: 96px; height: 96px; }
 .chain-deposit-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
 .chain-deposit-row input { min-width: 0; }
+.chain-held { display: grid; gap: 8px; }
+.chain-held > div { display: flex; flex-wrap: wrap; gap: 8px; }
+.chain-popup .chain-send { margin-top: 0; gap: 8px; }
 .chain-deposit-steps ol { list-style: none; margin: 0; padding: 0; display: flex; gap: 6px; flex-wrap: wrap; font-size: 11px; color: var(--muted); }
 .chain-deposit-steps li { display: flex; align-items: center; gap: 6px; padding: 6px 9px; border: 1px solid var(--line); border-radius: 999px; }
 .chain-deposit-steps li > span { display: grid; place-items: center; width: 16px; height: 16px; border-radius: 50%; border: 1px solid var(--line); font-size: 9px; }

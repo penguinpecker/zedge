@@ -187,3 +187,12 @@ test("RPC transports refuse altered or unreviewed endpoint strings", (t) => {
   }
   assert.equal(calls, 0);
 });
+
+test("batch: false sends each request alone, as Alchemy's transfer index needs; the default sends a batch", async (t) => {
+  clock(t);
+  const bodies: unknown[] = [];
+  t.mock.method(globalThis, "fetch", async (_input: unknown, init?: RequestInit) => { bodies.push(JSON.parse(String(init?.body))); return success(init); });
+  await createPublicClient({ transport: rpcTransport(base, { batch: false }) }).getChainId();
+  await client(base).getChainId();
+  assert.deepEqual(bodies.map((body) => Array.isArray(body)), [false, true]);
+});

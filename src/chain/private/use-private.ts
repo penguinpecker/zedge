@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { PublicClient } from "viem";
 import { baseClient, chainClient } from "../gateway.ts";
-import { publicError } from "../networks.ts";
+import { BASE_ALCHEMY, publicError } from "../networks.ts";
 import { KEY_CHALLENGE_START, signable, type VerifiedOrderbook } from "../orderbook-manifest.ts";
 import type { ChainWallet } from "../privy.tsx";
 import { liveNow, readApi } from "../read-api.ts";
@@ -48,16 +48,21 @@ export function usePrivate(wallet: ChainWallet, orderbook: VerifiedOrderbook | n
     let live = true, created: PrivateAccount | null = null;
     // Only ZEDGE's own requests, Base USDC permits to its vault and the key challenge reach the wallet, which signs them without a prompt.
     const refused = () => new Error("ZEDGE refused to ask your wallet for this signature.");
+    type Typed = Parameters<NonNullable<ChainWallet["signer"]>["signTypedData"]>[0];
+    // A send is the one signature the user confirms in the wallet's own window: a Base USDC transfer from this address, nothing else.
+    const usdc = manifest.custody.usdc.address;
+    const transfer = (data: Typed) => data.primaryType === "TransferWithAuthorization" && BigInt(data.domain.chainId) === 8453n && data.domain.verifyingContract.toLowerCase() === usdc && String((data.message as Record<string, unknown>).from).toLowerCase() === address;
     const signer = {
       address,
       signMessage: (message: string) => { const s = latest.current.signer; if (s?.address !== address) throw new Error("Your wallet changed."); if (!message.startsWith(KEY_CHALLENGE_START)) throw refused(); return s.signMessage(message); },
-      signTypedData: (data: Parameters<NonNullable<ChainWallet["signer"]>["signTypedData"]>[0]) => { const s = latest.current.signer; if (s?.address !== address) throw new Error("Your wallet changed."); if (!signable(manifest, data)) throw refused(); return s.signTypedData(data); },
+      signTypedData: (data: Typed) => { const s = latest.current.signer; if (s?.address !== address) throw new Error("Your wallet changed."); if (!signable(manifest, data)) throw refused(); return s.signTypedData(data); },
+      confirmTypedData: (data: Typed, text: string) => { const s = latest.current.signer; if (s?.address !== address) throw new Error("Your wallet changed."); if (!transfer(data) || !s.confirmTypedData) throw refused(); return s.confirmTypedData(data, text); },
     };
     void import("./client.ts").then((m) => {
       if (!live) return;
       isPublic.current = (e) => e instanceof m.PublicError;
       // History, the cached Portfolio and round results read the read API first (display only); everything else reads the chain.
-      const chain = m.indexedChain(m.viemChain(chainClient(26514) as unknown as PublicClient, manifest, baseClient() as unknown as PublicClient), { account: readApi().account, live: liveNow });
+      const chain = m.indexedChain(m.viemChain(chainClient(26514) as unknown as PublicClient, manifest, baseClient() as unknown as PublicClient, { assetTransfers: BASE_ALCHEMY ? baseClient(false) as unknown as PublicClient : undefined }), { account: readApi().account, live: liveNow });
       created = new m.PrivateAccount(manifest, signer, chain,
         m.fetchRelay(manifest.relayer.path, () => latest.current.authHeaders()), { hints, onChange: (s) => { if (live) setSnapshot(s); } });
       account.current = created;
@@ -67,8 +72,9 @@ export function usePrivate(wallet: ChainWallet, orderbook: VerifiedOrderbook | n
       // Refused right after sign-in, it is tried once more (10-08: the wallet service once answered "Session is no longer active").
       if (generation === 0) void run((a) => a.unlock()).then((ok) => { if (!ok && live) setTimeout(() => { if (live) void run((a) => a.unlock()); }, 2_000); });
     }, () => { if (live) setError("Private features could not load. Refresh to try again."); });
-    // The Base balance is shown live while signed in: USDC sent from elsewhere appears within 10 s. Not while the tab is hidden.
-    const funds = setInterval(() => { if (!document.hidden) void created?.refreshFunds().catch(() => undefined); }, 10_000);
+    // The Base balance is shown live while signed in: USDC sent from elsewhere appears within 10 s, and each read is followed by the
+    // automatic deposit's look (client.ts autoDeposit), the first one 10 s in, after the unlock's signature. Not while the tab is hidden.
+    const funds = setInterval(() => { if (!document.hidden) void created?.refreshFunds().then(() => created?.autoDeposit()).catch(() => undefined); }, 10_000);
     // The key lives in this tab's memory only: drop it on sign-out, account change and tab close.
     const lock = () => created?.lock();
     window.addEventListener("pagehide", lock);

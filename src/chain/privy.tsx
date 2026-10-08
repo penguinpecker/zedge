@@ -1,6 +1,7 @@
 /** Sign-in for chain mode: Privy's popup (Google or X) with an embedded wallet for every user, when this build carries
  * a Privy app ID; without one, sign-in is closed and every private feature stays locked. ZEDGE's own signatures (its requests, the
- * Base deposit permit and the key challenge) are signed silently; the relayer pays every network fee. */
+ * Base deposit permit and the key challenge) are signed silently; a send out of the wallet is confirmed in Privy's window. The
+ * relayer pays every network fee. */
 import { createContext, lazy, Suspense, useContext, useMemo, useState, type ReactNode } from "react";
 import { PrivyProvider, getIdentityToken, useLogin, usePrivy, useSignMessage, useSignTypedData, useWallets } from "@privy-io/react-auth";
 import { defineChain, type Address } from "viem";
@@ -18,13 +19,15 @@ export type ChainWallet = {
   pending: boolean;
   /** Why the last sign-in failed, in plain English; empty when it succeeded or the user closed the popup. */
   error: string;
+  /** This session's sign-in created the account (Privy's first login): the wallet popup opens as the Deposit window. */
+  newUser: boolean;
   connect(): void;
   disconnect(): void;
   signer: Signer | null;
   authHeaders(): Promise<Record<string, string>>;
 };
 export const SIGN_IN_NOT_SET_UP = "Sign-in is not set up for this site yet.";
-const closed: ChainWallet = { configured: false, session: null, pending: false, error: "", connect() {}, disconnect() {}, signer: null, authHeaders: async () => ({}) };
+const closed: ChainWallet = { configured: false, session: null, pending: false, error: "", newUser: false, connect() {}, disconnect() {}, signer: null, authHeaders: async () => ({}) };
 const WalletContext = createContext<ChainWallet>(closed);
 export const useChainWallet = () => useContext(WalletContext);
 
@@ -69,9 +72,10 @@ export function jsonTypedData(data: TypedData) {
 function PrivyBridge({ children }: { children: ReactNode }) {
   const { ready, authenticated, logout, getAccessToken } = usePrivy();
   const [error, setError] = useState("");
+  const [newUser, setNewUser] = useState(false);
   // Memoized: Privy re-subscribes these callbacks whenever the object changes.
   const { login } = useLogin(useMemo(() => ({
-    onComplete: () => setError(""),
+    onComplete: ({ isNewUser }: { isNewUser: boolean }) => { setError(""); setNewUser(isNewUser); },
     onError: (code: string) => setError(SIGN_IN_ERRORS[code] ?? "Sign-in did not finish. Try again."),
   }), []));
   const { wallets, ready: walletsReady } = useWallets();
@@ -87,13 +91,15 @@ function PrivyBridge({ children }: { children: ReactNode }) {
       address,
       signMessage: async (message) => normalizeSignature((await signMessage({ message }, silent)).signature),
       signTypedData: async (data) => normalizeSignature((await signTypedData(jsonTypedData(data), silent)).signature),
+      // Shown: the user reads what is sent and where in Privy's window, and confirms it there (use-private.ts lets only sends through).
+      confirmTypedData: async (data, text) => normalizeSignature((await signTypedData(jsonTypedData(data), { uiOptions: { showWalletUIs: true, title: "Send USDC", description: text, buttonText: "Send" }, address: embedded?.address })).signature),
     } : null;
     return {
-      configured: true, pending: !ready, error, signer,
+      configured: true, pending: !ready, error, newUser, signer,
       // The embedded wallet signs for any chain: the network step is always done.
       session: address ? { address, chainId: 26514, generation: 0 } : null,
       connect: () => { setError(""); login(); },
-      disconnect: () => void logout(),
+      disconnect: () => { setNewUser(false); void logout(); },
       async authHeaders(): Promise<Record<string, string>> {
         // The identity token is optional: Privy issues one only when the app turns it on, and the relayer then checks the wallet is linked.
         const [access, identity] = await Promise.all([getAccessToken(), getIdentityToken().catch(() => null)]);
@@ -102,6 +108,6 @@ function PrivyBridge({ children }: { children: ReactNode }) {
         return identity ? { authorization: `Bearer ${access}`, "privy-id-token": identity } : { authorization: `Bearer ${access}` };
       },
     };
-  }, [embedded, address, ready, error, login, logout, getAccessToken, signMessage, signTypedData]);
+  }, [embedded, address, ready, error, newUser, login, logout, getAccessToken, signMessage, signTypedData]);
   return <WalletContext.Provider value={value}>{children}</WalletContext.Provider>;
 }

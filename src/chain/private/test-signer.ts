@@ -16,7 +16,7 @@ export function ForkBoundary(context: Context<ChainWallet>) {
     const value = useMemo<ChainWallet>(() => {
       const address = account?.address.toLowerCase() as Address | undefined;
       return {
-        configured: true, pending: false, error,
+        configured: true, pending: false, error, newUser: false,
         session: address ? { address, chainId: 26514, generation: 0 } : null,
         signer: account && address ? {
           address,

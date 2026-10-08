@@ -172,6 +172,16 @@ function HouseQuotes({ house }: { house: House | null }) {
   return rows.map((r) => <div className="chain-book-row" key={r.side + r.kind}><span><b className={r.side}>{r.side === "up" ? "Up" : "Down"}</b> {r.kind === "ask" ? "Ask" : "Bid"} {r.cents}¢</span><span>{shares(r.shares)}</span><span>{usdc(Math.floor(r.shares / 100) * r.cents)}</span></div>);
 }
 
+/** Whether this tab's session already opened the Deposit window for `account`; marks it so. Storage blocked: it may open again. */
+function onboarded(account: string): boolean {
+  try {
+    const key = `zedge:onboarded:${account}`;
+    if (sessionStorage.getItem(key)) return true;
+    sessionStorage.setItem(key, "1");
+  } catch { /* storage blocked */ }
+  return false;
+}
+
 export default function ChainApp() {
   return <WalletBoundary><ChainMarkets /></WalletBoundary>;
 }
@@ -228,6 +238,11 @@ function ChainMarkets() {
   const fundingBook = orderbook ?? (mismatch ? null : privateBook ?? committedBook);
   const priv = usePrivate(wallet, fundingBook);
   const unlocked = Boolean(priv.snapshot?.unlocked), cash = priv.snapshot?.view?.cash ?? 0, onBase = priv.snapshot?.wallet ?? null;
+  // The Deposit window: right after sign-up, and once a session for a signed-in account with nothing in it (no trading balance,
+  // nothing on Base, no positions or orders, no deposit this session). Never over a popup already open.
+  const account = wallet.session?.address ?? "", empty = unlocked && !cash && !priv.snapshot?.view?.reservedCash && !priv.snapshot?.view?.holdings.length && onBase === 0n && !priv.snapshot?.actions.some((a) => a.action === "Deposit");
+  useEffect(() => { if (account && wallet.newUser) { onboarded(account); setDrawer("deposit"); } }, [account, wallet.newUser]);
+  useEffect(() => { if (account && empty && !onboarded(account)) setDrawer((open) => open ?? "deposit"); }, [account, empty]);
 
   useEffect(() => {
     // Canonicalize the hash entry so in-page anchors cannot change app mode on reload.

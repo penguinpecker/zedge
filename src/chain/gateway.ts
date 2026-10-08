@@ -10,9 +10,9 @@ import { rpcTransport } from "./rpc.ts";
 export function chainClient(chainId: NetworkId) {
   return createPublicClient({ chain: NETWORKS[chainId], transport: rpcTransport(NETWORKS[chainId].rpcUrls.default.http[0]) });
 }
-/** Base, for the vault and the user's USDC. */
-export function baseClient() {
-  return createPublicClient({ transport: rpcTransport(BASE_RPC) });
+/** Base, for the vault and the user's USDC. `batch: false` for Alchemy's transfer index, which refuses batched requests. */
+export function baseClient(batch = true) {
+  return createPublicClient({ transport: rpcTransport(BASE_RPC, { batch }) });
 }
 
 export type ChainSnapshot = { chainId: NetworkId; blockNumber: bigint; blockHash: Hex; timestamp: bigint; checkedAt: number };

@@ -1,6 +1,7 @@
 /** ZEDGE's relayer: sends a signed-in user's own EIP-712 request authorization to the order book's ProcessorEndpoint.submitRequestFor
- * on Horizen (a private command, or the key registration), and a user's Base USDC permit to the ZEDGE vault's depositWithPermit on
- * Base. It pays gas on both chains and the request fee; it never signs for a user. Only that endpoint, that application, that vault,
+ * on Horizen (a private command, or the key registration), a user's Base USDC permit to the ZEDGE vault's depositWithPermit on
+ * Base, and a user's Base USDC transferWithAuthorization (a send out of the user's own wallet, confirmed in the wallet). It pays gas
+ * on both chains and the request fee; it never signs for a user. Only that endpoint, that application, that vault, that token,
  * those request types and their exact shapes are encoded here. Every check runs before anything is sent; a send is never retried or
  * resubmitted. Withdrawals need nothing from it: they are private requests, and the payout signer pays them on Base. */
 import { createHash, randomUUID } from "node:crypto";
@@ -8,15 +9,15 @@ import { createLocalJWKSet, jwtVerify, type JSONWebKeySet } from "jose";
 import { BaseError, ExecutionRevertedError, createPublicClient, decodeErrorResult, encodeFunctionData, http, keccak256, parseAbi, parseEventLogs, recoverTypedDataAddress, type Address, type Hex, type Log } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { ASSOCIATEKEY, PROCESS, ZERO_ADDRESS, endpointAbi, parseOrderbookManifest, requestTypedData, type ConfiguredOrderbook } from "../src/chain/orderbook-manifest.ts";
-import { usdcPermitTypedData, vaultAbi } from "../src/chain/vault.ts";
+import { MIN_SEND, usdcAbi, usdcPermitTypedData, usdcTransferTypedData, vaultAbi } from "../src/chain/vault.ts";
 
 type Book = ConfiguredOrderbook;
 export type RelayConfig = {
   book: Book; privyAppId: string; jwks: JSONWebKeySet; allowedOrigin: string; inviteOnly: boolean; dailyBudgetWei: bigint; minBalanceWei: bigint;
   baseDailyBudgetWei: bigint; baseMinBalanceWei: bigint;
-  limits: { user10m: number; userDay: number; userDeposits: number; globalHour: number; queueBusy: number };
+  limits: { user10m: number; userDay: number; userDeposits: number; userSends: number; globalHour: number; queueBusy: number };
 };
-export const DEFAULT_LIMITS: RelayConfig["limits"] = { user10m: 20, userDay: 150, userDeposits: 5, globalHour: 400, queueBusy: 6 };
+export const DEFAULT_LIMITS: RelayConfig["limits"] = { user10m: 20, userDay: 150, userDeposits: 5, userSends: 10, globalHour: 400, queueBusy: 6 };
 /** The subset of Upstash Redis used: plain SET NX / INCR / EXPIRE, no scripts. Values are raw strings. */
 export interface Store {
   set(key: string, value: string, options?: { nx?: true; xx?: true; ex?: number; px?: number }): Promise<unknown>;
@@ -47,14 +48,14 @@ export interface Wire {
   receipt(hash: Hex): Promise<Receipt | null>;
 }
 export interface TxSigner { address: Address; signTransaction(tx: { chainId: number; to: Address; data: Hex; value: bigint; gas: bigint; maxFeePerGas: bigint; maxPriorityFeePerGas: bigint; nonce: number; type: "eip1559" }): Promise<Hex> }
-/** `wire` is Horizen (requests); `base` is Base (deposits). */
+/** `wire` is Horizen (requests); `base` is Base (deposits and sends). */
 export type Deps = { config: RelayConfig | null; store: Store | null; wire: Wire | null; base?: Wire | null; signer: TxSigner | null; now?: () => number; sleep?: (ms: number) => Promise<void>; log?: (line: string) => void };
 export type Answer = { status: number; body: Record<string, unknown> };
 
 const STATUS: Record<string, number> = {
   BAD_REQUEST: 400, UNSUPPORTED_REQUEST: 400, UNAUTHENTICATED: 401, ORIGIN_NOT_ALLOWED: 403, NOT_INVITED: 403, SENDER_NOT_LINKED: 403, SIGNATURE_MISMATCH: 409, IN_FLIGHT: 409,
-  PERMIT_MISMATCH: 409, AMOUNT_ABOVE_BALANCE: 409, DEADLINE_OUT_OF_RANGE: 422, SIMULATION_REVERTED: 422, GAS_ABOVE_CAP: 422, AMOUNT_OUT_OF_RANGE: 422,
-  RATE_LIMITED: 429, DAILY_LIMIT: 429, QUEUE_BUSY: 503, BUDGET_EXHAUSTED: 503, RELAYER_UNFUNDED: 503, FEE_ABOVE_CAP: 503, STORE_UNAVAILABLE: 503,
+  PERMIT_MISMATCH: 409, AMOUNT_ABOVE_BALANCE: 409, DEADLINE_OUT_OF_RANGE: 422, SIMULATION_REVERTED: 422, GAS_ABOVE_CAP: 422, AMOUNT_OUT_OF_RANGE: 422, AMOUNT_TOO_SMALL: 422,
+  RATE_LIMITED: 429, DAILY_LIMIT: 429, SEND_LIMIT: 429, QUEUE_BUSY: 503, BUDGET_EXHAUSTED: 503, RELAYER_UNFUNDED: 503, FEE_ABOVE_CAP: 503, STORE_UNAVAILABLE: 503,
   RPC_UNAVAILABLE: 502, SEND_UNKNOWN: 502, REVERTED: 502, SENT_UNCONFIRMED: 202,
 };
 const MESSAGE: Record<string, string> = {
@@ -65,6 +66,7 @@ const MESSAGE: Record<string, string> = {
   RELAYER_UNFUNDED: "Relayer unavailable.", FEE_ABOVE_CAP: "Network fee above the cap.", STORE_UNAVAILABLE: "Relayer unavailable.", RPC_UNAVAILABLE: "Network unavailable.",
   SEND_UNKNOWN: "Sent or not: unknown. Follow the chain.", REVERTED: "Reverted on chain.", SENT_UNCONFIRMED: "Sent; not confirmed yet.",
   PERMIT_MISMATCH: "Token permit does not match at the current nonce.", AMOUNT_ABOVE_BALANCE: "Amount above the wallet's balance.", AMOUNT_OUT_OF_RANGE: "Amount outside the vault's deposit limits.",
+  AMOUNT_TOO_SMALL: "Amount below the smallest send.", SEND_LIMIT: "Today's send limit is reached.",
 };
 class Refusal extends Error {
   readonly code: string; readonly extra: Record<string, unknown>;
@@ -76,7 +78,8 @@ const refuse = (code: string, extra: Record<string, unknown> = {}): never => { t
 export const FEE_CAPS = { horizen: { tip: 1_000_000n, max: 3_000_000n }, base: { tip: 1_000_000n, max: 100_000_000n } } as const;
 // PROCESS measured 1.685 M gas (2,076-byte payload) through submitRequest; ×1.2 needs more than 2 M. A Base deposit is about 0.56 M
 // (most of it the Horizen deposit fee the portal burns); far above that, someone is pumping that fee, and the relayer waits it out.
-export const GAS_CAP = { process: 2_400_000n, associate: 450_000n, "base-deposit": 1_500_000n } as const;
+// A USDC transferWithAuthorization is about 0.08 M to a new holder.
+export const GAS_CAP = { process: 2_400_000n, associate: 450_000n, "base-deposit": 1_500_000n, "base-transfer": 150_000n } as const;
 const MWEI = 1_000_000n; // budget counters hold whole Mwei so they stay exact JavaScript numbers
 const mwei = (wei: bigint) => Number((wei + MWEI - 1n) / MWEI);
 const sha = (text: string) => createHash("sha256").update(text).digest("hex");
@@ -92,7 +95,8 @@ const tokenAbi = parseAbi(["function balanceOf(address) view returns (uint256)",
 const vaultErrors = parseAbi(["error AmountOutOfRange()", "error InvalidRecipient()", "error AlreadyPaid()", "error BadSignature()", "error CapExceeded()", "error SafeERC20FailedOperation(address token)"]);
 
 type Parsed = { kind: "request"; sender: Address; requestType: 1 | 3; payload: Hex; tokenAddress: Address; assetAmount: bigint; deadline: bigint; signature: Hex; permit: Hex; shape: "process" | "associate" }
-  | { kind: "base-deposit"; owner: Address; amount: bigint; deadline: bigint; permit: Hex; shape: "base-deposit" };
+  | { kind: "base-deposit"; owner: Address; amount: bigint; deadline: bigint; permit: Hex; shape: "base-deposit" }
+  | { kind: "base-transfer"; from: Address; to: Address; amount: bigint; validBefore: bigint; nonce: Hex; signature: Hex; shape: "base-transfer" };
 
 /** Step 5: the only shapes the relayer will pay for. */
 export function parseBody(text: string): Parsed {
@@ -104,6 +108,13 @@ export function parseBody(text: string): Parsed {
     const owner = addressOf(r.owner), amount = atoms(r.amount), permit = signature65(r.permit);
     if (keys !== "amount,deadline,kind,owner,permit" || !owner || !amount || !permit || typeof r.deadline !== "string" || !/^[1-9][0-9]{0,15}$/.test(r.deadline)) refuse("BAD_REQUEST");
     return { kind: "base-deposit", owner: owner!, amount: amount!, deadline: BigInt(r.deadline as string), permit: permit!, shape: "base-deposit" };
+  }
+  if (r.kind === "base-transfer") {
+    // validAfter is always 0: nothing in the body chooses it.
+    const from = addressOf(r.from), to = addressOf(r.to), amount = atoms(r.amount), signature = signature65(r.signature);
+    if (keys !== "amount,from,kind,nonce,signature,to,validBefore" || !from || !to || !amount || !signature || !hexOf(r.nonce, 32) || typeof r.validBefore !== "string" || !/^[1-9][0-9]{0,15}$/.test(r.validBefore)) refuse("BAD_REQUEST");
+    if (amount! < MIN_SEND) refuse("AMOUNT_TOO_SMALL");
+    return { kind: "base-transfer", from: from!, to: to!, amount: amount!, validBefore: BigInt(r.validBefore as string), nonce: (r.nonce as string).toLowerCase() as Hex, signature: signature!, shape: "base-transfer" };
   }
   if (r.kind !== "request" || keys !== "assetAmount,deadline,kind,payload,permit,requestType,sender,signature,tokenAddress") refuse("BAD_REQUEST");
   const sender = addressOf(r.sender), token = addressOf(r.tokenAddress);
@@ -147,6 +158,7 @@ export async function authenticate(headers: Headers, config: Pick<RelayConfig, "
 
 function encode(book: Book, p: Parsed): Hex {
   if (p.kind === "request") return encodeFunctionData({ abi: endpointAbi, functionName: "submitRequestFor", args: [p.sender, 0, BigInt(book.application.id), p.requestType, p.payload, p.tokenAddress, p.assetAmount, p.deadline, p.signature, p.permit] });
+  if (p.kind === "base-transfer") return encodeFunctionData({ abi: usdcAbi, functionName: "transferWithAuthorization", args: [p.from, p.to, p.amount, 0n, p.validBefore, p.nonce, Number.parseInt(p.signature.slice(130), 16), `0x${p.signature.slice(2, 66)}`, `0x${p.signature.slice(66, 130)}`] });
   return encodeFunctionData({ abi: vaultAbi, functionName: "depositWithPermit", args: [p.owner, p.amount, p.deadline, Number.parseInt(p.permit.slice(130), 16), `0x${p.permit.slice(2, 66)}`, `0x${p.permit.slice(66, 130)}`] });
 }
 
@@ -173,11 +185,13 @@ export async function handle(request: { method: string; headers: Headers; body: 
     line.user = sha(user.sub).slice(0, 16);
     if (config.inviteOnly && !(await store.sismember("relay:invited", user.sub))) return answer("NOT_INVITED");
     const p = parseBody(request.body);
-    // The chain this request is sent on: Base for a deposit, Horizen for a request. Lock, nonce, budget and in-flight marks are per chain.
-    const onBase = p.kind === "base-deposit", chainId = onBase ? config.book.custody.chainId : config.book.chainId, wire = onBase ? deps.base : deps.wire;
+    // A send never goes nowhere, back to its sender, or into the vault (a deposit goes through depositWithPermit, which credits it).
+    if (p.kind === "base-transfer" && (p.to === ZERO_ADDRESS || p.to === p.from || p.to === config.book.custody.vault.address)) return answer("BAD_REQUEST");
+    // The chain this request is sent on: Base for a deposit or a send, Horizen for a request. Lock, nonce, budget and in-flight marks are per chain.
+    const onBase = p.kind !== "request", chainId = onBase ? config.book.custody.chainId : config.book.chainId, wire = onBase ? deps.base : deps.wire;
     const fees = onBase ? FEE_CAPS.base : FEE_CAPS.horizen, dailyBudgetWei = onBase ? config.baseDailyBudgetWei : config.dailyBudgetWei, minBalanceWei = onBase ? config.baseMinBalanceWei : config.minBalanceWei;
-    const who = p.kind === "request" ? p.sender : p.owner;
-    Object.assign(line, { chain: chainId, kind: p.kind, type: p.shape, sender: who }, p.kind === "base-deposit" ? { amount: p.amount.toString() } : {});
+    const who = p.kind === "request" ? p.sender : p.kind === "base-deposit" ? p.owner : p.from;
+    Object.assign(line, { chain: chainId, kind: p.kind, type: p.shape, sender: who }, p.kind !== "request" ? { amount: p.amount.toString() } : {});
     if (user.wallets && !user.wallets.has(who)) return answer("SENDER_NOT_LINKED");
     if (!wire) return answer("RPC_UNAVAILABLE");
 
@@ -188,15 +202,16 @@ export async function handle(request: { method: string; headers: Headers; body: 
       await store.set(key, "0", { nx: true, ex: ttl });
       const n = await store.incrby(key, 1);
       if (n === 1) await store.expire(key, ttl);
-      if (n > limit) refuse(code, { retryAfter: code === "DAILY_LIMIT" ? toMidnight : Math.max(1, await store.ttl(key)) });
+      if (n > limit) refuse(code, { retryAfter: code === "DAILY_LIMIT" || code === "SEND_LIMIT" ? toMidnight : Math.max(1, await store.ttl(key)) });
     };
     await count(`relay:u10m:${user.sub}`, config.limits.user10m, 600);
     await count(`relay:uday:${user.sub}:${today}`, config.limits.userDay, 172_800);
     if (p.kind === "base-deposit") await count(`relay:udep:${user.sub}:${today}`, config.limits.userDeposits, 172_800, "DAILY_LIMIT");
+    if (p.kind === "base-transfer") await count(`relay:usend:${user.sub}:${today}`, config.limits.userSends, 172_800, "SEND_LIMIT");
     await count(`relay:gh:${hour(t)}`, config.limits.globalHour, 7_200);
 
     // Step 8: the same signed authorization (or permit) is sent at most once, ever.
-    const key = p.kind === "request" ? `relay:req:${keccak256(p.signature)}` : `relay:dep:${keccak256(p.permit)}`;
+    const key = p.kind === "request" ? `relay:req:${keccak256(p.signature)}` : p.kind === "base-deposit" ? `relay:dep:${keccak256(p.permit)}` : `relay:xfer:${keccak256(p.signature)}`;
     line.key = key.slice(-10);
     if (await store.set(key, JSON.stringify({ state: "pending" }), { nx: true, ex: 86_400 })) forget = key;
     else {
@@ -220,6 +235,15 @@ export async function handle(request: { method: string; headers: Headers; body: 
       if (p.amount > s.usdcBalance) return answer("AMOUNT_ABOVE_BALANCE");
       if (p.deadline < s.timestamp + 60n || p.deadline > s.timestamp + 3_600n) return answer("DEADLINE_OUT_OF_RANGE");
       to = config.book.custody.vault.address; balance = s.balance; baseFee = s.baseFee;
+    } else if (p.kind === "base-transfer") {
+      const s = await wire.depositState(p.from, signer.address).catch(() => refuse("RPC_UNAVAILABLE"));
+      // Step 10: the owner's own authorization of exactly this transfer on Base USDC's domain; the token itself refuses a used nonce.
+      const typed = usdcTransferTypedData(config.book.custody, { from: p.from, to: p.to, value: p.amount, validAfter: 0n, validBefore: p.validBefore, nonce: p.nonce });
+      const recovered = await recoverTypedDataAddress({ ...typed, signature: p.signature }).catch(() => null);
+      if (recovered?.toLowerCase() !== p.from) return answer("SIGNATURE_MISMATCH");
+      if (p.amount > s.usdcBalance) return answer("AMOUNT_ABOVE_BALANCE");
+      if (p.validBefore < s.timestamp + 60n || p.validBefore > s.timestamp + 3_600n) return answer("DEADLINE_OUT_OF_RANGE");
+      to = config.book.custody.usdc.address; balance = s.balance; baseFee = s.baseFee;
     } else {
       const s = await wire.state(p.sender, signer.address).catch(() => refuse("RPC_UNAVAILABLE"));
       // Step 10: the digest with the on-chain nonce and this relayer's fixed domain; nothing in the body chooses the endpoint or the application.
@@ -303,6 +327,11 @@ export async function handle(request: { method: string; headers: Headers; body: 
         .find((l) => l.args.account.toLowerCase() === p.owner && l.args.amount === p.amount);
       if (own) result.index = own.args.index.toString();
       else code = "REVERTED";
+    }
+    if (code === "OK" && p.kind === "base-transfer") {
+      const own = parseEventLogs({ abi: usdcAbi, logs: receipt.logs.filter((l) => l.address.toLowerCase() === to), eventName: "Transfer" })
+        .some((l) => l.args.from.toLowerCase() === p.from && l.args.to.toLowerCase() === p.to && l.args.value === p.amount);
+      if (!own) code = "REVERTED";
     }
     await store.set(key, JSON.stringify({ state: "done", code, result }), { ex: 86_400 });
     return answer(code, code === "OK" ? result : { txHash });

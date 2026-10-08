@@ -8,17 +8,21 @@ import { EvaluationSession, type EvaluationDomain } from "../../../adapters/vela
 import { commandBody, commandId, syncBody, syncRequestId, type EngineCommand, type ReceiptBody } from "../../../adapters/vela/crypto/guest.ts";
 import { padBody } from "../../../adapters/vela/crypto/pad.ts";
 import { ASSOCIATEKEY, LOT, OPERATOR_KEYS_CHANGED, PROCESS, ZERO_ADDRESS, endpointAbi, engineRound, normalizeSignature, requestTypedData, type VerifiedOrderbook } from "../orderbook-manifest.ts";
-import { SUBTYPES, decodeCredit, decodePayout, decodeSettle, inboxAbi, usdcAbi, usdcPermitTypedData, vaultAbi } from "../vault.ts";
+import { SUBTYPES, decodeCredit, decodePayout, decodeSettle, inboxAbi, usdcAbi, usdcPermitTypedData, usdcTransferTypedData, vaultAbi } from "../vault.ts";
+import { autoDeposit, type Transfer } from "../deposit-amount.ts";
 import type { AccountPage, ApiRound, Head, Live } from "../read-api.ts";
 
 export type Book = VerifiedOrderbook["manifest"];
-export type TypedData = ReturnType<typeof requestTypedData> | ReturnType<typeof usdcPermitTypedData>;
-/** The wallet as the client needs it. Implementations return normalized signatures and sign without prompts where they can. */
-export interface Signer { address: Address; signMessage(message: string): Promise<Hex>; signTypedData(data: TypedData): Promise<Hex> }
+export type TypedData = ReturnType<typeof requestTypedData> | ReturnType<typeof usdcPermitTypedData> | ReturnType<typeof usdcTransferTypedData>;
+/** The wallet as the client needs it. Implementations return normalized signatures and sign without prompts where they can.
+ * `confirmTypedData`: the one signature the user confirms in the wallet's own window, with `text` saying what it does (a send). */
+export interface Signer { address: Address; signMessage(message: string): Promise<Hex>; signTypedData(data: TypedData): Promise<Hex>; confirmTypedData?(data: TypedData, text: string): Promise<Hex> }
 export type RelayBody =
   | { kind: "request"; sender: Address; requestType: number; payload: Hex; tokenAddress: Address; assetAmount: string; deadline: string; signature: Hex; permit: Hex }
   /** Base USDC into the vault: the owner's permit (65 bytes) to the vault for exactly `amount`, sent by the relayer. */
-  | { kind: "base-deposit"; owner: Address; amount: string; deadline: string; permit: Hex };
+  | { kind: "base-deposit"; owner: Address; amount: string; deadline: string; permit: Hex }
+  /** A send out of the owner's Base wallet: its USDC transferWithAuthorization (validAfter 0), sent by the relayer. */
+  | { kind: "base-transfer"; from: Address; to: Address; amount: string; validBefore: string; nonce: Hex; signature: Hex };
 export type RelayAnswer =
   | { ok: true; status: number; txHash: Hex; requestId?: Hex; block?: number; facilitator?: Address; duplicate?: boolean }
   | { ok: false; status: number; code: string; message: string; retryAfter?: number; txHash?: Hex };
@@ -52,6 +56,10 @@ export interface Chain {
   baseContext(owner: Address): Promise<BaseContext>;
   /** The vault's first Deposited event for `owner` since Base block `fromBlock`. */
   deposited(owner: Address, fromBlock: bigint): Promise<{ index: bigint; txHash: Hex } | null>;
+  /** The Base transaction that used `owner`'s USDC transfer authorization `nonce`, since Base block `fromBlock`. */
+  transferred(owner: Address, nonce: Hex, fromBlock: bigint): Promise<Hex | null>;
+  /** Every Base USDC transfer to or from `account`, in chain order. Only with a transfer index (Alchemy); without one, deposits are manual. */
+  transfers?(account: Address): Promise<Transfer[]>;
   /** The deposit record has reached the Horizen inbox. */
   arrived(index: bigint): Promise<boolean>;
   /** The guest's `credit` event for this Base deposit index since Horizen block `fromBlock` (within the last 1,000 blocks): 1 credited, 2 refunded. */
@@ -73,6 +81,8 @@ type Outcome = NonNullable<ReceiptBody["outcome"]>;
 export type Phase = "signing" | "sending" | "submitted" | "waiting" | "staged" | "matching" | "collecting" | "done" | "refused" | "failed";
 /** `chain` names where `tx` is: Horizen unless it is a Base transaction. */
 export type ActionState = { id: number; action: string; phase: Phase; text: string; tx?: Hex; chain?: 8453 | 26514; /** Deposit only: stages done of Sent on Base, Reached Horizen, Credited. */ stage?: 1 | 2 | 3; startedAt: number; final: boolean };
+/** Actions that move money: no automatic deposit starts while one of them runs. */
+const MONEY_ACTIONS = ["Deposit", "Withdraw", "Payout", "Send"];
 type Step = (phase: Phase, text: string, tx?: Hex, chain?: 8453 | 26514, stage?: 1 | 2 | 3) => void;
 /** A request the chain shows submitted: its line, where it went, and the context it was signed with. */
 type Submitted = { step: Step; submission: Submission; ctx: AuthContext };
@@ -86,7 +96,7 @@ const NETWORK_BUSY = "Waiting (network busy)";
 const NETWORK_DOWN = "The network is busy. Nothing was sent. Try again in a minute.";
 export const NOT_SUBMITTED = "The request could not be sent. Nothing was submitted.";
 export const KEY_CHANGED = "Your wallet produced a different private key than before. Private records stay unreadable until this is resolved.";
-const DEPOSIT_DEADLINE = 1_200n, MONEY_WAIT = 900_000;
+const DEPOSIT_DEADLINE = 1_200n, MONEY_WAIT = 900_000, SEND_WINDOW = 1_800n;
 const LOCKED = "Your private account was locked.";
 const RESULTS_UNREAD = "Round results could not be read. Trying again.";
 /** How a Base deposit ended for now: "pending" when this page stopped waiting before the credit (a slower check carries on). */
@@ -108,6 +118,7 @@ const RELAY_TEXT: Record<string, string> = {
   RPC_UNAVAILABLE: "The network is unavailable.", REVERTED: "The network refused the request.",
   PERMIT_MISMATCH: "Your token permit did not match. Try again.", AMOUNT_ABOVE_BALANCE: "Your wallet holds less than this deposit.",
   AMOUNT_OUT_OF_RANGE: "This deposit is outside the allowed amounts.", DAILY_LIMIT: "You have reached today's deposit limit. Try again tomorrow.",
+  AMOUNT_TOO_SMALL: "Sends start at 0.10 USDC.", SEND_LIMIT: "You have reached today's send limit. Try again tomorrow.",
 };
 /** A refusal the relayer gave before anything could be sent. Every other answer (lost, unreadable, a send error) is settled from the chain. */
 export const refusedBeforeSending = (answer: RelayAnswer): answer is Extract<RelayAnswer, { ok: false }> => !answer.ok && Object.hasOwn(RELAY_TEXT, answer.code);
@@ -185,11 +196,12 @@ export function sharesFor(pay: number, price: number): number {
   return Math.floor(pay * 100 / price / 1000) * 1000;
 }
 
-/** `wallet`: Base USDC at the account's own address, ready to deposit. `historyMore`: History has older blocks to read ("Load older"),
+/** `wallet`: Base USDC at the account's own address. `held`: the part of it that came from the vault (withdrawals, refunds), which the
+ * automatic deposit leaves alone; null until read. `historyMore`: History has older blocks to read ("Load older"),
  * and `historyHours` is how far back it has read. `behind`: a deposit was credited after the last view was read, so the balance
  * shown is short until the next sync. `cached`: `view` is the newest readable receipt the read API had, shown read-only while the
  * unlock sync runs; `unlocked` is still false. `lastResult`: the newest settled round this account held (checkResults, loadLastResult). */
-export type Snapshot = { unlocked: boolean; registered: boolean; view: View | null; fingerprint: string | null; actions: ActionState[]; history: HistoryEntry[]; historyMore: boolean; historyHours: number; wallet: bigint | null; error: string; behind: boolean; cached: boolean; lastResult: LastResult | null };
+export type Snapshot = { unlocked: boolean; registered: boolean; view: View | null; fingerprint: string | null; actions: ActionState[]; history: HistoryEntry[]; historyMore: boolean; historyHours: number; wallet: bigint | null; held: bigint | null; error: string; behind: boolean; cached: boolean; lastResult: LastResult | null };
 /** One History page: about six hours of Horizen's ~1 s blocks. */
 export const HISTORY_PAGE = 21_600n;
 
@@ -197,7 +209,7 @@ export class PrivateAccount {
   readonly account: Address;
   #session: EvaluationSession;
   #queue: Promise<unknown> = Promise.resolve();
-  #state: Snapshot = { unlocked: false, registered: false, view: null, fingerprint: null, actions: [], history: [], historyMore: false, historyHours: 0, wallet: null, error: "", behind: false, cached: false, lastResult: null };
+  #state: Snapshot = { unlocked: false, registered: false, view: null, fingerprint: null, actions: [], history: [], historyMore: false, historyHours: 0, wallet: null, held: null, error: "", behind: false, cached: false, lastResult: null };
   /** History read so far: blocks `oldest` to `head`, the account's requests there in chain order, and its request count at `head`. */
   #scan: { head: bigint; oldest: bigint; total: bigint; logged: Logged[] } | null = null;
   /** History from the read API instead: its entries newest first, each with its log index (the next page's cursor), and whether
@@ -215,6 +227,9 @@ export class PrivateAccount {
   #resultsAfter = 0; #resultsWait = 0; #resultsLine = 0;
   /** When the last fresh receipt was read. */
   #readAt = 0;
+  /** The automatic deposit: one look at a time; the rule's answer for the balance it was read at; after a failure, the next try not
+   * before `#autoAfter`, each wait twice the last. */
+  #autoBusy = false; #autoRead: { balance: bigint; atoms: bigint } | null = null; #autoAfter = 0; #autoWait = 0;
   /** Book commands waiting for their result, by command ID: it comes back once, with whichever request of this account is next. */
   readonly #awaiting = new Map<string, (outcome: Outcome) => void>();
   readonly #book: Book; readonly #signer: Signer; readonly #chain: Chain; readonly #relay: Relay;
@@ -403,8 +418,8 @@ export class PrivateAccount {
     }
   }
 
-  async #signed(typed: TypedData): Promise<Hex> {
-    const signature = normalizeSignature(await this.#signer.signTypedData(typed));
+  async #signed(typed: TypedData, sign = (data: TypedData) => this.#signer.signTypedData(data)): Promise<Hex> {
+    const signature = normalizeSignature(await sign(typed));
     // Recovered here, before anything leaves the browser: a wallet that hashed other data fails now, with a clear message.
     if ((await recoverTypedDataAddress({ ...typed, signature } as Parameters<typeof recoverTypedDataAddress>[0])).toLowerCase() !== this.account) {
       throw new PublicError("Your wallet signed something other than this request. Nothing was sent.");
@@ -656,6 +671,66 @@ export class PrivateAccount {
 
   async refreshFunds() { this.#set({ wallet: await this.#chain.wallet(this.account) }); }
 
+  /** The automatic deposit, run after each Base balance read: USDC that reached this address from anyone but the vault goes in with
+   * depositFromBase (autoDeposit in deposit-amount.ts decides how much, from the address's whole transfer history). The history is
+   * read again when the balance moved since a read that added up, and before each try. One at a time, never beside another deposit,
+   * a withdrawal or a send; after a failure the next try waits 1 min, doubling up to 30 min (or the relayer's retry time when longer). */
+  async autoDeposit(): Promise<void> {
+    const balance = this.#state.wallet, read = this.#chain.transfers;
+    const moving = () => this.#closed || this.#state.actions.some((a) => !a.final && MONEY_ACTIONS.includes(a.action));
+    if (!read || balance === null || this.#autoBusy || moving()) return;
+    // Read again when the balance moved, and before each try: a deposit acts only on a history read just now.
+    if (this.#autoRead?.balance === balance && (!this.#autoRead.atoms || this.#now() < this.#autoAfter)) return;
+    this.#autoBusy = true;
+    try {
+      const c = this.#book.custody, rule = autoDeposit(balance ? await read(this.account) : [], this.account, c.vault.address, balance, c.vault.limits);
+      // The index is behind the chain (or ahead of the balance read): both are read again after the next balance read.
+      if (!rule) return;
+      this.#autoRead = { balance, atoms: rule.atoms };
+      if (rule.held !== this.#state.held) this.#set({ held: rule.held });
+      // A send or a deposit the user started during the read goes first.
+      if (!rule.atoms || this.#now() < this.#autoAfter || moving()) return;
+      try { await this.depositFromBase(rule.atoms); this.#autoWait = 0; }
+      catch (error) {
+        this.#autoWait = Math.min(this.#autoWait * 2 || 60_000, 1_800_000);
+        this.#autoAfter = this.#now() + Math.max(this.#autoWait, error instanceof PublicError && error.retryAfter ? error.retryAfter * 1000 : 0);
+      }
+    } catch { /* a failed history read: tried again after the next balance read */ }
+    finally { this.#autoBusy = false; }
+  }
+
+  /** A send out of this address on Base: the user confirms a USDC transferWithAuthorization in the wallet's own window (never
+   * silently), valid for 30 min, with a random nonce; the relayer sends it (no gas from the user). Sending, then Sent on Base once
+   * the token shows the authorization used (read from the chain alone, whatever the relayer answered). */
+  sendFromBase(to: Address, amount: bigint): Promise<void> {
+    return (async () => {
+      const confirm = this.#signer.confirmTypedData?.bind(this.#signer);
+      if (!confirm) throw new PublicError("This wallet cannot confirm a send.");
+      const step = this.#action("Send");
+      try {
+        const ctx = await this.#poll(() => this.#chain.baseContext(this.account), this.#now() + 90_000);
+        if (!ctx) throw new PublicError(NETWORK_DOWN, "NETWORK_BUSY");
+        if (ctx.balance < amount) throw new PublicError("Your wallet holds less than this amount.");
+        const validBefore = ctx.timestamp + SEND_WINDOW, nonce = toHex(crypto.getRandomValues(new Uint8Array(32)));
+        step("signing", "Confirm in your wallet");
+        const signature = await this.#signed(usdcTransferTypedData(this.#book.custody, { from: this.account, to, value: amount, validAfter: 0n, validBefore, nonce }), (data) => confirm(data, `Send ${usd(amount)} on Base to ${to}`));
+        step("sending", "Sending");
+        const answer = await this.#relay.post({ kind: "base-transfer", from: this.account, to, amount: amount.toString(), validBefore: validBefore.toString(), nonce, signature });
+        if (refusedBeforeSending(answer)) throw new PublicError(relayText(answer, this.#now()), answer.code, answer.retryAfter);
+        if (!answer.ok) step("sending", OUTCOME_UNKNOWN);
+        // The authorization cannot be used past validBefore: not used by then (a minute's grace for lagging logs) means never.
+        const tx = await this.#poll(() => this.#chain.transferred(this.account, nonce, ctx.block), this.#now() + Number(SEND_WINDOW + 60n) * 1000);
+        if (!tx) throw new PublicError(NOT_SUBMITTED, "NOT_SUBMITTED");
+        step("done", `Sent on Base · ${usd(amount)}`, tx, 8453);
+      } catch (error) {
+        // Closing the wallet's window refuses the signature: nothing was sent.
+        const message = error instanceof PublicError ? error.message : "The send did not go out. Nothing was sent.";
+        step("failed", message);
+        throw error instanceof PublicError ? error : new PublicError(message);
+      } finally { await this.refreshFunds().catch(() => undefined); }
+    })();
+  }
+
   /** Rounds this account holds that have ended: their result once its `settle` event is public (winners are paid in that same
    * transition), then one sync to read the new balance. The event is read from the last 1,000 Horizen blocks (settlement lands
    * 11-35 s after the end). A round whose result cannot be read (the read failed, or it ended before that window) gets one sync
@@ -853,12 +928,15 @@ export function indexedChain(chain: Chain, api: { account: NonNullable<Chain["re
   };
 }
 
-export function viemChain(client: PublicClient, book: Book, base: PublicClient, options: { sleep?: (ms: number) => Promise<void> } = {}): Chain {
+/** `assetTransfers`: a client of Base's Alchemy endpoint that sends each request alone (its alchemy_getAssetTransfers, the address's
+ * USDC history for `transfers`, refuses batched requests). */
+export function viemChain(client: PublicClient, book: Book, base: PublicClient, options: { sleep?: (ms: number) => Promise<void>; assetTransfers?: PublicClient } = {}): Chain {
   const { app, endpoint } = eventsOf(book);
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const auth = book.authenticator.address, c = book.custody;
   const events = { RequestSubmitted: getAbiItem({ abi: endpointAbi, name: "RequestSubmitted" }), RequestCompleted: getAbiItem({ abi: endpointAbi, name: "RequestCompleted" }), UserEvent: getAbiItem({ abi: endpointAbi, name: "UserEvent" }),
-    AppEvent: getAbiItem({ abi: endpointAbi, name: "AppEvent" }), Deposited: getAbiItem({ abi: vaultAbi, name: "Deposited" }), Paid: getAbiItem({ abi: vaultAbi, name: "Paid" }) };
+    AppEvent: getAbiItem({ abi: endpointAbi, name: "AppEvent" }), Deposited: getAbiItem({ abi: vaultAbi, name: "Deposited" }), Paid: getAbiItem({ abi: vaultAbi, name: "Paid" }),
+    AuthorizationUsed: getAbiItem({ abi: usdcAbi, name: "AuthorizationUsed" }) };
   const ours = <N extends "RequestSubmitted" | "UserEvent">(logs: Parameters<typeof parseEventLogs>[0]["logs"], eventName: N) =>
     parseEventLogs({ abi: endpointAbi, logs: logs.filter((l) => l.address.toLowerCase() === endpoint), eventName }).filter((l) => l.args.applicationId === app);
   // The guest's public events of this application and subtype since `fromBlock`, oldest first, within the last 1,000 blocks: a poll
@@ -958,6 +1036,11 @@ export function viemChain(client: PublicClient, book: Book, base: PublicClient, 
       const [log] = await base.getLogs({ address: c.vault.address, event: events.Deposited, args: { account: getAddress(owner) }, fromBlock: fromBlock + 1n, toBlock: "latest" });
       return log ? { index: log.args.index!, txHash: log.transactionHash! } : null;
     },
+    async transferred(owner, nonce, fromBlock) {
+      const [log] = await base.getLogs({ address: c.usdc.address, event: events.AuthorizationUsed, args: { authorizer: getAddress(owner), nonce }, fromBlock, toBlock: "latest" });
+      return log?.transactionHash ?? null;
+    },
+    transfers: options.assetTransfers ? (account) => assetTransfers(options.assetTransfers!, c.usdc.address, account) : undefined,
     async arrived(index) {
       const [account] = await client.readContract({ address: c.inbox.address, abi: inboxAbi, functionName: "deposits", args: [index] });
       return account.toLowerCase() !== ZERO_ADDRESS;
@@ -979,6 +1062,32 @@ export function viemChain(client: PublicClient, book: Book, base: PublicClient, 
       return (await appEvents(SUBTYPES.settle, fromBlock)).map(decodeSettle).flatMap((x) => x && x.kind !== 1 && wanted.has(x.roundId) ? [{ roundId: x.roundId, outcome: x.outcome }] : []);
     },
   };
+}
+
+/** Every USDC transfer to or from `account` on Base, oldest first, from Alchemy's transfer index: both directions, a thousand a page,
+ * each answer checked field by field (anything else throws, as a failed read). Simplification: at most 50 pages each way; a longer
+ * history throws, and that address deposits by hand. */
+async function assetTransfers(base: PublicClient, usdc: Address, account: Address): Promise<Transfer[]> {
+  const request = base.request as unknown as (args: { method: string; params: unknown[] }) => Promise<unknown>, seen = new Map<string, Transfer & { block: bigint; log: bigint }>();
+  const isAddress = (v: unknown): v is string => typeof v === "string" && /^0x[0-9a-fA-F]{40}$/.test(v), isHex = (v: unknown): v is string => typeof v === "string" && /^0x[0-9a-fA-F]+$/.test(v);
+  for (const side of ["fromAddress", "toAddress"]) {
+    let pageKey: string | undefined;
+    for (let page = 0; ; page++) {
+      if (page === 50) throw new Error("Transfer history too long.");
+      const answer = await request({ method: "alchemy_getAssetTransfers", params: [{ fromBlock: "0x0", toBlock: "latest", [side]: account, category: ["erc20"], contractAddresses: [usdc], excludeZeroValue: true, withMetadata: false, maxCount: "0x3e8", order: "asc", ...(pageKey ? { pageKey } : {}) }] }) as { transfers?: unknown; pageKey?: unknown } | null;
+      if (!answer || !Array.isArray(answer.transfers) || (answer.pageKey !== undefined && typeof answer.pageKey !== "string")) throw new Error("Unreadable transfer history.");
+      for (const t of answer.transfers as { from?: unknown; to?: unknown; blockNum?: unknown; uniqueId?: unknown; rawContract?: { value?: unknown; address?: unknown } }[]) {
+        // "<hash>:log:<index>": the index orders transfers within a block.
+        const log = typeof t?.uniqueId === "string" ? /:log:(0x[0-9a-f]+|\d+)$/i.exec(t.uniqueId)?.[1] ?? "0" : undefined;
+        if (!isAddress(t.from) || !isAddress(t.to) || !isHex(t.blockNum) || !log || !isHex(t.rawContract?.value) || String(t.rawContract.address).toLowerCase() !== usdc) throw new Error("Unreadable transfer history.");
+        // A transfer to itself is listed both ways: once is enough.
+        seen.set(t.uniqueId as string, { from: t.from.toLowerCase(), to: t.to.toLowerCase(), value: BigInt(t.rawContract.value), block: BigInt(t.blockNum), log: BigInt(log) });
+      }
+      pageKey = answer.pageKey as string | undefined;
+      if (!pageKey) break;
+    }
+  }
+  return [...seen.values()].sort((a, b) => a.block === b.block ? Number(a.log - b.log) : a.block < b.block ? -1 : 1).map(({ from, to, value }) => ({ from, to, value }));
 }
 
 /** The relayer, called with this session's Privy tokens as headers (never cookies). An answer that never arrived or cannot be read
