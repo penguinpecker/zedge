@@ -72,9 +72,6 @@ async function stack(options: { relayRefuses?: (body: RelayBody) => { code: stri
     if (type === 3) { keys.set(sender, await importPublicKeyFromHex(payload.slice(2))); views.set(sender, views.get(sender) ?? { nonce: 0, cash: 0, up: 0, down: 0 }); log.push("associate"); return done(0, 0, "", []); }
     if (!keys.has(sender)) { log.push("no key"); return done(1, 9, "no Secp521r1_PubKey found", []); }
     const v = views.get(sender)!;
-    // The engine's checkpoint before this request releases orders at or past their expiry, and their reservations.
-    for (const o of (v.orders ?? []).filter((x) => time >= BigInt(x.expiry))) { if (o.side === "buy") v.cash += o.reservedCash; else v[o.outcome] += o.remaining; }
-    v.orders = (v.orders ?? []).filter((x) => time < BigInt(x.expiry));
     const env = JSON.parse(decoder.decode(await decrypt(enclave.privateKey, keys.get(sender)!, hexToBytes(payload))));
     assert.equal(hexToBytes(payload).length, 2076, "every request is one size");
     const tick = keccak256(toHex(`tick:${++ticks}`));
@@ -83,7 +80,12 @@ async function stack(options: { relayRefuses?: (body: RelayBody) => { code: stri
     v.outcome = undefined;
     const reply = async (body: Record<string, unknown>) => {
       const receipt = await seal(sender, env.requestId, env.domain, { ...body, ...(collected ? { outcome: collected } : {}), view: viewOf(sender), at, tick: ticks, pad: "" });
-      // This request's own tick activates a command whose tick never came (`activateAfter`).
+      // This request's own tick: its checkpoint releases every order at or past its expiry, and its reservation, so a view shows a
+      // release only from the next request on (guest TrustedRequest); then it activates a command whose tick never came (`activateAfter`).
+      for (const a of views.values()) {
+        for (const o of (a.orders ?? []).filter((x) => time >= BigInt(x.expiry))) { if (o.side === "buy") a.cash += o.reservedCash; else a[o.outcome] += o.remaining; }
+        a.orders = (a.orders ?? []).filter((x) => time < BigInt(x.expiry));
+      }
       if (v.staged && --v.staged.wait < 0) activate(sender, v);
       return done(0, 0, "", [receipt], tick);
     };
