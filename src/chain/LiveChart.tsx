@@ -1,17 +1,25 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { AreaSeries, ColorType, createChart, CrosshairMode, LastPriceAnimationMode, LineStyle, type AutoscaleInfo, type IChartApi, type IPriceLine, type ISeriesApi, type Time, type UTCTimestamp } from "lightweight-charts";
+import { AreaSeries, CandlestickSeries, ColorType, createChart, CrosshairMode, LastPriceAnimationMode, LineStyle, type AutoscaleInfo, type IChartApi, type IPriceLine, type ISeriesApi, type LogicalRange, type SeriesType, type Time, type UTCTimestamp } from "lightweight-charts";
 import { parseUnits } from "viem";
 import { price } from "../lib/market";
 import { observationPrice } from "./gateway.ts";
 import { createPriceFeed, type FeedStatus, type Tick } from "./price-feed.ts";
 import "./live-chart.css";
 
-const LINE = "#c7f86f", TARGET = "#e9eddf", MUTED = "#8f9a86", FONT = 11;
+const LINE = "#c7f86f", DOWN = "#ef9a87", TARGET = "#e9eddf", MUTED = "#8f9a86", FONT = 11;
 /** Pixels between a badge's centre and a tick label's: half the badge (the font plus 2.5/12 of it above and below, as the chart
  * draws it) plus half a label, rounded up. */
 const BADGE_CLEARANCE = Math.ceil(FONT * (1 + 5 / 12) / 2 + FONT / 2) + 1;
 /** Seconds of price drawn before the first shown minute, so the line runs in from the left edge. */
 const LEAD = 300;
+/** Seconds shown before the round. The chart keeps its newest bar at least second from the left edge: with START at the edge, a
+ * round under a minute old was shifted left and CUTOFF and END were off the right side. Three minutes, because the newest candle is
+ * the minute before the newest report: two minutes before START until the round's first report lands. */
+const PAD = 180;
+type ChartType = "line" | "candles";
+/** The viewer's chart type, remembered in this browser; anything else stored, or no storage, is the line. */
+const TYPE_KEY = "zedge:chart";
+const storedType = (): ChartType => { try { return localStorage.getItem(TYPE_KEY) === "candles" ? "candles" : "line"; } catch { return "line"; } };
 /** The viewer's local time, 24-hour like the rest of the site. */
 const clock = (ms: number, seconds = false) => new Date(ms).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: seconds ? "2-digit" : undefined });
 const ZONE = new Intl.DateTimeFormat(undefined, { timeZoneName: "short" }).formatToParts(new Date()).find((part) => part.type === "timeZoneName")?.value ?? "";
@@ -27,19 +35,22 @@ const axisTime = (time: Time) => clock((time as number) * 1000);
 export type MarketFeed = { spot: Tick | null; closes: number[]; status?: FeedStatus; startTick?: Tick | null };
 type Marks = { start: HTMLDivElement | null; cutoff: HTMLDivElement | null; end: HTMLDivElement | null; closed: HTMLDivElement | null; target: HTMLDivElement | null; tip: HTMLDivElement | null };
 
-/** Live BTC/USD line for one round, one Chainlink report a minute (TradingView Lightweight Charts). Round times are unix
+/** Live BTC/USD for one round, as a line or one-minute candles, one Chainlink report a minute (TradingView Lightweight Charts,
+ * credited on the Terms of Service page). Round times are unix
  * seconds; `priceToBeat` is the verified Chainlink opening observation as an exact decimal, or null before it is recorded.
  * `offset` is the round's place from the current one (decided by the page in chain time): 1 is the next round, below 0 a finished one. */
 export default function LiveChart({ start, cutoff, end, priceToBeat, offset, onMarket }: { start: number; cutoff: number; end: number; priceToBeat: string | null; offset: number; onMarket?: (feed: MarketFeed) => void }) {
   const box = useRef<HTMLDivElement>(null);
   const marks = useRef<Marks>({ start: null, cutoff: null, end: null, closed: null, target: null, tip: null });
-  const chart = useRef<{ api: IChartApi; series: ISeriesApi<"Area">; line: IPriceLine | null; place: () => void; relabel: () => void; moved: boolean } | null>(null);
+  const chart = useRef<{ api: IChartApi; series: ISeriesApi<SeriesType>; line: IPriceLine | null; place: () => void; relabel: () => void; moved: boolean; pressed: LogicalRange | null } | null>(null);
   const goal = useRef<number | null>(null);
   const [version, setVersion] = useState(0);
+  const [type, setType] = useState(storedType);
+  const choose = (next: ChartType) => { setType(next); try { localStorage.setItem(TYPE_KEY, next); } catch { /* storage blocked: the choice lasts this visit */ } };
   const report = useRef(onMarket);
   useEffect(() => { report.current = onMarket; });
-  // The whole round is in view, until the viewer drags back through the day the feed holds. The next round also shows the round
-  // before it, so its start line has context.
+  // The whole round is in view (with PAD before it), until the viewer drags back through the day the feed holds. The next round
+  // also shows the round before it, so its start line has context.
   const upcoming = offset > 0, finished = offset < 0;
   const { feed, view } = useMemo(() => {
     const view = upcoming ? 2 * start - end : start;
@@ -53,7 +64,7 @@ export default function LiveChart({ start, cutoff, end, priceToBeat, offset, onM
     if (!element) return;
     // The price axis leaves out any tick label a badge (the latest price, the price to beat) would partly cover; the chart has no
     // option for it. Re-applied whenever a badge moves (`relabel`), which makes the axis format its ticks again.
-    let series: ISeriesApi<"Area"> | null = null;
+    let series: ISeriesApi<SeriesType> | null = null;
     const ticks = (values: number[]) => {
       const labels = axisPrices(values), s = series;
       if (!s) return labels;
@@ -62,6 +73,7 @@ export default function LiveChart({ start, cutoff, end, priceToBeat, offset, onM
     };
     const api = createChart(element, {
       autoSize: true,
+      // No logo on the chart: the licence's attribution and link to TradingView are on the Terms of Service page.
       layout: { background: { type: ColorType.Solid, color: "transparent" }, textColor: MUTED, fontFamily: "'IBM Plex Mono', monospace", fontSize: FONT, attributionLogo: false },
       localization: { priceFormatter: usd, tickmarksPriceFormatter: ticks, timeFormatter: axisTime },
       grid: { vertLines: { visible: false }, horzLines: { color: "rgba(255,255,255,0.04)" } },
@@ -71,15 +83,16 @@ export default function LiveChart({ start, cutoff, end, priceToBeat, offset, onM
       // Dragged sideways (mouse or touch) only: the wheel and vertical swipes keep scrolling the page.
       handleScroll: { mouseWheel: false, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false }, handleScale: false,
     });
-    series = api.addSeries(AreaSeries, {
-      lineColor: LINE, lineWidth: 2, topColor: "rgba(199,248,111,0.22)", bottomColor: "rgba(199,248,111,0)",
-      priceLineVisible: false, lastPriceAnimation: LastPriceAnimationMode.Continuous,
-      // The price to beat always stays on the plot.
-      autoscaleInfoProvider: (original: () => AutoscaleInfo | null) => {
-        const info = original(), g = goal.current;
-        return info?.priceRange && g !== null ? { ...info, priceRange: { minValue: Math.min(info.priceRange.minValue, g), maxValue: Math.max(info.priceRange.maxValue, g) } } : info;
-      },
-    });
+    // The price to beat always stays on the plot.
+    const autoscaleInfoProvider = (original: () => AutoscaleInfo | null) => {
+      const info = original(), g = goal.current;
+      return info?.priceRange && g !== null ? { ...info, priceRange: { minValue: Math.min(info.priceRange.minValue, g), maxValue: Math.max(info.priceRange.maxValue, g) } } : info;
+    };
+    // Simplification: one report a minute gives a candle only its open and close, so candles have no wicks; finer reports
+    // would be needed for a minute's high and low.
+    series = type === "candles"
+      ? api.addSeries(CandlestickSeries, { upColor: LINE, downColor: DOWN, borderVisible: false, wickVisible: false, priceLineVisible: false, autoscaleInfoProvider })
+      : api.addSeries(AreaSeries, { lineColor: LINE, lineWidth: 2, topColor: "rgba(199,248,111,0.22)", bottomColor: "rgba(199,248,111,0)", priceLineVisible: false, lastPriceAnimation: LastPriceAnimationMode.Continuous, autoscaleInfoProvider });
     // START, CUTOFF, END, the price-to-beat tag and the tooltip are HTML over the canvas, placed after the chart draws.
     // The cutoff lies inside its minute: placed between that minute's start and the end.
     const layout = () => {
@@ -115,9 +128,11 @@ export default function LiveChart({ start, cutoff, end, priceToBeat, offset, onM
       const tip = marks.current.tip;
       if (!tip) return;
       const point = param.point, item = param.time === undefined ? undefined : param.seriesData.get(series);
-      const value = item && "value" in item && typeof item.value === "number" ? item.value : null;
+      // A candle reads its minute's open and close; the line its report.
+      const candle = item && "open" in item && "close" in item && typeof item.open === "number" && typeof item.close === "number" ? { open: item.open, close: item.close } : null;
+      const value = candle ? candle.close : item && "value" in item && typeof item.value === "number" ? item.value : null;
       if (!point || !item || value === null) { tip.style.display = "none"; return; }
-      tip.textContent = `${usd(value)} · ${axisTime(item.time)}`;
+      tip.textContent = `${candle ? `${usd(candle.open)} → ` : ""}${usd(value)} · ${axisTime(item.time)}`;
       tip.style.display = "";
       const half = tip.offsetWidth / 2, y = series.priceToCoordinate(value) ?? point.y;
       tip.style.left = `${Math.min(Math.max(point.x, half), api.timeScale().width() - half)}px`;
@@ -127,12 +142,28 @@ export default function LiveChart({ start, cutoff, end, priceToBeat, offset, onM
     api.timeScale().subscribeVisibleLogicalRangeChange(place);
     api.timeScale().subscribeSizeChange(place);
     const relabel = () => api.applyOptions({ localization: { tickmarksPriceFormatter: ticks } });
-    const c: NonNullable<typeof chart.current> = { api, series, line: null, place, relabel, moved: false };
+    const c: NonNullable<typeof chart.current> = { api, series, line: null, place, relabel, moved: false, pressed: null };
     chart.current = c;
-    const grab = () => { c.moved = true; };
-    element.addEventListener("pointerdown", grab);
-    return () => { cancelAnimationFrame(frame); element.removeEventListener("pointerdown", grab); api.timeScale().unsubscribeVisibleLogicalRangeChange(place); api.timeScale().unsubscribeSizeChange(place); api.remove(); chart.current = null; };
-  }, [start, cutoff, end, feed]);
+    // Only a press that moved the view leaves it where the viewer put it. A click or a tap (and on a phone every page scroll
+    // that starts on the chart) used to count as well, which froze the view wherever it was at that moment. Mouse and touch
+    // events, which the chart drags with: a pointer is cancelled when the browser takes a touch for itself. While pressed the view
+    // is not reset, or a poll would pull it back mid-drag (and the drag would be lost if the press then ended still).
+    const press = () => { c.pressed = api.timeScale().getVisibleLogicalRange(); };
+    const release = () => {
+      const was = c.pressed, now = api.timeScale().getVisibleLogicalRange();
+      if (was && now && (was.from !== now.from || was.to !== now.to)) c.moved = true;
+      c.pressed = null;
+    };
+    const downs = ["mousedown", "touchstart"] as const, ups = ["mouseup", "touchend", "touchcancel"] as const;
+    for (const name of downs) element.addEventListener(name, press, { passive: true });
+    for (const name of ups) window.addEventListener(name, release);
+    return () => {
+      cancelAnimationFrame(frame);
+      for (const name of downs) element.removeEventListener(name, press);
+      for (const name of ups) window.removeEventListener(name, release);
+      api.timeScale().unsubscribeVisibleLogicalRangeChange(place); api.timeScale().unsubscribeSizeChange(place); api.remove(); chart.current = null;
+    };
+  }, [start, cutoff, end, feed, type]);
 
   useEffect(() => {
     // The socket is closed while the tab is hidden; on return the backfill fills the gap.
@@ -146,14 +177,14 @@ export default function LiveChart({ start, cutoff, end, priceToBeat, offset, onM
   useEffect(() => {
     const c = chart.current;
     if (!c) return;
-    // Redrawn on every feed change: one point a minute, an empty slot for each missing report, so the round's time axis
+    // Redrawn on every feed change: one point (or candle) a minute, an empty slot for each missing one, so the round's time axis
     // stays fixed from the first shown minute to the end.
-    c.series.setData(feed.points().map((p) => ({ ...p, time: p.time as UTCTimestamp })));
-    if (!c.moved) c.api.timeScale().setVisibleRange({ from: view as UTCTimestamp, to: end as UTCTimestamp });
+    c.series.setData((type === "candles" ? feed.candles() : feed.points()).map((p) => ({ ...p, time: p.time as UTCTimestamp })));
+    if (!c.moved && !c.pressed) c.api.timeScale().setVisibleRange({ from: (view - PAD) as UTCTimestamp, to: end as UTCTimestamp });
     c.relabel();
     c.place();
     report.current?.({ spot: feed.last(), closes: feed.closes(), status: feed.status, startTick: feed.at(start * 1000) });
-  }, [version, feed, view, start, cutoff, end]);
+  }, [version, feed, view, start, cutoff, end, type]);
 
   useEffect(() => {
     const c = chart.current;
@@ -164,10 +195,13 @@ export default function LiveChart({ start, cutoff, end, priceToBeat, offset, onM
     c.line = goal.current === null ? null : c.series.createPriceLine({ price: goal.current, color: TARGET, lineWidth: 1, lineStyle: LineStyle.LargeDashed, axisLabelVisible: true, axisLabelColor: TARGET, axisLabelTextColor: "#111410", title: "" });
     c.relabel();
     c.place();
-  }, [target, start, cutoff, end, feed]);
+  }, [target, start, cutoff, end, feed, type]);
 
   const last = feed.last();
   return <div className="live-chart">
+    <div className="live-chart-head"><div className="chain-segment live-chart-type" role="group" aria-label="Chart type">
+      {(["line", "candles"] as const).map((t) => <button key={t} type="button" aria-pressed={type === t} onClick={() => choose(t)}>{t === "line" ? "Line" : "Candles"}</button>)}
+    </div></div>
     <div className="live-chart-frame" role="img"
       aria-label={`Bitcoin price from ${feed.source}, one report a minute. ${target === null ? "Price to beat not recorded yet" : `Price to beat ${target}`}${last ? `; latest ${usd(last.p)} at ${clock(last.t)} ${ZONE}` : ""}.`}>
       <div className="live-chart-canvas" ref={box} />
@@ -180,7 +214,6 @@ export default function LiveChart({ start, cutoff, end, priceToBeat, offset, onM
     </div>
     {/* A finished round's feed has stopped on purpose: no status dot, no Reconnecting. */}
     <p className="live-chart-source">{!finished && <span className={`status-dot ${feed.status === "live" ? "" : "paused"}`} />}
-      <span>Chainlink BTC/USD · one report a minute{last ? ` · last ${clock(last.t)} ${ZONE}` : ""}{!finished && feed.status === "reconnecting" ? " · Reconnecting…" : ""}</span>
-      <a href="https://www.tradingview.com/" target="_blank" rel="noopener noreferrer">Chart by TradingView</a></p>
+      <span>Chainlink BTC/USD · one report a minute{last ? ` · last ${clock(last.t)} ${ZONE}` : ""}{!finished && feed.status === "reconnecting" ? " · Reconnecting…" : ""}</span></p>
   </div>;
 }

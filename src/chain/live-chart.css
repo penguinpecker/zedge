@@ -1,6 +1,7 @@
-/* BTC/USD line drawn by Lightweight Charts on a canvas; the round's START, CUTOFF and END lines, the price-to-beat tag and
-   the hover tooltip are HTML over it. --axis is the time axis height, set by the chart. */
-.live-chart { padding-top: 26px; }
+/* BTC/USD line or candles drawn by Lightweight Charts on a canvas; the round's START, CUTOFF and END lines, the price-to-beat tag
+   and the hover tooltip are HTML over it. --axis is the time axis height, set by the chart. */
+.live-chart-head { display: flex; justify-content: flex-end; padding: 0 18px 26px; }
+.chain-segment.live-chart-type button { flex: none; min-height: 28px; padding: 5px 10px; }
 .live-chart-frame { position: relative; height: 320px; margin: 0 18px; }
 .live-chart-canvas { position: absolute; inset: 0; }
 .live-chart-wait { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); font-size: 12px; margin: 0; pointer-events: none; }
@@ -15,9 +16,8 @@
 .live-chart-tip.below { transform: translate(-50%, 12px); }
 .live-chart-source { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; padding: 12px 24px 18px; color: var(--muted); font-size: 12px; line-height: 1.6; }
 .live-chart-source > span:not(.status-dot) { flex: 1 1 16em; }
-.live-chart-source a { margin: -12px 0 -12px auto; padding: 12px 0; color: var(--muted); text-decoration: underline; text-underline-offset: 3px; }
-.live-chart-source a:hover, .live-chart-source a:focus-visible { color: var(--text); }
 @media (max-width: 640px) {
+  .live-chart-head { padding: 0 12px 26px; }
   .live-chart-frame { height: 260px; margin: 0 12px; }
   .live-chart-source { padding: 12px 16px 16px; }
 }

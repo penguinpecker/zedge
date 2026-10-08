@@ -40,6 +40,13 @@ export function toPoints(ticks: Tick[], from: number, to: number): Point[] {
   return out;
 }
 
+/** `toPoints`' slots with a candle (`toCandles`) in each, or empty for a minute that has none, so the candle chart keeps the
+ * line chart's time axis. */
+export function toCandleSlots(ticks: Tick[], from: number, to: number): (Candle | Point)[] {
+  const at = new Map(toCandles(ticks, from, to).map((c) => [c.time, c]));
+  return toPoints(ticks, from, to).map((p) => at.get(p.time) ?? { time: p.time });
+}
+
 type Timer = ReturnType<typeof setTimeout>;
 export type FeedEnv = {
   fetch: (url: string, init: RequestInit) => Promise<{ ok: boolean; json(): Promise<unknown> }>;
@@ -108,6 +115,8 @@ export function createPriceFeed(from: number, end: number, env: FeedEnv = browse
     source: "Chainlink BTC/USD",
     /** The shown points, one a minute from `from` (or the oldest report held, if earlier) to `end`. */
     points: () => toPoints(ticks, Math.min(from, ticks[0]?.t ?? from), end),
+    /** The same minutes as candles. */
+    candles: () => toCandleSlots(ticks, Math.min(from, ticks[0]?.t ?? from), end),
     /** Up to the last 60 closes of completed minutes, oldest first: the volatility input. */
     closes: () => toCandles(ticks, since, end).slice(-60).map((c) => c.close),
     /** The latest report, or null before the first read. */

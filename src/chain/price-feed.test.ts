@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { createPriceFeed, toCandles, toPoints, toTicks, type FeedEnv } from "./price-feed.ts";
+import { createPriceFeed, toCandleSlots, toCandles, toPoints, toTicks, type FeedEnv } from "./price-feed.ts";
 
 const M = 1_791_309_600; // a minute, unix seconds
 
@@ -70,4 +70,12 @@ test("a missing minute costs one point, not two, and merging reads never shrinks
   assert.deepEqual(feed.last(), { t: (M + 240) * 1000, p: 105 });
   assert.deepEqual(feed.at(M * 1000), { t: M * 1000, p: 101 });
   assert.equal(feed.at((M + 120) * 1000), null);
+});
+
+test("candles sit on the line's minute slots: a minute without both reports, and the last minute, are empty slots", () => {
+  const ticks = toTicks({ prices: [[M, 101], [M + 60, 99], [M + 180, 104], [M + 240, 105]] });
+  assert.deepEqual(toCandleSlots(ticks, M * 1000, (M + 300) * 1000), [
+    { time: M, open: 101, high: 101, low: 99, close: 99 }, { time: M + 60 }, { time: M + 120 },
+    { time: M + 180, open: 104, high: 105, low: 104, close: 105 }, { time: M + 240 }, { time: M + 300 },
+  ]);
 });
