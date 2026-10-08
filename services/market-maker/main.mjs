@@ -58,8 +58,8 @@ function fail(message) { throw Object.assign(new Error(message), { refused: true
 export function queueFull(queue, op) { return queue >= (op === "cancel_all" ? 9n : 5n); }
 
 /** The /quotes body (README "Quotes for the site"): per outcome, the lowest resting sell (ask) and the highest resting buy (bid) of
- * `view` in round r ({ id, start }) at chain time `now`, as { cents, shares }, or null where none rests. */
-export function houseQuotes(view, r, now, at = Date.now()) {
+ * `view` in round r ({ id, start }) at chain time `now`, as { cents, shares }, or null where none rests; `at` in ms. */
+export function houseQuotes(view, r, now, at) {
   const mine = view.orders.filter((o) => o.roundId === r.id && o.expiry > now && o.remaining > 0);
   const best = (outcome, side) => {
     const os = mine.filter((o) => o.outcome === outcome && o.side === side);
@@ -422,24 +422,26 @@ async function main(argv) {
   const stop = () => { if (stopping) process.exit(1); stopping = true; log("stopping"); wake(); }; // a second signal exits at once
   process.on("SIGTERM", stop);
   process.on("SIGINT", stop);
-  // GET /quotes for the indexer on the private network: the house's resting quotes only, never balances or keys. Not under --dry-run,
-  // whose orders are simulated. A server error is logged and the bot quotes on without it.
-  let quoted = null;
-  if (process.env.HOUSE_QUOTES_PORT && !dry) {
-    const server = createServer((req, res) => {
-      if (req.method !== "GET" || req.url !== "/quotes") return res.writeHead(404).end();
-      res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" }).end(JSON.stringify(quoted));
-    });
-    const serverError = (e) => log("quotes server error", { code: e.code ?? e.name });
-    server.on("error", serverError);
-    try { server.listen(Number(process.env.HOUSE_QUOTES_PORT), "::", () => log("serving quotes", { port: server.address().port })); } catch (e) { serverError(e); }
-  }
   if (dry) view = { ...EMPTY, cash: 200 * SHARE }; // a simulated 200 USDC; nothing is signed or sent
   else await startup();
   const nap = () => new Promise((done) => { const timer = setTimeout(done, s.pollSeconds * 1000); wake = () => { clearTimeout(timer); done(); }; });
   let noted = "";
   const note = (reason, fields) => { if (reason !== noted) log("waiting", { reason, ...fields }); noted = reason; };
-  let r = null, errors = 0, beat = 0;
+  let r = null, errors = 0, beat = 0, clock = null; // clock: the latest decision's chain time and when it was read (ms)
+  // GET /quotes for the indexer on the private network: the house's resting quotes only, never balances or keys. Not under --dry-run,
+  // whose orders are simulated. Built per request from the latest view (a receipt shows at once) at the chain time now, the last read
+  // plus the time since, so a quote that expires while the bot waits on a request or an error drops out. A server error is logged
+  // and the bot quotes on without it.
+  if (process.env.HOUSE_QUOTES_PORT && !dry) {
+    const server = createServer((req, res) => {
+      if (req.method !== "GET" || req.url !== "/quotes") return res.writeHead(404).end();
+      const body = clock && houseQuotes(view, r, clock.now + Math.floor((Date.now() - clock.at) / 1000), clock.at);
+      res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" }).end(JSON.stringify(body));
+    });
+    const serverError = (e) => log("quotes server error", { code: e.code ?? e.name });
+    server.on("error", serverError);
+    try { server.listen(Number(process.env.HOUSE_QUOTES_PORT), "::", () => log("serving quotes", { port: server.address().port })); } catch (e) { serverError(e); }
+  }
   /** Queue and gas guards, read just before a request. A cancel_all goes out below the ETH floor while it can. */
   async function clear(c) {
     const [queue, eth] = await Promise.all([endpoint.getPendingRequestsSize(), provider.getBalance(account)]);
@@ -457,7 +459,7 @@ async function main(argv) {
       if (r) log("round done", { start: r.start, requests: r.requests, refusals: r.refusals, rpcCalls: rpcCalls - r.calls0, ethBefore: r.eth0, ethAfter: r.eth });
       r = { ...roundAt(start), blocked, requests: 0, refusals: 0, calls0: rpcCalls, open: null, sigma: null, crossChecked: !cross, crossChecks: 0, crossAt: 0 };
     }
-    quoted = houseQuotes(view, r, now); // every decision, so also right after every receipt (a step that sends returns without a nap)
+    clock = { now, at: Date.now() };
     if (stopping) { // cancel what rests in the open round, then exit
       if (!dry && view.orders.some((o) => o.roundId === r.id && o.expiry > now) && now < r.cutoff && (await clear({ op: "cancel_all" }))) await send({ op: "cancel_all", roundId: r.id });
       log("stopped", summary(view));

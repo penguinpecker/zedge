@@ -124,9 +124,12 @@ on every interface (`::`, so Railway's private network reaches it); anything els
 
 - **What it holds.** The house's resting orders in the open round as the bot knows them (its latest receipt, a staged command
   applied whole), expired ones left out. Per outcome, `ask` is the lowest resting sell and `bid` the highest resting buy, with the
-  shares left at that price, or `null`. `at` is when the bot built it (ms), `start` the round. No balances, holdings or keys.
-- **When it changes.** At every decision, so right after every receipt (placed, cancelled, a fill it learns about) and at each round
-  change, when it starts empty. It is `null` until the first decision.
+  shares left at that price, or `null`. `at` is the time (ms) of the bot's latest decision, `start` the round. No balances, holdings
+  or keys.
+- **When it changes.** It is built at each request from the bot's latest view, so it changes right after every receipt (placed,
+  cancelled, a fill it learns about) and at each round change, when it starts empty. Expiry is checked at the chain time now (the
+  latest read plus the time since), so a quote that expires while the bot waits on a request drops out at once. It is `null` until
+  the first decision.
 - **Never in the way.** Not served under `--dry-run`, whose orders are simulated. A server error (a port in use, a bad port) is
   logged as `quotes server error` and the bot quotes on without it.
 
