@@ -47,14 +47,17 @@ test("live, rounds and account answers are checked field by field; anything malf
 });
 
 test("the house's quotes are checked field by field; a malformed one costs only the quotes, never the rest of the live read", async () => {
-  const q = (cents: number, shares = 10_000_000) => ({ cents, shares });
-  const good = { at: (START + 700) * 1000, start: START, up: { ask: q(14), bid: q(12) }, down: { ask: null, bid: q(84, 2_000) } };
-  assert.deepEqual((await answering(liveBody({ house: good })).live())?.house, good);
+  // The wire's shares are whole shares, as the house bot sends them (services/market-maker houseQuotes); the page keeps share atoms.
+  const q = (cents: number, shares: unknown = 10) => ({ cents, shares });
+  const good = { at: (START + 700) * 1000, start: START, up: { ask: q(14), bid: q(12, 5.5) }, down: { ask: null, bid: q(84, 0.002) } };
+  assert.deepEqual((await answering(liveBody({ house: good })).live())?.house,
+    { ...good, up: { ask: { cents: 14, shares: 10_000_000 }, bid: { cents: 12, shares: 5_500_000 } }, down: { ask: null, bid: { cents: 84, shares: 2_000 } } });
   assert.equal((await answering(liveBody()).live())?.house, null, "an indexer without the field");
   const broken = [
     { ...good, start: START + 1 }, { ...good, at: 0 }, { ...good, at: "1" }, { ...good, down: undefined }, [good],
     { ...good, up: { ask: q(0), bid: null } }, { ...good, up: { ask: q(100), bid: null } }, { ...good, up: { ask: q(14.5), bid: null } },
-    { ...good, up: { ask: q(14, 1_500), bid: null } }, { ...good, up: { ask: q(14, 0), bid: null } }, { ...good, up: { ask: q(14) } },
+    { ...good, up: { ask: q(14, 0.0015), bid: null } }, { ...good, up: { ask: q(14, 5.0000004), bid: null } }, { ...good, up: { ask: q(14, 0), bid: null } },
+    { ...good, up: { ask: q(14, -1), bid: null } }, { ...good, up: { ask: q(14, "10"), bid: null } }, { ...good, up: { ask: q(14) } },
     { ...good, up: { ask: q(12), bid: q(12) } },
   ];
   for (const house of broken) {

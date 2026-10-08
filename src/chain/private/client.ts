@@ -157,6 +157,8 @@ export function inferReceipt(before: View | null, after: View | null, order: { r
 const fillsText = (fills: NonNullable<NonNullable<Outcome["receipt"]>["fills"]>) => `Filled · ${fills.map((f) => `${f.side} ${f.quantity / 1e6} ${f.outcome} at ${f.price}¢`).join(", ")}`;
 /** A settled round this account held: its start, outcome (1 Up, 2 Down, 3 Void) and what it paid, in atoms. */
 export type LastResult = { start: number; outcome: number; paid: number };
+/** Whether a holding has any shares: the engine keeps an emptied one (closed, or swept) until its round is archived. */
+const holds = (h: View["holdings"][number]) => h.up + h.reservedUp + h.down + h.reservedDown > 0;
 /** What a holding collects when its round settles (the engine's redeem): the winning side's shares, half of each side when voided. */
 const payout = (h: View["holdings"][number], outcome: number) => {
   const up = h.up + h.reservedUp, down = h.down + h.reservedDown;
@@ -170,7 +172,7 @@ export function lastResult(views: { block: number; view: View }[], rounds: ApiRo
   for (const r of rounds.filter((x) => x.settle).sort((a, b) => b.start - a.start)) {
     const s = r.settle!, before = views.filter((v) => v.block < s.block).sort((a, b) => b.block - a.block)[0];
     const h = before?.view.holdings.find((x) => x.roundId === idOf(r.start));
-    if (!h || h.up + h.reservedUp + h.down + h.reservedDown === 0) continue;
+    if (!h || !holds(h)) continue;
     const outcome = s.kind === 3 ? 3 : s.outcome;
     return { start: r.start, outcome, paid: payout(h, outcome) };
   }
@@ -696,7 +698,8 @@ export class PrivateAccount {
         const paid = payout(h, s.outcome);
         const name = s.outcome === 1 ? "Up won" : s.outcome === 2 ? "Down won" : "Round voided";
         this.#action("Round result")("done", paid ? `${name} · ${usd(paid)} credited` : `${name} · nothing to collect`);
-        this.#keepResult({ start: e.start, outcome: s.outcome, paid });
+        // Not for a holding emptied before the end (closed, or already swept after a reload): that is no win or loss of this view's.
+        if (holds(h)) this.#keepResult({ start: e.start, outcome: s.outcome, paid });
       }
       // Not when a receipt read since then already shows the round settled.
       const due = [...ended].filter(([key, e]) => (failed || !readable.includes(key)) && !this.#reported.has(e.id) && !this.#synced.has(e.id) && now >= e.end + 60 && this.#readAt < (e.end + 60) * 1000).map(([, e]) => e);

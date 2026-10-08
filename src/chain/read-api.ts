@@ -3,7 +3,7 @@
  * signs is checked on chain first (confirmSettle). Every read answers its checked value, or null for anything else (no answer, a
  * timeout, a refusal, a malformed field): null is the signal to read the chain as before. An address goes only in a POST body. */
 import { parseEventLogs, type Hex, type PublicClient } from "viem";
-import { endpointAbi, LOT, type VerifiedOrderbook } from "./orderbook-manifest.ts";
+import { endpointAbi, LOT, SHARE, type VerifiedOrderbook } from "./orderbook-manifest.ts";
 import { SUBTYPES, decodeSettle } from "./vault.ts";
 
 /** A price observation: `t` in milliseconds since the epoch (the report's observation time), `p` in USD. */
@@ -12,7 +12,7 @@ export type Tick = { t: number; p: number };
 export type SettleRef = { kind: number; outcome: number; price: bigint; observationsTimestamp: number; reportHash: Hex; source: number; block: number; txHash: Hex; logIndex: number };
 export type ApiRound = { start: number; registryRoundId: Hex; open: SettleRef | null; settle: SettleRef | null };
 export type Head = { block: number; time: number };
-/** A resting price level: cents, and share atoms (whole lots). */
+/** A resting price level: cents, and share atoms (whole lots). The wire sends whole shares, e.g. 5.5 (services/market-maker houseQuotes). */
 export type Quote = { cents: number; shares: number };
 /** The house's lowest resting sell (`ask`) and highest resting buy (`bid`) on each side, null where it has none, for the round that
  * starts at `start` (unix seconds), as of `at` (ms, the house bot's latest order state). */
@@ -61,9 +61,10 @@ const rounds = (v: unknown, max: number): ApiRound[] => list(v, max).map((x) => 
 });
 const quote = (value: unknown): Quote | null => {
   if (value === null) return null;
-  const q = obj(value);
-  need(Number.isSafeInteger(q.cents) && (q.cents as number) >= 1 && (q.cents as number) <= 99 && Number.isSafeInteger(q.shares) && (q.shares as number) > 0 && (q.shares as number) % LOT === 0);
-  return { cents: q.cents as number, shares: q.shares as number };
+  const q = obj(value), atoms = typeof q.shares === "number" ? Math.round(q.shares * SHARE) : NaN;
+  // Whole lots only, and exactly: atoms / SHARE gives back the very number the house sent.
+  need(Number.isSafeInteger(q.cents) && (q.cents as number) >= 1 && (q.cents as number) <= 99 && Number.isSafeInteger(atoms) && atoms > 0 && atoms % LOT === 0 && atoms / SHARE === q.shares);
+  return { cents: q.cents as number, shares: atoms };
 };
 const quotes = (value: unknown) => {
   const s = obj(value), ask = quote(s.ask), bid = quote(s.bid);

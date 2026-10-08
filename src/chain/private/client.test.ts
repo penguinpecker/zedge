@@ -40,7 +40,7 @@ async function stack(options: { relayRefuses?: (body: RelayBody) => { code: stri
   };
   const viewOf = (account: string) => {
     const v = views.get(account)!;
-    return { account, sequence, nonce: v.nonce, cash: v.cash, reservedCash: 0, holdings: v.up || v.down ? [{ roundId: v.round ?? "r", up: v.up, down: v.down, reservedUp: 0, reservedDown: 0 }] : [], orders: [], withdrawals: [] };
+    return { account, sequence, nonce: v.nonce, cash: v.cash, reservedCash: 0, holdings: v.up || v.down || v.round ? [{ roundId: v.round ?? "r", up: v.up, down: v.down, reservedUp: 0, reservedDown: 0 }] : [], orders: [], withdrawals: [] };
   };
   // A tick activates the staged order against a house ask of 55; its result waits for the account's next request.
   const activate = (account: string, v: Account) => {
@@ -650,6 +650,23 @@ test("a held round's public result is shown once, with what it paid, and the bal
   f.settles.push({ roundId: engineRound(f.book, ROUND).spec.registryRoundId, outcome: 1 });
   await b.checkResults();
   assert.deepEqual([lines().map((x) => x.text), bSyncs()], [["Up won · 2 USDC credited"], bBefore + 2]);
+});
+
+test("a round closed before its end is no win or loss: the market page keeps no result for its emptied holding", async () => {
+  const s = await stack();
+  const account = new PrivateAccount(s.book, wallet(), s.chain, s.relay, { hints: memory(), now: () => (ROUND + 900 + 30) * 1000, sleep: async () => {} });
+  await account.unlock();
+  s.fund(account.account, 10_000_000);
+  await account.mint(ROUND, 2_000_000);
+  // Closed: the engine keeps the emptied holding until the round is archived.
+  const v = s.views.get(account.account)!;
+  v.up = 0; v.down = 0; v.cash += 2_000_000;
+  await account.sync();
+  assert.deepEqual(account.snapshot.view?.holdings.map((h) => h.up + h.down), [0]);
+  s.settles.push({ roundId: engineRound(s.book, ROUND).spec.registryRoundId, outcome: 2 });
+  await account.checkResults();
+  assert.equal(account.snapshot.actions.find((x) => x.action === "Round result")?.text, "Down won · nothing to collect");
+  assert.equal(account.snapshot.lastResult, null, "not 'You lost'");
 });
 
 test("settling from the chain: the request nonce first, then the calldata that carried the signature; 'absent' only past the deadline", async () => {
