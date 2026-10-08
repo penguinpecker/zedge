@@ -43,6 +43,7 @@ flowchart LR
   K["keeper"]
   PS["payout signer"]
   MM["market maker (house)"]
+  IX[("indexer + Postgres<br/>/v1 read API")]
 
   W -->|signed permit, signed request| R
   W -->|reads| H
@@ -62,13 +63,17 @@ flowchart LR
   E -.->|payout records| PS
   PS -->|withdraw| V
   MM -->|own requests| E
+  MM -.->|quotes, private network| IX
+  IX -.->|reads| E
+  IX -.->|reads| S
+  W -->|reads /v1| IX
 ```
 
 **Site** ([`src/`](src)). A React and Vite app. Signing in with Google or X through Privy creates an embedded wallet; its address is your deposit address on Base. The site derives a trading key from one wallet signature, registers its public key with the order book, encrypts each request in the browser, and decrypts your receipts. It verifies the pinned deployment manifests in [`public/deployments/`](public/deployments) against both chains before showing round state. The paper demo and the help and policy pages (`/terms`, `/privacy`, `/risk-disclosure`, `/market-rules`, `/support`) are part of the same app.
 
 **Vercel functions** ([`api/`](api) with logic and tests in [`server/`](server)).
 - `/api/relay` is the relayer. It checks your Privy sign-in, your own EIP-712 signature and the exact request shape, then sends your USDC permit to the vault on Base, a USDC transfer you confirmed in your wallet from your Base address to another address, or your key registration or encrypted request to the Vela endpoint on Horizen. It pays the gas and the request fee. It never signs for you, and it rate-limits per user and overall. By default it serves only invited accounts.
-- `/api/btc` serves recent Chainlink BTC/USD prices, read from public Solana transactions, for the chart and the displayed fair value. It does not settle anything.
+- `/api/btc` serves recent Chainlink BTC/USD prices, read from public Solana transactions, for the chart when the read API is behind. It does not settle anything.
 - `/api/horizen` is a read-only Horizen RPC proxy for the site: allowed methods only, this site's origin only, and a per-visitor budget.
 
 **Matching engine** ([`engine/`](engine)). A deterministic Go ledger for fully collateralized binary shares: deposits, complete-set mint and merge, separate Up and Down books with price-time priority, partial fills, GTC and IOC orders, reservations, settlement, voids, withdrawals and round archival. It has no clock, network access or randomness: time and identity come from the adapter that calls it. See [engine/README.md](engine/README.md) and the command schema in [`protocol/`](protocol).
@@ -87,9 +92,11 @@ flowchart LR
 
 **Payout signer** ([`services/payout-signer/`](services/payout-signer)). Reads the guest's public payout records on Horizen and accepts only records from a completed state update of this application. It checks the destination, the amount and the vault's caps, then signs the payout and sends `withdraw` to the vault on Base, paying the gas. The vault pays each payout once.
 
-**Market maker** ([`services/market-maker/`](services/market-maker)). The house liquidity bot. It quotes a bid and an ask on both Up and Down each round from a fair value based on the BTC spot price, the round's opening price and recent volatility, and pulls its quotes before the cutoff. It sends its own requests and pays its own gas; it does not use the relayer.
+**Market maker** ([`services/market-maker/`](services/market-maker)). The house liquidity bot. It quotes a bid and an ask on both Up and Down each round from a fair value based on the BTC spot price, the round's opening price and recent volatility, and pulls its quotes before the cutoff. It sends its own requests and pays its own gas; it does not use the relayer. Its resting quotes are served on Railway's private network to the indexer, and the site shows them on the Up and Down buttons.
 
-**Container images** ([`deploy/railway/`](deploy/railway)). One Node image runs the keeper, the payout signer or the market maker. The operator runs Horizen's Vela manager and executor images, pinned by digest and unmodified; the manager's container adds a small RPC guard that makes its transaction sends idempotent.
+**Indexer** ([`services/indexer/`](services/indexer)). Follows Horizen and the Solana price copies into Postgres and serves the site's read API under `/v1`: the live round, the latest price and the house's quotes, a day of minute prices, the last 24 hours of round results, and an account's encrypted receipts, which only that account's key can read. Receipts are kept. It is display only: the site reads the chains when the indexer lags, and nothing settles or moves money through it.
+
+**Container images** ([`deploy/railway/`](deploy/railway)). One Node image runs the keeper, the payout signer, the market maker or the indexer. The operator runs Horizen's Vela manager and executor images, pinned by digest and unmodified; the manager's container adds a small RPC guard that makes its transaction sends idempotent.
 
 **Scripts, security and research.** [`scripts/`](scripts) builds the WebAssembly, writes the public deployment manifests, runs the protocol conformance check and holds the browser checks and the keeper rehearsal on local forks. [`security/`](security) holds the internal review records, and [`research/`](research) the design research.
 
@@ -144,7 +151,7 @@ Off chain, the relayer logs each request's type and your wallet address, and Pri
 | [`adapters/vela/stack/`](adapters/vela/stack) | Local Vela stack test harness and the `BookClockTrigger` contract |
 | [`contracts/`](contracts) | Solidity contracts, ABIs, deployment records and deployment scripts |
 | [`protocol/`](protocol) | Engine command and configuration JSON schemas |
-| [`services/`](services) | Keeper, payout signer and market maker |
+| [`services/`](services) | Keeper, payout signer, market maker and indexer |
 | [`deploy/railway/`](deploy/railway) | Container images for the services and the operator |
 | [`scripts/`](scripts) | WebAssembly build, manifest writers, protocol conformance, browser checks, keeper rehearsal |
 | [`public/deployments/`](public/deployments) | Public deployment manifests read by the site and the services |
@@ -227,6 +234,7 @@ This repository does not include a licence file. [THIRD_PARTY_NOTICES.md](THIRD_
 | [services/keeper/README.md](services/keeper/README.md) | Round keeper |
 | [services/payout-signer/README.md](services/payout-signer/README.md) | Payout signer |
 | [services/market-maker/README.md](services/market-maker/README.md) | House market maker and its pricing |
+| [services/indexer/README.md](services/indexer/README.md) | Indexer and the `/v1` read API |
 | [security/README.md](security/README.md) | Verification record |
 | [security/WHOLE-SYSTEM-REVIEW.md](security/WHOLE-SYSTEM-REVIEW.md) | Internal whole-system review |
 | [research/README.md](research/README.md) | Design research |

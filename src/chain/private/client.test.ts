@@ -266,7 +266,7 @@ test("the automatic deposit takes only USDC from outside the vault, once; a send
   const confirmed: string[] = [];
   signer.confirmTypedData = async (data, text) => { confirmed.push(text); return signer.signTypedData(data); };
   await account.sendFromBase(friend, 5_000_000n);
-  assert.deepEqual(confirmed, [`Send 5 USDC on Base to ${friend}`]);
+  assert.deepEqual(confirmed, [`Send 5 USDC on Base to ${friend.slice(0, 10)}…${friend.slice(-8)}`]);
   assert.deepEqual(phases("Send"), ["Confirm in your wallet", "Sending", "Sent on Base · 5 USDC"]);
   assert.equal(account.snapshot.actions.find((x) => x.action === "Send")?.chain, 8453);
   await account.autoDeposit();

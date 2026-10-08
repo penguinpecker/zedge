@@ -713,7 +713,7 @@ export class PrivateAccount {
         if (ctx.balance < amount) throw new PublicError("Your wallet holds less than this amount.");
         const validBefore = ctx.timestamp + SEND_WINDOW, nonce = toHex(crypto.getRandomValues(new Uint8Array(32)));
         step("signing", "Confirm in your wallet");
-        const signature = await this.#signed(usdcTransferTypedData(this.#book.custody, { from: this.account, to, value: amount, validAfter: 0n, validBefore, nonce }), (data) => confirm(data, `Send ${usd(amount)} on Base to ${to}`));
+        const signature = await this.#signed(usdcTransferTypedData(this.#book.custody, { from: this.account, to, value: amount, validAfter: 0n, validBefore, nonce }), (data) => confirm(data, `Send ${usd(amount)} on Base to ${to.slice(0, 10)}…${to.slice(-8)}`));
         step("sending", "Sending");
         const answer = await this.#relay.post({ kind: "base-transfer", from: this.account, to, amount: amount.toString(), validBefore: validBefore.toString(), nonce, signature });
         if (refusedBeforeSending(answer)) throw new PublicError(relayText(answer, this.#now()), answer.code, answer.retryAfter);
