@@ -13,8 +13,9 @@ const BADGE_CLEARANCE = Math.ceil(FONT * (1 + 5 / 12) / 2 + FONT / 2) + 1;
 /** Seconds of price drawn before the first shown minute, so the line runs in from the left edge. */
 const LEAD = 300;
 /** Seconds shown before the round. The chart keeps its newest bar at least second from the left edge: with START at the edge, a
- * round under a minute old was shifted left and CUTOFF and END were off the right side. */
-const PAD = 120;
+ * round under a minute old was shifted left and CUTOFF and END were off the right side. Three minutes, because the newest candle is
+ * the minute before the newest report: two minutes before START until the round's first report lands. */
+const PAD = 180;
 type ChartType = "line" | "candles";
 /** The viewer's chart type, remembered in this browser; anything else stored, or no storage, is the line. */
 const TYPE_KEY = "zedge:chart";
@@ -41,7 +42,7 @@ type Marks = { start: HTMLDivElement | null; cutoff: HTMLDivElement | null; end:
 export default function LiveChart({ start, cutoff, end, priceToBeat, offset, onMarket }: { start: number; cutoff: number; end: number; priceToBeat: string | null; offset: number; onMarket?: (feed: MarketFeed) => void }) {
   const box = useRef<HTMLDivElement>(null);
   const marks = useRef<Marks>({ start: null, cutoff: null, end: null, closed: null, target: null, tip: null });
-  const chart = useRef<{ api: IChartApi; series: ISeriesApi<SeriesType>; line: IPriceLine | null; place: () => void; relabel: () => void; moved: boolean } | null>(null);
+  const chart = useRef<{ api: IChartApi; series: ISeriesApi<SeriesType>; line: IPriceLine | null; place: () => void; relabel: () => void; moved: boolean; pressed: LogicalRange | null } | null>(null);
   const goal = useRef<number | null>(null);
   const [version, setVersion] = useState(0);
   const [type, setType] = useState(storedType);
@@ -141,17 +142,17 @@ export default function LiveChart({ start, cutoff, end, priceToBeat, offset, onM
     api.timeScale().subscribeVisibleLogicalRangeChange(place);
     api.timeScale().subscribeSizeChange(place);
     const relabel = () => api.applyOptions({ localization: { tickmarksPriceFormatter: ticks } });
-    const c: NonNullable<typeof chart.current> = { api, series, line: null, place, relabel, moved: false };
+    const c: NonNullable<typeof chart.current> = { api, series, line: null, place, relabel, moved: false, pressed: null };
     chart.current = c;
     // Only a press that moved the view leaves it where the viewer put it. A click or a tap (and on a phone every page scroll
     // that starts on the chart) used to count as well, which froze the view wherever it was at that moment. Mouse and touch
-    // events, which the chart drags with: a pointer is cancelled when the browser takes a touch for itself.
-    let pressed: LogicalRange | null = null;
-    const press = () => { pressed = api.timeScale().getVisibleLogicalRange(); };
+    // events, which the chart drags with: a pointer is cancelled when the browser takes a touch for itself. While pressed the view
+    // is not reset, or a poll would pull it back mid-drag (and the drag would be lost if the press then ended still).
+    const press = () => { c.pressed = api.timeScale().getVisibleLogicalRange(); };
     const release = () => {
-      const now = api.timeScale().getVisibleLogicalRange();
-      if (pressed && now && (pressed.from !== now.from || pressed.to !== now.to)) c.moved = true;
-      pressed = null;
+      const was = c.pressed, now = api.timeScale().getVisibleLogicalRange();
+      if (was && now && (was.from !== now.from || was.to !== now.to)) c.moved = true;
+      c.pressed = null;
     };
     const downs = ["mousedown", "touchstart"] as const, ups = ["mouseup", "touchend", "touchcancel"] as const;
     for (const name of downs) element.addEventListener(name, press, { passive: true });
@@ -179,7 +180,7 @@ export default function LiveChart({ start, cutoff, end, priceToBeat, offset, onM
     // Redrawn on every feed change: one point (or candle) a minute, an empty slot for each missing one, so the round's time axis
     // stays fixed from the first shown minute to the end.
     c.series.setData((type === "candles" ? feed.candles() : feed.points()).map((p) => ({ ...p, time: p.time as UTCTimestamp })));
-    if (!c.moved) c.api.timeScale().setVisibleRange({ from: (view - PAD) as UTCTimestamp, to: end as UTCTimestamp });
+    if (!c.moved && !c.pressed) c.api.timeScale().setVisibleRange({ from: (view - PAD) as UTCTimestamp, to: end as UTCTimestamp });
     c.relabel();
     c.place();
     report.current?.({ spot: feed.last(), closes: feed.closes(), status: feed.status, startTick: feed.at(start * 1000) });
