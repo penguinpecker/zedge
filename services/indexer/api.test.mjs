@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { Readable } from "node:stream";
 import { test } from "node:test";
 import { engineRound, parseOrderbookManifest } from "../../src/chain/orderbook-manifest.ts";
-import { handler } from "./api.mjs";
+import { handler, parseHouse } from "./api.mjs";
 
 const book = parseOrderbookManifest(JSON.parse(readFileSync(new URL("../../public/deployments/26514-orderbook.json", import.meta.url), "utf8")));
 const origin = book.application.origin, now = 1_791_400_000, start = Math.floor(now / 900) * 900, minute = Math.floor(now / 60) * 60;
@@ -64,6 +64,21 @@ test("GET /v1/live: head, clock, the previous, current and next rounds with sett
   assert.deepEqual(r.body.clock, { tick: "8123", block: 28_012_339, timestamp: now - 5, applied: 1, skipped: 0, deposits: 0, txHash: tx, logIndex: 4 });
   assert.deepEqual(r.body.price, [minute, 83254.69222516466]);
   assert.deepEqual(r.body.head, { block: 28_012_345, time: now - 2 });
+});
+
+test("GET /v1/live: the house's quotes from a copy fetched at most 20 s ago for the live round; a malformed answer is refused", async () => {
+  const quotes = { at: now * 1_000 - 4_000, start, up: { ask: { cents: 55, shares: 10 }, bid: { cents: 47, shares: 10 } }, down: { ask: { cents: 53, shares: 4.5 }, bid: null } };
+  const house = async (copy, fetchedAgo) => (await call(handler({ db, book, origin, now: () => now * 1_000, chain, log: () => {}, house: () => ({ copy, at: now * 1_000 - fetchedAgo }) }),
+    { url: "/v1/live" })).body.house;
+  assert.deepEqual(await house(parseHouse(quotes), 20_000), quotes);
+  assert.equal(await house(parseHouse(quotes), 20_001), null, "stale");
+  assert.equal(await house(parseHouse({ ...quotes, start: start - 900 }), 0), null, "another round");
+  assert.equal(await house(parseHouse(null), 0), null, "the house bot has none yet");
+  assert.equal((await call(fresh(), { url: "/v1/live" })).body.house, null, "not configured");
+  const bad = [[], "x", { ...quotes, extra: 1 }, { ...quotes, start: 1.5 }, { ...quotes, start: String(start) }, { ...quotes, at: 0 }, { ...quotes, up: null }, { ...quotes, up: { ask: null } },
+    ...[{ cents: 0, shares: 1 }, { cents: 100, shares: 1 }, { cents: 55.5, shares: 1 }, { cents: "55", shares: 1 }, { cents: 55, shares: 0 }, { cents: 55, shares: -1 }, { cents: 55, shares: "10" },
+      { cents: 55, shares: 1, side: "sell" }, [55, 1]].map((ask) => ({ ...quotes, down: { ask, bid: null } }))];
+  for (const v of bad) assert.throws(() => parseHouse(v), /INDEXER_HOUSE_SHAPE/, JSON.stringify(v));
 });
 
 test("GET /v1/rounds: the last 24 hours by default; at most 200 rounds", async () => {

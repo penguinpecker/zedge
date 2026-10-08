@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { SHARE, apply, fairUp, phi, plan, quotes, realizedSigma, spotCheck, worstStake } from "./pricing.mjs";
-import { checkBase, checkNode, mainnetDeployment, queueFull, settingsFrom, target } from "./main.mjs";
+import { checkBase, checkNode, houseQuotes, mainnetDeployment, queueFull, settingsFrom, target } from "./main.mjs";
 
 // The public fields of a configured order-book manifest the bot reads (public/deployments/26514-orderbook.json, schema 3).
 const a = (n) => `0x${String(n).repeat(40)}`;
@@ -150,4 +150,13 @@ test("the queue guard: quotes and syncs wait at 5 pending requests, a cancel_all
   assert.deepEqual([4n, 5n].map((q) => queueFull(q, "place_order")), [false, true]);
   assert.deepEqual([6n, 8n, 9n].map((q) => queueFull(q, "cancel_all")), [false, false, true]);
   assert.equal(queueFull(5n, "sync"), true);
+});
+
+test("quotes for the site: per outcome the lowest resting sell and the highest resting buy of the open round, in cents and shares", () => {
+  const r = { id: "r", start: 9_000 }, o = (outcome, side, price, shares, more = {}) => ({ roundId: "r", outcome, side, price, remaining: shares * SHARE, reservedCash: 0, expiry: 9_500, ...more });
+  const view = { ...EMPTY, orders: [o("up", "sell", 57, 10), o("up", "sell", 55, 4.5), o("up", "buy", 41, 10), o("up", "buy", 44, 2), o("up", "sell", 55, 1),
+    o("down", "buy", 40, 10), o("down", "sell", 50, 3, { expiry: 9_100 }), o("down", "sell", 49, 3, { roundId: "q" }), o("down", "buy", 45, 0)] };
+  assert.deepEqual(houseQuotes(view, r, 9_100, 123), { at: 123, start: 9_000,
+    up: { ask: { cents: 55, shares: 5.5 }, bid: { cents: 44, shares: 2 } }, down: { ask: null, bid: { cents: 40, shares: 10 } } }, "expired, other-round and filled orders left out");
+  assert.deepEqual(houseQuotes(EMPTY, { id: "s", start: 9_900 }, 9_900, 124), { at: 124, start: 9_900, up: { ask: null, bid: null }, down: { ask: null, bid: null } });
 });

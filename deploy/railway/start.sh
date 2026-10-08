@@ -17,6 +17,7 @@ house-bot)
   [ -z "${ZEDGE_HORIZEN_RPC:-}" ] || put .config/zedge/horizen.url "$ZEDGE_HORIZEN_RPC"
   unset ZEDGE_HOUSE_KEY ZEDGE_THIRDWEB_ID ZEDGE_ALCHEMY_KEY ZEDGE_HORIZEN_RPC
   export HOME="$d" # main.mjs reads $HOME/.config/zedge/*; its pid lock lands here, never on the volume
+  [ -n "${HOUSE_QUOTES_PORT:-}" ] || export HOUSE_QUOTES_PORT=8080 # GET /quotes for the indexer, private network only
   set -- node --experimental-strip-types services/market-maker/main.mjs ${MM_ARGS:-run --mainnet --settings services/market-maker/railway.settings.json} ;;
 payout-signer)
   put payout-signer.key "${PAYOUT_SIGNER_KEY:-}"
@@ -38,6 +39,8 @@ keeper)
 indexer)
   # DATABASE_URL: a reference to the Postgres service's private-network URL. No volume: the database is the state.
   put indexer.env "$(printf 'DATABASE_URL=%s\nINDEXER_HORIZEN_RPC_URL=%s\nINDEXER_SOLANA_RPC_URL=%s\n' "${DATABASE_URL:-}" "${ZEDGE_HORIZEN_RPC:-}" "${ZEDGE_SOLANA_RPC:-}")"
+  # Optional and not a secret: the house bot's quotes, e.g. http://house-bot.railway.internal:8080/quotes
+  [ -z "${ZEDGE_HOUSE_QUOTES_URL:-}" ] || printf '\nINDEXER_HOUSE_URL=%s\n' "$ZEDGE_HOUSE_QUOTES_URL" >> "$d/indexer.env"
   unset DATABASE_URL ZEDGE_HORIZEN_RPC ZEDGE_SOLANA_RPC
   set -- node --experimental-strip-types services/indexer/main.mjs --settings "$d/indexer.env" ;;
 *) echo "start: set ZEDGE_SERVICE to house-bot, payout-signer, keeper or indexer" >&2; exit 64 ;;
