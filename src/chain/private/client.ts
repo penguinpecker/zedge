@@ -173,11 +173,11 @@ export function sharesFor(pay: number, price: number): number {
 }
 
 /** `wallet`: Base USDC at the account's own address. `held`: the part of it that came from the vault (withdrawals, refunds), which the
- * automatic deposit leaves alone; null until read. `auto`: deposits are automatic (a transfer index is set up). `historyMore`: History has older blocks to read ("Load older"),
+ * automatic deposit leaves alone; null until read. `historyMore`: History has older blocks to read ("Load older"),
  * and `historyHours` is how far back it has read. `behind`: a deposit was credited after the last view was read, so the balance
  * shown is short until the next sync. `cached`: `view` is the newest readable receipt the read API had, shown read-only while the
  * unlock sync runs; `unlocked` is still false. */
-export type Snapshot = { unlocked: boolean; registered: boolean; view: View | null; fingerprint: string | null; actions: ActionState[]; history: HistoryEntry[]; historyMore: boolean; historyHours: number; wallet: bigint | null; held: bigint | null; auto: boolean; error: string; behind: boolean; cached: boolean };
+export type Snapshot = { unlocked: boolean; registered: boolean; view: View | null; fingerprint: string | null; actions: ActionState[]; history: HistoryEntry[]; historyMore: boolean; historyHours: number; wallet: bigint | null; held: bigint | null; error: string; behind: boolean; cached: boolean };
 /** One History page: about six hours of Horizen's ~1 s blocks. */
 export const HISTORY_PAGE = 21_600n;
 
@@ -185,7 +185,7 @@ export class PrivateAccount {
   readonly account: Address;
   #session: EvaluationSession;
   #queue: Promise<unknown> = Promise.resolve();
-  #state: Snapshot = { unlocked: false, registered: false, view: null, fingerprint: null, actions: [], history: [], historyMore: false, historyHours: 0, wallet: null, held: null, auto: false, error: "", behind: false, cached: false };
+  #state: Snapshot = { unlocked: false, registered: false, view: null, fingerprint: null, actions: [], history: [], historyMore: false, historyHours: 0, wallet: null, held: null, error: "", behind: false, cached: false };
   /** History read so far: blocks `oldest` to `head`, the account's requests there in chain order, and its request count at `head`. */
   #scan: { head: bigint; oldest: bigint; total: bigint; logged: Logged[] } | null = null;
   /** History from the read API instead: its entries newest first, each with its log index (the next page's cursor), and whether
@@ -216,7 +216,6 @@ export class PrivateAccount {
     this.#hints = options.hints ?? null; this.#onChange = options.onChange ?? (() => {}); this.#now = options.now ?? Date.now;
     this.#sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.account = signer.address.toLowerCase() as Address;
-    this.#state = { ...this.#state, auto: Boolean(chain.transfers) };
     const a = book.application;
     // The origin is the manifest's, not this page's: the key is the same on every host that serves this release.
     const domain: EvaluationDomain = { chainId: 26514, endpoint: book.endpoint.address, applicationId: a.id, applicationFingerprint: a.wasmSha256, rulesHash: a.sessionRulesHash, origin: a.origin };
@@ -632,22 +631,24 @@ export class PrivateAccount {
 
   /** The automatic deposit, run after each Base balance read: USDC that reached this address from anyone but the vault goes in with
    * depositFromBase (autoDeposit in deposit-amount.ts decides how much, from the address's whole transfer history). The history is
-   * read again only when the balance moved since a read that added up. One at a time, never beside another deposit, a withdrawal or
-   * a send; after a failure the next try waits 1 min, doubling up to 30 min (or the relayer's retry time when longer). */
+   * read again when the balance moved since a read that added up, and before each try. One at a time, never beside another deposit,
+   * a withdrawal or a send; after a failure the next try waits 1 min, doubling up to 30 min (or the relayer's retry time when longer). */
   async autoDeposit(): Promise<void> {
     const balance = this.#state.wallet, read = this.#chain.transfers;
-    if (!read || balance === null || this.#autoBusy || this.#closed || this.#state.actions.some((a) => !a.final && MONEY_ACTIONS.includes(a.action))) return;
+    const moving = () => this.#closed || this.#state.actions.some((a) => !a.final && MONEY_ACTIONS.includes(a.action));
+    if (!read || balance === null || this.#autoBusy || moving()) return;
+    // Read again when the balance moved, and before each try: a deposit acts only on a history read just now.
+    if (this.#autoRead?.balance === balance && (!this.#autoRead.atoms || this.#now() < this.#autoAfter)) return;
     this.#autoBusy = true;
     try {
-      if (this.#autoRead?.balance !== balance) {
-        const c = this.#book.custody, rule = autoDeposit(balance ? await read(this.account) : [], this.account, c.vault.address, balance, c.vault.limits);
-        // The index is behind the chain (or ahead of the balance read): both are read again after the next balance read.
-        if (!rule) return;
-        this.#autoRead = { balance, atoms: rule.atoms };
-        if (rule.held !== this.#state.held) this.#set({ held: rule.held });
-      }
-      if (!this.#autoRead.atoms || this.#now() < this.#autoAfter) return;
-      try { await this.depositFromBase(this.#autoRead.atoms); this.#autoWait = 0; }
+      const c = this.#book.custody, rule = autoDeposit(balance ? await read(this.account) : [], this.account, c.vault.address, balance, c.vault.limits);
+      // The index is behind the chain (or ahead of the balance read): both are read again after the next balance read.
+      if (!rule) return;
+      this.#autoRead = { balance, atoms: rule.atoms };
+      if (rule.held !== this.#state.held) this.#set({ held: rule.held });
+      // A send or a deposit the user started during the read goes first.
+      if (!rule.atoms || this.#now() < this.#autoAfter || moving()) return;
+      try { await this.depositFromBase(rule.atoms); this.#autoWait = 0; }
       catch (error) {
         this.#autoWait = Math.min(this.#autoWait * 2 || 60_000, 1_800_000);
         this.#autoAfter = this.#now() + Math.max(this.#autoWait, error instanceof PublicError && error.retryAfter ? error.retryAfter * 1000 : 0);
@@ -884,8 +885,9 @@ export function indexedChain(chain: Chain, api: { account: NonNullable<Chain["re
   };
 }
 
-/** `assetTransfers`: `base` is Alchemy's endpoint, whose alchemy_getAssetTransfers gives the address's USDC history (`transfers`). */
-export function viemChain(client: PublicClient, book: Book, base: PublicClient, options: { sleep?: (ms: number) => Promise<void>; assetTransfers?: boolean } = {}): Chain {
+/** `assetTransfers`: a client of Base's Alchemy endpoint that sends each request alone (its alchemy_getAssetTransfers, the address's
+ * USDC history for `transfers`, refuses batched requests). */
+export function viemChain(client: PublicClient, book: Book, base: PublicClient, options: { sleep?: (ms: number) => Promise<void>; assetTransfers?: PublicClient } = {}): Chain {
   const { app, endpoint } = eventsOf(book);
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const auth = book.authenticator.address, c = book.custody;
@@ -995,7 +997,7 @@ export function viemChain(client: PublicClient, book: Book, base: PublicClient, 
       const [log] = await base.getLogs({ address: c.usdc.address, event: events.AuthorizationUsed, args: { authorizer: getAddress(owner), nonce }, fromBlock, toBlock: "latest" });
       return log?.transactionHash ?? null;
     },
-    transfers: options.assetTransfers ? (account) => assetTransfers(base, c.usdc.address, account) : undefined,
+    transfers: options.assetTransfers ? (account) => assetTransfers(options.assetTransfers!, c.usdc.address, account) : undefined,
     async arrived(index) {
       const [account] = await client.readContract({ address: c.inbox.address, abi: inboxAbi, functionName: "deposits", args: [index] });
       return account.toLowerCase() !== ZERO_ADDRESS;

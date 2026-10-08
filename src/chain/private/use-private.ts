@@ -62,7 +62,7 @@ export function usePrivate(wallet: ChainWallet, orderbook: VerifiedOrderbook | n
       if (!live) return;
       isPublic.current = (e) => e instanceof m.PublicError;
       // History, the cached Portfolio and round results read the read API first (display only); everything else reads the chain.
-      const chain = m.indexedChain(m.viemChain(chainClient(26514) as unknown as PublicClient, manifest, baseClient() as unknown as PublicClient, { assetTransfers: BASE_ALCHEMY }), { account: readApi().account, live: liveNow });
+      const chain = m.indexedChain(m.viemChain(chainClient(26514) as unknown as PublicClient, manifest, baseClient() as unknown as PublicClient, { assetTransfers: BASE_ALCHEMY ? baseClient(false) as unknown as PublicClient : undefined }), { account: readApi().account, live: liveNow });
       created = new m.PrivateAccount(manifest, signer, chain,
         m.fetchRelay(manifest.relayer.path, () => latest.current.authHeaders()), { hints, onChange: (s) => { if (live) setSnapshot(s); } });
       account.current = created;

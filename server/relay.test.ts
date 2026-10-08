@@ -88,6 +88,7 @@ function fakeChain(over: Partial<ChainState> = {}, chainId = 26514) {
     ds: { timestamp: CHAIN_TIME, baseFee: 5_000_000n, balance: 10n ** 16n, usdcBalance: 1_000_000_000n, allowance: 0n,
       limits: { minDeposit: 1_000_000n, maxDeposit: 500_000_000n, maxPayout: 1_000_000_000n, dailyPayoutCap: 10_000_000_000n } },
     deposited: (args: { account: Address; amount: bigint }) => args,
+    transferred: (args: { from: Address; to: Address; value: bigint }) => args,
   };
   const wire: Wire = {
     async state(sender) {
@@ -134,7 +135,8 @@ function fakeChain(over: Partial<ChainState> = {}, chainId = 26514) {
         return { status: "success", gasUsed: 560_000n, effectiveGasPrice: 6_000_000n, l1Fee: 30_000_000_000n, blockNumber: 52_270_000n, logs: [log] };
       }
       if (sent[i].to?.toLowerCase() === BASE_USDC) {
-        const [from, to, value] = decodeFunctionData({ abi: usdcAbi, data: sent[i].data! }).args as unknown as readonly [Address, Address, bigint];
+        const [f, t, v] = decodeFunctionData({ abi: usdcAbi, data: sent[i].data! }).args as unknown as readonly [Address, Address, bigint];
+        const { from, to, value } = chain.transferred({ from: f, to: t, value: v });
         const log = { address: BASE_USDC, topics: encodeEventTopics({ abi: usdcAbi, eventName: "Transfer", args: { from, to } }), data: encodeAbiParameters([{ type: "uint256" }], [value]) } as unknown as Log;
         return { status: "success", gasUsed: 80_000n, effectiveGasPrice: 6_000_000n, l1Fee: 10_000_000_000n, blockNumber: 52_270_001n, logs: [log] };
       }
@@ -600,4 +602,12 @@ test("a send is refused unless it is the signed-in user's own, at least 0.10 USD
   for (const [name, body, code] of refused) assert.equal((await r.post(body, headers)).body.code, code, name);
   assert.ok(nothingSent(r));
   assert.equal(await r.store.get("relay:spent:8453:20261006"), null);
+});
+
+test("a send receipt without USDC's Transfer of this amount from the user to this address reads as REVERTED", async () => {
+  for (const change of [(e: { from: Address; to: Address; value: bigint }) => ({ ...e, value: e.value - 1n }), (e: { from: Address; to: Address; value: bigint }) => ({ ...e, to: fresh() })]) {
+    const r = relay();
+    r.base.transferred = change;
+    assert.equal((await r.post(await send(), await auth())).body.code, "REVERTED");
+  }
 });

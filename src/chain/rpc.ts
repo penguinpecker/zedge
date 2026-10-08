@@ -50,13 +50,14 @@ function backOff(url: string, delay: number) {
   cooldowns.set(url, Math.max(cooldowns.get(url) ?? 0, performance.now() + delay));
 }
 
-/** Only pinned public endpoints; no automatic retry, fallback, or cached security verification. */
-export function rpcTransport(url: string) {
+/** Only pinned public endpoints; no automatic retry, fallback, or cached security verification. `batch: false` sends each request
+ * alone: Alchemy's transfer index (alchemy_getAssetTransfers) refuses batched requests. */
+export function rpcTransport(url: string, options: { batch?: boolean } = {}) {
   requireEndpoint(url);
   return http(url, {
     timeout: 10_000,
     retryCount: 0,
-    batch: { batchSize: 20, wait: 10 },
+    batch: options.batch === false ? false : { batchSize: 20, wait: 10 },
     onFetchRequest() {
       requireAvailable(url);
     },

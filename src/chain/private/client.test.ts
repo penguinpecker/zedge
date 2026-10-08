@@ -261,7 +261,7 @@ test("the automatic deposit takes only USDC from outside the vault, once; a send
   await account.autoDeposit();
   await account.autoDeposit();
   assert.deepEqual(s.log.filter((x) => x.startsWith("deposit")), ["deposit 30000000"], "the payout stays on Base");
-  assert.deepEqual([account.snapshot.held, account.snapshot.wallet, account.snapshot.view?.cash, account.snapshot.auto], [20_000_000n, 20_000_000n, 30_000_000, true]);
+  assert.deepEqual([account.snapshot.held, account.snapshot.wallet, account.snapshot.view?.cash], [20_000_000n, 20_000_000n, 30_000_000]);
   await assert.rejects(account.sendFromBase(friend, 5_000_000n), /cannot confirm a send/, "never through the silent signature");
   const confirmed: string[] = [];
   signer.confirmTypedData = async (data, text) => { confirmed.push(text); return signer.signTypedData(data); };
@@ -271,6 +271,20 @@ test("the automatic deposit takes only USDC from outside the vault, once; a send
   assert.equal(account.snapshot.actions.find((x) => x.action === "Send")?.chain, 8453);
   await account.autoDeposit();
   assert.deepEqual([s.log.filter((x) => x.startsWith("deposit")).length, account.snapshot.held], [1, 15_000_000n], "the send spent held USDC; nothing more goes in");
+});
+
+test("the automatic deposit stands aside for a deposit the user started while it read the history", async () => {
+  const s = await stack({ transfers: true }), signer = wallet();
+  s.history.push({ from: "0x00000000000000000000000000000000000000cc", to: signer.address, value: 30_000_000n }, { from: s.book.custody.vault.address, to: signer.address, value: 20_000_000n });
+  const { account } = open(s, signer);
+  await account.unlock();
+  await account.refreshFunds();
+  const read = s.chain.transfers!;
+  let manual: Promise<unknown> | undefined;
+  s.chain.transfers = async (a) => { manual ??= account.depositFromBase(5_000_000n); return read(a); };
+  await account.autoDeposit();
+  await manual;
+  assert.deepEqual(s.log.filter((x) => x.startsWith("deposit")), ["deposit 5000000"]);
 });
 
 test("a credit whose sync fails leaves the balance marked behind until a view is read, so the ticket offers a refresh, not a second deposit", async () => {
@@ -753,7 +767,7 @@ test("the Base USDC history is read both ways from Alchemy's index, page by page
     const page = pages[side][q.pageKey ? 1 : 0];
     return bad ? { transfers: [{ ...row(1, "0", friend, me, 1), rawContract: { value: "1.5", address: usdc } }] } : page;
   } } as unknown as PublicClient;
-  const chain = viemChain(client, s.book, client, { assetTransfers: true });
+  const chain = viemChain(client, s.book, client, { assetTransfers: client });
   assert.deepEqual(await chain.transfers!(me), [
     { from: friend, to: me, value: 5n }, { from: friend, to: me, value: 2n }, { from: me, to: s.book.custody.vault.address, value: 5n }, { from: me, to: me, value: 9n }]);
   assert.deepEqual(asked, ["fromAddress:", "toAddress:", "toAddress:next"]);

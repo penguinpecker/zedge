@@ -1,7 +1,7 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { ArrowSquareOut, Copy, LockKey, LockKeyOpen, Wallet, X } from "@phosphor-icons/react";
 import { formatUnits, isHash } from "viem";
-import { NETWORKS, transactionExplorerUrl, type NetworkId } from "./networks.ts";
+import { BASE_ALCHEMY, NETWORKS, transactionExplorerUrl, type NetworkId } from "./networks.ts";
 import { readTransaction, type TransactionRead } from "./gateway.ts";
 import { depositAmount, sendForm } from "./deposit-amount.ts";
 import { SIGN_IN_NOT_SET_UP, type ChainWallet } from "./privy.tsx";
@@ -176,7 +176,6 @@ export default function AccountDrawer({ view, onClose, network, wallet, orderboo
   const moving = snap?.actions.find((a) => a.action === "Deposit")?.final === false;
   // Withdrawn or refunded USDC on Base: the automatic deposit leaves it; the user sends it on or moves it back (up to the largest deposit).
   const held = snap?.held ?? 0n, back = limits && held > BigInt(limits.maxDeposit) ? BigInt(limits.maxDeposit) : held;
-  const paidOut = snap?.actions.find((a) => a.action === "Payout")?.phase === "done";
   // Privy's window cannot sit under this popup (it is in the top layer): the popup steps aside while the wallet asks to confirm a send.
   const confirming = snap?.actions.find((a) => a.action === "Send")?.phase === "signing";
   useEffect(() => {
@@ -203,7 +202,7 @@ export default function AccountDrawer({ view, onClose, network, wallet, orderboo
             {address && <div className="chain-deposit-address"><div><h3>Send USDC on Base to</h3><code>{address}</code>
               <button className="chain-text-button" onClick={copy}><Copy size={13} /> {copied ? "Copied" : "Copy"}</button></div><AddressQr address={address} /></div>}
             {limits && deposit && <>
-              {snap?.auto ? <>
+              {BASE_ALCHEMY ? <>
                 <p className="chain-copy">USDC sent here is added to your trading balance automatically while ZEDGE is open. Deposits start at {usdc(BigInt(limits.minDeposit))}.</p>
                 <DepositSteps snapshot={snap} idle />
                 {held > 0n && <div className="chain-held">
@@ -227,7 +226,8 @@ export default function AccountDrawer({ view, onClose, network, wallet, orderboo
               </>}
               {withdrawAtoms > 0 && <button className="button chain-full" disabled={!unlocked || priv.busy} onClick={() => void priv.run((a) => a.withdraw())}>Withdraw {usdc(withdrawAtoms)}</button>}
               <ActionLine snapshot={snap} names={["Withdraw", "Payout"]} />
-              {paidOut && !held && !sendOpen && <button className="chain-text-button" onClick={() => setSendOpen(true)}>Send to another wallet</button>}
+              {/* Other USDC on Base: a payout not yet read as held, dust below the smallest deposit, or any balance without automatic deposits. */}
+              {!held && Boolean(snap?.wallet) && !sendOpen && <button className="chain-text-button" onClick={() => setSendOpen(true)}>Send to another wallet</button>}
               {sendOpen && address && vault && <SendForm priv={priv} own={address} vault={vault} balance={snap?.wallet ?? null} onDone={() => setSendOpen(false)} />}
               <ActionLine snapshot={snap} names={["Send"]} />
             </>}
