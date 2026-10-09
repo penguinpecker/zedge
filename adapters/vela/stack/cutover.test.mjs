@@ -1,0 +1,77 @@
+// The cutover's own checks (cutover.mjs), which deploy-book.mjs also relies on. node --test adapters/vela/stack/cutover.test.mjs
+import { strict as assert } from "node:assert";
+import { test } from "node:test";
+import { keccak256, stringToBytes } from "viem";
+import { EVENT, RAILWAY, blobInPlace, chooseDepositsFrom, eventSpec, proveDepositsFrom, resolverProblem, runtimeOf } from "./cutover.mjs";
+
+test("runtimeOf fills every immutable slot with the contract's own address", () => {
+  const art = { deployedBytecode: { object: `0x60${"00".repeat(32)}61${"00".repeat(32)}5b`, immutableReferences: { 7: [{ start: 1, length: 32 }, { start: 34, length: 32 }] } } };
+  const at = "0x6F8500186CcB07E3c14FF7BBf1c9b5c05b8ca9A8", word = `${"0".repeat(24)}6f8500186ccb07e3c14ff7bbf1c9b5c05b8ca9a8`;
+  assert.equal(runtimeOf(art, at), `0x60${word}61${word}5b`);
+  assert.equal(runtimeOf({ deployedBytecode: { object: "0xAB5B", immutableReferences: {} } }, at), "0xab5b");
+});
+
+const credits = (...indexes) => indexes.map((i) => ({ index: BigInt(i) }));
+const proof = (over) => ({ frozen: true, freezeBlock: 100n, lastClockBlock: 101n, credits: credits(1, 2, 3), highest: 5n, ...over });
+
+test("N is proven only once the trigger is frozen and a tick asked after the freeze applied, from contiguous credit records", () => {
+  assert.equal(proveDepositsFrom(proof()), 3n);
+  assert.equal(proveDepositsFrom(proof({ credits: credits(3, 1, 2) })), 3n, "log order does not matter");
+  assert.equal(proveDepositsFrom(proof({ credits: [] })), 0n);
+  assert.throws(() => proveDepositsFrom(proof({ frozen: false })), /not WithdrawOnlyBookClockTrigger/);
+  assert.throws(() => proveDepositsFrom(proof({ lastClockBlock: 100n })), /no tick asked after the freeze/);
+  assert.throws(() => proveDepositsFrom(proof({ lastClockBlock: undefined })), /no tick asked after the freeze/);
+  assert.throws(() => proveDepositsFrom(proof({ credits: credits(1, 3) })), /skip or repeat index 2/);
+  assert.throws(() => proveDepositsFrom(proof({ credits: credits(1, 2, 2) })), /skip or repeat index 3/);
+  assert.throws(() => proveDepositsFrom(proof({ highest: 2n })), /above the inbox's highest/);
+});
+
+test("deploy-book takes N from the proof; mainnet needs --deposits-from to repeat it; only a fork may go without a proof", () => {
+  const missing = new Error("not proven");
+  assert.equal(chooseDepositsFrom({ fork: false, given: 8n, proven: 8n }), 8n);
+  assert.throws(() => chooseDepositsFrom({ fork: false, given: undefined, proven: 8n }), /required on mainnet/);
+  assert.throws(() => chooseDepositsFrom({ fork: false, given: 7n, proven: 8n }), /is not the proven 8/);
+  assert.throws(() => chooseDepositsFrom({ fork: true, given: 7n, proven: 8n }), /is not the proven 8/);
+  assert.throws(() => chooseDepositsFrom({ fork: false, given: 8n, proven: missing }), /not proven/);
+  assert.equal(chooseDepositsFrom({ fork: true, given: 8n, proven: missing }), 8n);
+  assert.throws(() => chooseDepositsFrom({ fork: true, given: undefined, proven: missing }), /not proven/);
+  assert.equal(chooseDepositsFrom({ fork: true, given: undefined, proven: 8n }), 8n);
+});
+
+test("the event parameter: the owner's times and the rules text's Keccak-256", () => {
+  assert.deepEqual(EVENT, { cutoff: 1793743200, end: 1793743201, voidableAfter: 1801439999 });
+  assert.equal(new Date(EVENT.cutoff * 1000).toISOString(), "2026-11-03T22:00:00.000Z");
+  assert.equal(new Date(EVENT.voidableAfter * 1000).toISOString(), "2027-01-31T23:59:59.000Z");
+  assert.equal(EVENT.end % 900, 1, "off the 900 s grid: no shared all-accounts limit with a BTC round");
+  const rules = stringToBytes("Resolves Yes if ...\n");
+  assert.deepEqual(eventSpec(rules, 1791532800), { questionHash: keccak256(rules), start: 1791532800, ...EVENT });
+  assert.throws(() => eventSpec(rules, EVENT.cutoff), /start before its cutoff/);
+  assert.throws(() => eventSpec(rules, 0), /start before its cutoff/);
+  assert.throws(() => eventSpec(new Uint8Array(), 1791532800), /rules text is empty/);
+});
+
+test("the resolver is a new dedicated wallet", () => {
+  const roles = { house: "0xac8dfcbfbb5907634fe2bcea58e59e4c55441ab5", deployer: "0x279173ac297ad146bc92f877552c8c2b78334d07" };
+  const fresh = "0x1111111111111111111111111111111111111111";
+  assert.equal(resolverProblem(fresh, roles, 0), null);
+  assert.match(resolverProblem(undefined, roles, 0), /lowercase 0x address/);
+  assert.match(resolverProblem("0xAc8dfcbfbb5907634fe2bcea58e59e4c55441ab5", roles, 0), /lowercase 0x address/);
+  assert.match(resolverProblem(`0x${"0".repeat(40)}`, roles, 0), /lowercase 0x address/);
+  assert.match(resolverProblem(roles.house, roles, 0), /is the house/);
+  assert.match(resolverProblem(fresh, roles, 1), /has sent 1 Horizen transactions/);
+});
+
+test("the guest is in the manager's artifact store only if sha256sum prints its SHA-256 for that exact path", () => {
+  const sha = "ab".repeat(32), path = `${RAILWAY.blobs}/${sha}.wasm`;
+  const calls = [];
+  const run = (stdout, status = 0) => (cmd, args) => { calls.push([cmd, ...args]); return { status, stdout }; };
+  const project = "zedge-vela-project-id";
+  assert.equal(blobInPlace(sha, { project, run: run(`${sha}  ${path}\n`) }), true);
+  assert.deepEqual(calls[0], ["railway", "ssh", "-p", project, "-s", RAILWAY.manager, "sha256sum", path]);
+  assert.equal(blobInPlace(sha, { project, run: run(`${"cd".repeat(32)}  ${path}\n`) }), false, "another file's hash");
+  assert.equal(blobInPlace(sha, { project, run: run(`${sha}  /tmp/${sha}.wasm\n`) }), false, "another path");
+  assert.equal(blobInPlace(sha, { project, run: run("", 1) }), false, "missing file");
+  assert.equal(blobInPlace(sha, { project, run: run(`${sha}  ${path}\n`, 1) }), false, "a failed command");
+  assert.equal(blobInPlace(sha, { project, blobs: "/other", run: run(`${sha}  /other/${sha}.wasm\n`) }), true, "a confirmed SHARED_DATA_FOLDER elsewhere");
+  assert.throws(() => blobInPlace(sha, { run: run(`${sha}  ${path}\n`) }), /--railway-project/);
+});
