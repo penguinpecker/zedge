@@ -8,7 +8,7 @@ import type { SettleRef } from "./read-api.ts";
 /** The event this release offers: its rules file, the Keccak-256 of its exact bytes (the question hash the guest is deployed with;
  * events.test.ts checks it against the file) and the times those rules state. Changing the rules means changing all of these. */
 export const US_HOUSE_2026 = {
-  rules: "/events/us-house-2026.txt", questionHash: "0xf5c89309c52b38360804a828320f782a4b755170db7791f0933fd8024bb32a69",
+  rules: "/events/us-house-2026.txt", questionHash: "0xbdb0cdb3b9ddf42f98992b0800e8a4e6c7d64e99a9b29b451bb963e381a0d044",
   cutoff: 1_793_743_200, end: 1_793_743_201, voidableAfter: 1_801_439_999,
 } as const;
 
@@ -56,7 +56,7 @@ export async function loadEvent(book: Book & Pick<ConfiguredOrderbook, "applicat
 export async function loadRules(event: Pick<PoliticsEvent, "rules" | "terms">, fetcher: typeof fetch = fetch): Promise<string> {
   const response = await fetcher(event.rules, { cache: "no-store", credentials: "same-origin" });
   const bytes = response.ok ? new Uint8Array(await response.arrayBuffer()) : fail();
-  if (bytes.length > 16_384 || keccak256(bytes) !== event.terms.question) throw new Error("The rules text does not match this market.");
+  if (keccak256(bytes) !== event.terms.question) throw new Error("The rules text does not match this market.");
   return new TextDecoder().decode(bytes);
 }
 

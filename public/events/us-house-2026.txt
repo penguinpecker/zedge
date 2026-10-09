@@ -26,7 +26,7 @@ The operator posts no earlier than 24 hours after source (a) is met, and aims to
 A result counts as posted when the exchange accepts it. A posted result is final: it cannot be changed or reversed.
 
 5. Trading
-Orders are accepted until 3 November 2026 22:00:00 UTC (5:00 pm Eastern Time). Orders still resting then are cancelled. The house may stop quoting earlier.
+An order is accepted only if the exchange processes it before 3 November 2026 22:00:00 UTC (5:00 pm Eastern Time). Orders still resting then are cancelled. The house may stop quoting earlier.
 After that time you cannot buy or sell. You can still merge one Yes share and one No share back into 1 USDC.
 Money in this market stays locked until the result is posted or the market is void. Before the cutoff you can sell only if someone is buying.
 
@@ -39,7 +39,7 @@ A void does not refund the price you paid. With Yes near 90 cents, a void moves 
 The operator cannot void the market in any other way. It can, however, cause a void by not posting a result.
 
 8. Limits
-A share pays 1 USDC. For each account, the gap between what it would be paid if Yes wins and if No wins may not pass 50 USDC, counting its resting buy orders as filled and its shares offered for sale as sold. Added up over all accounts, these gaps may not pass 200 USDC, counting shares held only; this includes the house that quotes this market. An order that would pass a limit is refused. The exchange's BTC house account is exempt from both limits.
+A share pays 1 USDC. For each account, the gap between what it would be paid if Yes wins and if No wins may not pass 50 USDC, counting each of its resting orders as filled or not, whichever makes the gap wider. Added up over all accounts, the gaps of the shares they hold, including shares offered for sale, may not pass 200 USDC; this includes the house that quotes this market. An order that would pass a limit is refused. The exchange's BTC house account is exempt from both limits.
 
 9. Fees
 There is no trading fee.

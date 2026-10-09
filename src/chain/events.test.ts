@@ -85,7 +85,7 @@ test("loading: no manifest is no event; a broken or oversized one throws; the ro
 
 test("the event's result is the resolver's (kind 2, source 4) or the timeout void (kind 3, source 3); a price-style record is none", () => {
   assert.deepEqual([eventOutcome({ kind: 2, outcome: 1, source: 4 }), eventOutcome({ kind: 2, outcome: 2, source: 4 }), eventOutcome({ kind: 3, outcome: 3, source: 3 })], [1, 2, 3]);
-  for (const s of [{ kind: 2, outcome: 1, source: 1 }, { kind: 2, outcome: 1, source: 2 }, { kind: 2, outcome: 3, source: 4 }, { kind: 3, outcome: 3, source: 4 }, { kind: 3, outcome: 3, source: 2 }, { kind: 1, outcome: 0, source: 4 }, null]) {
+  for (const s of [{ kind: 2, outcome: 1, source: 1 }, { kind: 2, outcome: 1, source: 2 }, { kind: 2, outcome: 3, source: 4 }, { kind: 3, outcome: 3, source: 4 }, { kind: 3, outcome: 3, source: 2 }, { kind: 3, outcome: 1, source: 3 }, { kind: 1, outcome: 0, source: 4 }, null]) {
     assert.equal(eventOutcome(s), null, JSON.stringify(s));
   }
 });

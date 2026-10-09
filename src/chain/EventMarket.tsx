@@ -58,7 +58,7 @@ function Rules({ event }: { event: PoliticsEvent }) {
   useEffect(() => { let on = true; void loadRules(event).then((t) => { if (on) setText(t); }, () => { if (on) setFailed(true); }); return () => { on = false; }; }, [event]);
   return <section className="chain-panel event-rules" aria-labelledby="event-rules-title"><div className="chain-panel-heading"><h2 id="event-rules-title">Rules</h2><a className="chain-pill" href={event.rules} target="_blank" rel="noreferrer">Text file <ArrowSquareOut size={12} /></a></div>
     {text !== null ? <div className="event-rules-text">{text}</div> : <p className={failed ? "chain-error" : "chain-copy"}>{failed ? "The rules text could not be checked against this market. Open the text file above, or try again later." : "Loading the rules…"}</p>}
-    <p className="chain-copy event-rules-note">This is the exact text the market was set up with: its Keccak-256 hash, <code>{event.terms.question}</code>, is the market’s question hash on chain.</p></section>;
+    {text !== null && <p className="chain-copy event-rules-note">This is the exact text the market was set up with: its Keccak-256 hash, <code>{event.terms.question}</code>, is the market’s question hash on chain.</p>}</section>;
 }
 
 type TicketProps = { event: PoliticsEvent; priv: PrivateState; orderbook: VerifiedOrderbook | null; wallet: ChainWallet; quotes: EventHouse | null; now: number; outcome: Side; onOutcome: (side: Side) => void; onAccount: () => void; onFunds: () => void };

@@ -290,7 +290,8 @@
 .event-result, .event-operator { margin: 0 24px 16px; }
 .event-result a { display: inline-flex; align-items: center; gap: 4px; }
 .event-operator code { overflow-wrap: anywhere; }
-.event-rules-text { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; line-height: 1.8; padding: 0 24px 8px; }
+/* No ligatures: the font draws the rules' "(c)" as ©. */
+.event-rules-text { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; line-height: 1.8; padding: 0 24px 8px; font-variant-ligatures: none; }
 .event-rules > .chain-copy, .event-rules > .chain-error { margin: 0 24px 20px; }
 .event-rules-note code { overflow-wrap: anywhere; }
 .event-rules .chain-pill { text-decoration: none; }
