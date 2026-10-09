@@ -47,18 +47,20 @@ func TestTimeFreePaths(t *testing.T) {
 		}
 	}
 	for name, want := range map[string]string{
-		"deposit through the endpoint fails":    ErrToken,
-		"command before the first tick fails":   ErrClock,
-		"alice's command from bob fails":        ErrMismatch,
-		"truncated envelope fails":              ErrEnvelope,
-		"deeply nested payload fails":           ErrEnvelope,
-		"command with a nested trailer fails":   ErrCommand,
-		"oversized payload fails":               ErrEnvelope,
-		"replayed tick fails":                   ErrTick,
-		"tick nobody asked for fails":           ErrTick,
-		"malformed tick fails":                  ErrTrusted,
-		"payload over the allocation cap fails": ErrEnvelope,
-		"tick stamped in milliseconds fails":    ErrTrusted,
+		"deposit through the endpoint fails":                         ErrToken,
+		"command before the first tick fails":                        ErrClock,
+		"alice's command from bob fails":                             ErrMismatch,
+		"truncated envelope fails":                                   ErrEnvelope,
+		"deeply nested payload fails":                                ErrEnvelope,
+		"command with a nested trailer fails":                        ErrCommand,
+		"oversized payload fails":                                    ErrEnvelope,
+		"replayed tick fails":                                        ErrTick,
+		"tick nobody asked for fails":                                ErrTick,
+		"malformed tick fails":                                       ErrTrusted,
+		"payload over the allocation cap fails":                      ErrEnvelope,
+		"tick stamped in milliseconds fails":                         ErrTrusted,
+		"events: a result signed by someone else fails":              ErrMismatch,
+		"events: a result whose outcome is not the one signed fails": ErrMismatch,
 	} {
 		if got := find(t, steps, name).Error; got != want {
 			t.Errorf("%s: error %q, want %q", name, got, want)
@@ -173,9 +175,10 @@ func TestTimeFreePaths(t *testing.T) {
 // A request's public shape must not say what it was. Every accepted command
 // or sync, whether it applied, was staged, was refused or was a retry, gives
 // one receipt of one size to its sender and asks for one tick, and a
-// withdrawal adds its payout record; a report gives one receipt and asks for
-// nothing; a tick gives no receipt, publishes the clock it applied first,
-// then only public records, and asks for a tick only to carry on.
+// withdrawal adds its payout record; a report or an event result gives one
+// receipt and asks for nothing; a tick gives no receipt, publishes the clock
+// it applied first, then only public records, and asks for a tick only to
+// carry on.
 func TestEveryReplyHasOneShape(t *testing.T) {
 	asked, archived := uint64(0), 0
 	for _, s := range run(t, script()) {
@@ -188,9 +191,12 @@ func TestEveryReplyHasOneShape(t *testing.T) {
 		}
 		before, after := state(t, s.before), state(t, s.after)
 		switch {
-		case s.Call == "process" && strings.Contains(string(s.Payload), `"type":"report"`):
-			if len(s.Events) != 1 || s.Events[0].UserID != s.Sender || after.TickSeq != before.TickSeq || body(t, s.Events[0]).Body.Type != "report" {
+		case s.Call == "process" && (strings.Contains(string(s.Payload), `"type":"report"`) || strings.Contains(string(s.Payload), `"type":"resolve"`)):
+			if len(s.Events) != 1 || s.Events[0].UserID != s.Sender || after.TickSeq != before.TickSeq {
 				t.Fatalf("%s: %d receipts", s.Name, len(s.Events))
+			}
+			if r := body(t, s.Events[0]); r.Body.Type != "report" && r.Body.Type != "resolve" || r.Body.Tick != 0 {
+				t.Fatalf("%s: receipt %s", s.Name, s.Events[0].Data)
 			}
 			for _, e := range s.AppEvents {
 				if e.EventSubType == ArchiveSubType {
@@ -230,8 +236,8 @@ func TestEveryReplyHasOneShape(t *testing.T) {
 			t.Fatalf("%s: a %s call succeeded", s.Name, s.Call)
 		}
 	}
-	if archived != 2 {
-		t.Fatalf("%d rounds archived, want 2", archived)
+	if archived != 3 {
+		t.Fatalf("%d rounds archived, want 3", archived)
 	}
 }
 
@@ -242,6 +248,9 @@ func asks(t testing.TB, st *State, e AppEvent) bool {
 	t.Helper()
 	var scheduled, open, confirm []byte
 	for _, m := range st.rounds() {
+		if m.Spec.Asset == engine.EventAsset {
+			continue
+		}
 		if m.Status == "scheduled" {
 			scheduled = append(scheduled, raw(m.Spec.RegistryRoundID)...)
 		} else if m.Status == "open" {
@@ -287,6 +296,7 @@ func TestReceiptsAreOneSize(t *testing.T) {
 		"rejected": {Type: "command", Status: "rejected", Reason: reason},
 		"staged":   {Type: "command", Status: "staged"},
 		"report":   {Type: "report", Status: "rejected", Reason: reason},
+		"resolve":  {Type: "resolve", Status: "rejected", Reason: reason},
 		"sync":     {Type: "sync", Status: "requested"},
 	}
 	longest := 0
@@ -341,6 +351,12 @@ func TestRequestsAreOneSize(t *testing.T) {
 			t.Errorf("%s: %d bytes, error %q", name, len(p), r.Error)
 		}
 	}
+	// The resolver's result, on a deployment with the event.
+	ev := newHarnessWith(t, eventParams(), alice)
+	resolve := resolvePayload(alice, 2, signResult(resolverKey, deployed(), eventID(testEvent()), 2))
+	if r := result(t, ProcessRequest(testApp, raw(alice), requestTypeProcess, resolve, ev.st)); len(resolve) != RequestBytes || r.Error != "" {
+		t.Errorf("resolve: %d bytes, error %q", len(resolve), r.Error)
+	}
 	d := testDomain()
 	d.ChainID, d.ApplicationID, d.Origin = 2651420, "18446744073709551615", "https://"+strings.Repeat("a", 253)
 	top, round := uint64(engine.MaxAtoms), strings.Repeat("ab", 32)
@@ -357,6 +373,7 @@ func TestRequestsAreOneSize(t *testing.T) {
 		}
 		longest = max(longest, len(marshal(requestEnvelope{1, d, alice, "9999999999", id, "command", requestBody{Type: "command", Command: string(marshal(c))}})))
 	}
+	longest = max(longest, len(marshal(requestEnvelope{1, d, alice, "9999999999", alice + ":resolve", "command", requestBody{Type: "resolve", Outcome: 2, Signature: "0x" + strings.Repeat("f", 130)}})))
 	// A report fits only with the deployment's own domain, which deploy checks
 	// (TestDeployRejected): here, with f = 5 and the longest request ID.
 	full := make([]byte, 224+32+blobBytes+2*(32+32*6))
@@ -823,6 +840,26 @@ func TestDeployRejected(t *testing.T) {
 		// A report request this deployment could not be sent: its origin is
 		// so long that a report with f+1 = 6 signatures no longer fits.
 		"reports that cannot fit": {edit(func(p *DeployParams) { p.Origin = "https://" + strings.Repeat("a", 200) }), ErrConfig},
+		// The event and its resolver (README section 13).
+		"an event without a resolver": {edit(func(p *DeployParams) { p.Event = testEvent() }), ErrConfig},
+		"a resolver without an event": {edit(func(p *DeployParams) { p.Resolver = resolver }), ErrConfig},
+		"the house as resolver":       {edit(func(p *DeployParams) { p.Event, p.Resolver = testEvent(), house }), ErrConfig},
+		"the trigger as resolver":     {edit(func(p *DeployParams) { p.Event, p.Resolver = testEvent(), trigger }), ErrConfig},
+		"the endpoint as resolver":    {edit(func(p *DeployParams) { p.Event, p.Resolver = testEvent(), endpoint }), ErrConfig},
+		"the vault as resolver":       {edit(func(p *DeployParams) { p.Event, p.Resolver = testEvent(), testCustody.Vault }), ErrConfig},
+		"an uppercase resolver":       {edit(func(p *DeployParams) { p.Event, p.Resolver = testEvent(), strings.ToUpper(resolver) }), ErrConfig},
+		"a resolver of zeros":         {edit(func(p *DeployParams) { p.Event, p.Resolver = testEvent(), "0x"+strings.Repeat("0", 40) }), ErrConfig},
+		"an event cut off after its end": {edit(func(p *DeployParams) {
+			p.Event, p.Resolver = testEvent(), resolver
+			p.Event.Cutoff = p.Event.End + 1
+		}), ErrConfig},
+		"an event question that is no hash": {edit(func(p *DeployParams) {
+			p.Event, p.Resolver = testEvent(), resolver
+			p.Event.Question = "0x" + strings.Repeat("0", 64)
+		}), ErrConfig},
+		"an event of null":         {[]byte(strings.Replace(string(good), `,"custody":`, `,"event":null,"custody":`, 1)), ErrParams},
+		"deposits from 0 spelled":  {[]byte(strings.TrimSuffix(string(good), "}") + `,"depositsFrom":0}`), ErrParams},
+		"deposits from past 10^15": {edit(func(p *DeployParams) { p.DepositsFrom = engine.MaxAtoms + 1 }), ErrConfig},
 	} {
 		if got := result(t, Deploy(testApp, c.params, testSalt)).Error; got != c.want {
 			t.Errorf("%s: error %q, want %q", name, got, c.want)
@@ -918,6 +955,20 @@ func TestStateRejected(t *testing.T) {
 			s.Engine.Config.Oracle.ChainID = 84532
 			s.Engine.Config.Oracle.RulesHash, _ = engine.RegistryRulesHash(s.Engine.Config)
 		}),
+		"deposits from past those seen":   edit(func(s *State) { s.DepositsFrom = s.DepositsSeen + 1 }),
+		"credits from below depositsFrom": edit(func(s *State) { s.DepositsFrom = s.DepositsSeen }),
+		// The same two with payouts made to balance in wrapped arithmetic: a
+		// negative count of refunds hidden by an extra withdrawal.
+		"deposits from past those seen, balanced": edit(func(s *State) {
+			spend(s, maxEvidence-int(s.Deposits+2*s.Withdrawals)-2)
+			s.DepositsFrom = s.DepositsSeen + 1
+			s.Payouts = s.Withdrawals + s.DepositsSeen - s.DepositsFrom - s.Deposits
+		}),
+		"credits from below depositsFrom, balanced": edit(func(s *State) {
+			s.DepositsFrom = s.DepositsSeen
+			s.Payouts = s.Withdrawals + s.DepositsSeen - s.DepositsFrom - s.Deposits
+		}),
+		"a resolver without an event": edit(func(s *State) { s.Resolver = resolver }),
 		// Valid in every other respect: only its size is refused.
 		"one byte over the bound": inflate(t, good, MaxStateBytes+1),
 	} {

@@ -202,10 +202,13 @@ func (s *State) consumeEvidence(e string) error {
 	return nil
 }
 func validateSpec(c Config, r RoundSpec) error {
-	if r.End <= r.Start {
-		return fail("invalid round specification")
+	expected, err := RoundSpec{}, fail("invalid round specification")
+	switch {
+	case r.Asset == EventAsset:
+		expected, err = NewEventSpec(c, r.Feed, r.Start, r.Cutoff, r.End, r.VoidableAfter)
+	case r.End > r.Start:
+		expected, err = NewRoundSpec(c, r.Asset, r.End-r.Start, r.Start)
 	}
-	expected, err := NewRoundSpec(c, r.Asset, r.End-r.Start, r.Start)
 	if err != nil || r != expected {
 		return fail("invalid round specification")
 	}
@@ -225,7 +228,10 @@ func validateFields(c Command) error {
 		z.Evidence = ""
 	case CreateRound:
 		z.Round = nil
-	case OpenRound, ResolveRound:
+	case ResolveRound:
+		z.Outcome = "" // an event's result; execute refuses it on a price round
+		fallthrough
+	case OpenRound:
 		z.RoundID = ""
 		z.Evidence = ""
 		z.RegistryTime = 0

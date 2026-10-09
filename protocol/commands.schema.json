@@ -105,12 +105,16 @@
         "asset": {
           "enum": [
             "BTC",
-            "ETH"
+            "ETH",
+            "EVENT"
           ]
         },
         "feed": {
           "type": "string",
-          "pattern": "^0x0003[0-9a-f]{60}$"
+          "pattern": "^0x[0-9a-f]{64}$",
+          "not": {
+            "const": "0x0000000000000000000000000000000000000000000000000000000000000000"
+          }
         },
         "start": {
           "type": "integer",
@@ -147,6 +151,23 @@
           "pattern": "^0x[0-9a-f]{64}$",
           "not": {
             "const": "0x0000000000000000000000000000000000000000000000000000000000000000"
+          }
+        }
+      },
+      "if": {
+        "properties": {
+          "asset": {
+            "enum": [
+              "BTC",
+              "ETH"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "feed": {
+            "pattern": "^0x0003[0-9a-f]{60}$"
           }
         }
       }
@@ -645,14 +666,30 @@
           "op",
           "roundId",
           "evidence",
-          "registryTime",
-          "observation"
+          "registryTime"
+        ],
+        "oneOf": [
+          {
+            "required": [
+              "observation"
+            ],
+            "properties": {
+              "outcome": false
+            }
+          },
+          {
+            "required": [
+              "outcome"
+            ],
+            "properties": {
+              "observation": false
+            }
+          }
         ],
         "properties": {
           "account": false,
           "round": false,
           "amount": false,
-          "outcome": false,
           "side": false,
           "price": false,
           "quantity": false,

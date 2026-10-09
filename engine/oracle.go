@@ -131,6 +131,27 @@ func NewRoundSpec(c Config, asset string, duration, start uint64) (RoundSpec, er
 		OpeningDeadline: start + o.ObservationWindow + o.OpeningGrace, VoidableAfter: end + o.ObservationWindow + o.VoidGrace}, nil
 }
 
+// EventAsset marks an operator-resolved Yes/No round: Up is Yes, Down is No.
+const EventAsset = "EVENT"
+
+// NewEventSpec derives an event round from the Keccak-256 of its exact rules
+// text (question) and its times: trading from start until cutoff, a result at
+// or after end, a void only after voidableAfter. Its registry round ID uses
+// asset 2, which the registry never issues, so it can never name a price
+// round; it commits the question and every time. No observation window, and
+// the opening deadline is start: the round is created open.
+func NewEventSpec(c Config, question string, start, cutoff, end, voidableAfter uint64) (RoundSpec, error) {
+	if !registryValid(c) || !hash32(question) || start == 0 || start >= cutoff || cutoff > end || end >= voidableAfter || voidableAfter > maxStreamsTimestamp {
+		return RoundSpec{}, fail("invalid event round")
+	}
+	b := append(abiUint(c.Oracle.ChainID), abiHex(c.Oracle.Registry)...)
+	b = append(append(append(b, abiHex(c.Oracle.RulesHash)...), abiUint(2)...), abiHex(question)...)
+	for _, value := range []uint64{start, cutoff, end, voidableAfter} {
+		b = append(b, abiUint(value)...)
+	}
+	return RoundSpec{Asset: EventAsset, Feed: question, RegistryRoundID: keccak(b), Start: start, End: end, Cutoff: cutoff, OpeningDeadline: start, VoidableAfter: voidableAfter}, nil
+}
+
 func validateObservation(o *StreamsObservation, feed string, boundary, window, now uint64) error {
 	if o == nil || o.FeedID != feed || !ValidOraclePrice(o.Price) || o.Decimals != 18 || !hash32(o.ReportHash) || o.ValidFromTimestamp == 0 ||
 		uint64(o.ValidFromTimestamp) > boundary || uint64(o.ObservationsTimestamp) < boundary ||

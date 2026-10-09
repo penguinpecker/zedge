@@ -80,6 +80,48 @@ func cappedReport(t testing.TB) (st, payload []byte) {
 	return marshal(s), reportPayload(alice, "0x"+hex.EncodeToString(full), uint32(end))
 }
 
+// withEvent turns the oldest round of a state at every cap, resolved and held
+// by every account, into the open event of a deployment that pins the event
+// and its resolver: the event live in one of the eight slots, with every one
+// of its times at ten digits. It returns the event's engine round ID.
+func withEvent(t testing.TB, s *State) string {
+	t.Helper()
+	e := &EventTerms{Question: testEvent().Question, Start: t0, Cutoff: s1 + 100, End: s1 + 101, VoidableAfter: MaxClock}
+	spec, err := e.spec(s.Engine.Config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := engine.RoundID(s.Engine.Config, spec)
+	for i := range s.Engine.Rounds {
+		if m := &s.Engine.Rounds[i]; m.Spec.Start == s1 {
+			old := m.ID
+			*m = engine.Round{ID: id, Spec: spec, Status: "open", Locked: m.UpSupply, UpSupply: m.UpSupply, DownSupply: m.DownSupply}
+			for j := range s.Engine.Accounts {
+				h := s.Engine.Accounts[j].Holdings
+				for k := range h {
+					if h[k].RoundID == old {
+						h[k].RoundID = id
+					}
+				}
+				slices.SortFunc(h, func(a, b engine.Holding) int { return strings.Compare(a.RoundID, b.RoundID) })
+			}
+		}
+	}
+	slices.SortFunc(s.Engine.Rounds, func(a, b engine.Round) int { return strings.Compare(a.ID, b.ID) })
+	s.Event, s.Resolver = e, resolver
+	return id
+}
+
+// cappedResolve is the state at every cap, nothing staged, with the event
+// live and held by all 32 accounts, and the resolver's Yes for it: the
+// heaviest result there is, which redeems all 32 holders in one transition.
+func cappedResolve(t testing.TB) (st, payload []byte) {
+	_, _, idle, _ := capped(t)
+	s := state(t, idle)
+	id := withEvent(t, s)
+	return marshal(s), resolvePayload(alice, 1, signResult(resolverKey, deployed(), id, 1))
+}
+
 func cappedAccounts() []string {
 	accounts := []string{alice, bob}
 	for i := len(accounts); i < MaxSliceAccounts; i++ {
@@ -260,6 +302,28 @@ func TestStateAtEveryCapFitsTheBound(t *testing.T) {
 	if top > MaxStateBytes {
 		t.Fatalf("a state at every cap can reach %d bytes; the bound is %d", top, MaxStateBytes)
 	}
+	// The same with the event (README section 13): archived, so its terms,
+	// its resolver and depositsFrom are kept beside eight price rounds; and
+	// live in one of the eight slots, held by every account.
+	archived := cappedState(t)
+	spend(archived, 0)
+	archived.Event, archived.Resolver = &EventTerms{Question: testEvent().Question, Start: t0, Cutoff: s1 + 100, End: s1 + 101, VoidableAfter: MaxClock}, resolver
+	archived.DepositsFrom, archived.DepositsSeen = 1, archived.DepositsSeen+1
+	live := cappedState(t)
+	spend(live, 0)
+	withEvent(t, live)
+	live.DepositsFrom, live.DepositsSeen = 1, live.DepositsSeen+1
+	for name, s := range map[string]*State{"archived": archived, "live": live} {
+		b, err := s.encode()
+		if err != nil {
+			t.Fatalf("event %s: %v", name, err)
+		}
+		top := widest(t, s)
+		t.Logf("state at every cap, event %s: %d bytes; at most %d with every number at its widest; bound %d", name, len(b), top, MaxStateBytes)
+		if top > MaxStateBytes {
+			t.Fatalf("a state at every cap with the event %s can reach %d bytes; the bound is %d", name, top, MaxStateBytes)
+		}
+	}
 }
 
 // Every cap is enforced where it is reached, and one tick at most activates
@@ -347,6 +411,14 @@ func TestFullBookAtEveryCap(t *testing.T) {
 	r = result(t, ProcessRequest(testApp, raw(alice), requestTypeProcess, report, st))
 	if n := state(t, r.State).Engine.Sequence - state(t, st).Engine.Sequence; r.Error != "" || body(t, r.Events[0]).Body.Status != "applied" || n != 1+1+MaxSliceAccounts+1+1 {
 		t.Fatalf("the heaviest report: %q, %d engine commands", r.Error, n)
+	}
+	// The heaviest event result: the event resolves, all 32 holders are paid,
+	// it is archived and the slot it frees is taken by the next round, in the
+	// one transition: 35 engine commands (no checkpoint: the clock stays).
+	st, resolve := cappedResolve(t)
+	r = result(t, ProcessRequest(testApp, raw(alice), requestTypeProcess, resolve, st))
+	if n := state(t, r.State).Engine.Sequence - state(t, st).Engine.Sequence; r.Error != "" || body(t, r.Events[0]).Body.Status != "applied" || n != 1+MaxSliceAccounts+1+1 {
+		t.Fatalf("the heaviest result: %q, %d engine commands", r.Error, n)
 	}
 	// Sixteen place_orders on the full book, each one the engine refuses.
 	h.st = placing

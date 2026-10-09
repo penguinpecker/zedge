@@ -436,14 +436,22 @@ func TestMatchingWorkBoundIsAtomic(t *testing.T) {
 }
 
 func FuzzCommandSequences(f *testing.F) {
-	f.Add([]byte{1, 2, 4, 3, 7, 9, 0, 2, 4, 2, 8})
-	f.Add([]byte{255, 255, 0, 1, 3, 5, 8})
-	f.Fuzz(func(t *testing.T, data []byte) {
+	f.Add([]byte{1, 2, 4, 3, 7, 9, 0, 2, 4, 2, 8}, false)
+	f.Add([]byte{255, 255, 0, 1, 3, 5, 8}, false)
+	// The same sequences on an operator-resolved event with the price round's times.
+	f.Add([]byte{1, 2, 4, 3, 7, 9, 0, 2, 4, 2, 8}, true)
+	f.Add([]byte{255, 255, 0, 1, 3, 5, 8}, true)
+	f.Add([]byte{2, 3, 9, 10, 4, 1}, true)
+	f.Fuzz(func(t *testing.T, data []byte, event bool) {
 		if len(data) > 128 {
 			data = data[:128]
 		}
 		h := newHarness(t)
 		h.setup(alice, bob, carol)
+		if event {
+			spec, _ := NewEventSpec(config(), question, 900, 1795, 1796, 88210)
+			h.round = h.must(Command{Op: CreateRound, Round: &spec}, auth, 0).RoundID
+		}
 		for _, who := range []string{alice, bob, carol} {
 			h.mint(who, 20*AtomScale)
 		}
@@ -504,6 +512,12 @@ func FuzzCommandSequences(f *testing.F) {
 		}
 		if mode == 2 {
 			h.must(Command{Op: VoidRound, RoundID: h.round, Evidence: hash([]byte("fuzz-void"))}, auth, 88211)
+		} else if event {
+			outcome := Down
+			if mode == 1 {
+				outcome = Up
+			}
+			h.must(Command{Op: ResolveRound, RoundID: h.round, Outcome: outcome, Evidence: hash([]byte("fuzz-result"))}, auth, 1800)
 		} else {
 			price := "1"
 			if mode == 1 {

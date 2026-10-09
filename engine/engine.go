@@ -197,7 +197,13 @@ func (s *State) execute(c Command, r *Receipt) error {
 		if e := validateSpec(s.Config, *c.Round); e != nil {
 			return e
 		}
-		if s.Time >= c.Round.Start {
+		// An event round is created open and may be created until its cutoff;
+		// once it has settled the time is past its end, so never again.
+		status, before := "scheduled", c.Round.Start
+		if c.Round.Asset == EventAsset {
+			status, before = "open", c.Round.Cutoff
+		}
+		if s.Time >= before {
 			return fail("round must be created before opening")
 		}
 		if len(s.Rounds) >= MaxRounds {
@@ -207,7 +213,7 @@ func (s *State) execute(c Command, r *Receipt) error {
 		if _, e := s.round(id); e == nil {
 			return fail("round already exists")
 		}
-		s.Rounds = append(s.Rounds, Round{ID: id, Spec: *c.Round, Status: "scheduled"})
+		s.Rounds = append(s.Rounds, Round{ID: id, Spec: *c.Round, Status: status})
 		r.RoundID = id
 		return nil
 	case OpenRound:
@@ -266,9 +272,18 @@ func (s *State) execute(c Command, r *Receipt) error {
 		if !isHex(c.Evidence, 64) {
 			return fail("missing settlement evidence")
 		}
-		if c.Op == ResolveRound {
+		if c.Op == ResolveRound && m.Spec.Asset == EventAsset {
+			// The posted result, Up (Yes) or Down (No), with no observation, from
+			// end until the round becomes voidable: after that only the void. An
+			// event is never scheduled, so unsettled here means open.
+			if c.RegistryTime < m.Spec.End || c.RegistryTime > m.Spec.VoidableAfter || c.Observation != nil || c.Outcome != Up && c.Outcome != Down {
+				return fail("invalid event result")
+			}
+			m.Status = "resolved"
+			m.Outcome = c.Outcome
+		} else if c.Op == ResolveRound {
 			// No upper limit: the registry resolves whenever the closing price arrives.
-			if m.Status != "open" || c.RegistryTime < m.Spec.End || validateObservation(c.Observation, m.Spec.Feed, m.Spec.End, m.Spec.ObservationWindow, c.RegistryTime) != nil {
+			if c.Outcome != "" || m.Status != "open" || c.RegistryTime < m.Spec.End || validateObservation(c.Observation, m.Spec.Feed, m.Spec.End, m.Spec.ObservationWindow, c.RegistryTime) != nil {
 				return fail("invalid closing observation")
 			}
 			m.Status = "resolved"

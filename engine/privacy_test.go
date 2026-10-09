@@ -162,6 +162,17 @@ func FuzzSnapshotDecoder(f *testing.F) {
 	b, _ := Encode(s)
 	f.Add(b)
 	f.Add([]byte(`{"version":1}`))
+	// An event round open with holdings and a resting order, then resolved.
+	h := newHarness(f)
+	h.setupEvent(alice, bob)
+	h.must(Command{Op: Mint, RoundID: h.round, Quantity: 3 * AtomScale}, alice, evStart+10)
+	h.eventOrder(alice, Up, Sell, 60, 2*AtomScale, GTC)
+	h.eventOrder(bob, Up, Buy, 60, AtomScale, IOC)
+	b, _ = Encode(h.s)
+	f.Add(b)
+	h.must(Command{Op: ResolveRound, RoundID: h.round, Outcome: Down, Evidence: hash([]byte("ev"))}, auth, evEnd)
+	b, _ = Encode(h.s)
+	f.Add(b)
 	f.Fuzz(func(t *testing.T, data []byte) {
 		if len(data) > 32768 {
 			return

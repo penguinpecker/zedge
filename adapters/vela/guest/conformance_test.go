@@ -213,6 +213,8 @@ func TestGuestSoak(t *testing.T) {
 	trusted("7 resolutions, 16 cancel_all and 16 sweeps at the caps", heavyTick, heavy)
 	reportState, reportPayload := cappedReport(t)
 	process("a report that pays 32 holders at every cap", alice, reportPayload, reportState)
+	resolveState, resolve := cappedResolve(t)
+	process("an event result that pays 32 holders at every cap", alice, resolve, resolveState)
 
 	for _, c := range calls {
 		r := result(t, c.Expect)
@@ -240,16 +242,20 @@ func TestGuestSoak(t *testing.T) {
 	t.Log(strings.TrimSpace(string(out)))
 }
 
-// busiest loads the states at the caps and applies the heaviest ticks: seven
+// busiest loads the states at the caps and applies the heaviest report and
+// event result (each pays 32 holders) and the heaviest ticks: seven
 // resolutions, sixteen cancel_all activations and sixteen sweeps on the full
 // book; sixteen cancel_all activations and sixteen sweeps; sixteen sweeps.
 func busiest(t testing.TB) []step {
 	_, cancelling, idle, tick := capped(t)
 	heavy, heavyTick := heaviest(t)
 	reportState, report := cappedReport(t)
+	resolveState, resolve := cappedResolve(t)
 	return []step{
 		{Name: "load the state at every cap with a test DON pinned", Call: "load", Payload: reportState},
 		{Name: "a report that pays 32 holders at every cap", Call: "process", Sender: alice, Payload: report},
+		{Name: "load the state at every cap with the event live", Call: "load", Payload: resolveState},
+		{Name: "an event result that pays 32 holders at every cap", Call: "process", Sender: alice, Payload: resolve},
 		{Name: "load the full book before seven rounds resolve, every account cancelling all", Call: "load", Payload: heavy},
 		{Name: "7 resolutions, 16 cancel_all activations and 16 sweeps at the caps", Call: "trusted", Payload: heavyTick},
 		{Name: "load the state at every cap, every account cancelling all", Call: "load", Payload: cancelling},

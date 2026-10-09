@@ -8,7 +8,7 @@ import { Wallet, keccak256, toUtf8Bytes } from "ethers";
 import { decrypt, exportPublicKeyToHex, generateKeyPair, importPublicKeyFromHex } from "@horizen/vela-common-ts";
 import { EvaluationSession } from "./session.ts";
 import type { EvaluationDomain } from "./session.ts";
-import { commandBody, commandId, reportBody, reportRequestId, syncBody, syncRequestId } from "./guest.ts";
+import { commandBody, commandId, reportBody, reportRequestId, resolveBody, resolveRequestId, syncBody, syncRequestId } from "./guest.ts";
 import type { EngineCommand } from "./guest.ts";
 import { REQUEST_BYTES, padBody } from "./pad.ts";
 
@@ -16,7 +16,7 @@ interface Vectors {
   domain: EvaluationDomain;
   epoch: string;
   accounts: Record<string, string>;
-  requests: { name: string; account: string; requestId: string; body: { type: string; command?: string; report?: string }; plaintext: string; padded: string }[];
+  requests: { name: string; account: string; requestId: string; body: { type: string; command?: string; report?: string; outcome?: 1 | 2; signature?: string }; plaintext: string; padded: string }[];
 }
 const vectors: Vectors = JSON.parse(readFileSync(new URL("../guest/testdata/vectors.json", import.meta.url), "utf8"));
 const reports: { feedId: string; observationsTimestamp: number; report: string }[] =
@@ -31,7 +31,7 @@ test("padded requests are the one length the guest accepts, byte for byte", asyn
     { id: vectors.epoch, enclavePublicKey: await exportPublicKeyToHex(enclave.publicKey) });
   await session.unlock(wallet("alice"));
   const user = await importPublicKeyFromHex(Buffer.from(await session.associationPayload()).toString("hex"));
-  assert.equal(vectors.requests.length, 4);
+  assert.equal(vectors.requests.length, 5);
   for (const vector of vectors.requests) {
     let body: { type: string } = syncBody();
     let requestId = syncRequestId(session.account);
@@ -44,6 +44,10 @@ test("padded requests are the one length the guest accepts, byte for byte", asyn
       const at = Number(vector.requestId.split(":").at(-1));
       body = reportBody(reports.find(r => r.feedId.startsWith("0x00039d9e") && r.observationsTimestamp === at)!.report);
       requestId = reportRequestId(session.account, at);
+    }
+    if (vector.body.type === "resolve") {
+      body = resolveBody(vector.body.outcome!, vector.body.signature!);
+      requestId = resolveRequestId(session.account);
     }
     const padded = padBody(session, requestId, body);
     assert.match(padded.pad, /^0*$/, vector.name);

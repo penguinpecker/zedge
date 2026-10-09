@@ -19,10 +19,12 @@ type envelopeDomain struct {
 	Origin                 string `json:"origin"`
 }
 type requestBody struct {
-	Type    string `json:"type"`              // "command", "sync" or "report"
-	Command string `json:"command,omitempty"` // canonical engine command JSON
-	Report  string `json:"report,omitempty"`  // standard base64 of a Chainlink full report
-	Pad     string `json:"pad"`               // zeros, so that the envelope is RequestBytes long
+	Type      string `json:"type"`                // "command", "sync", "report" or "resolve"
+	Command   string `json:"command,omitempty"`   // canonical engine command JSON
+	Report    string `json:"report,omitempty"`    // standard base64 of a Chainlink full report
+	Outcome   uint64 `json:"outcome,omitempty"`   // resolve: 1 Yes (Up) or 2 No (Down)
+	Signature string `json:"signature,omitempty"` // resolve: the resolver's EIP-712 signature, 0x then r, s and v (27 or 28) in lowercase hex
+	Pad       string `json:"pad"`                 // zeros, so that the envelope is RequestBytes long
 }
 type requestEnvelope struct {
 	Version   uint32         `json:"version"`
@@ -58,8 +60,9 @@ type receiptAt struct {
 }
 
 // receiptBody is what an account is told. Type "command" answers the account's
-// own command, "sync" its own sync, "report" its own Chainlink report. Every
-// receipt is produced by a request of the account it goes to.
+// own command, "sync" its own sync, "report" its own Chainlink report,
+// "resolve" the event result it carried. Every receipt is produced by a
+// request of the account it goes to.
 type receiptBody struct {
 	Type       string                  `json:"type"`
 	Status     string                  `json:"status"`               // applied, retry, rejected, staged, requested
@@ -69,7 +72,7 @@ type receiptBody struct {
 	Outcome    *outcomeReceipt         `json:"outcome,omitempty"`    // what a tick did with this account's staged command
 	View       *engine.AccountSnapshot `json:"view,omitempty"`       // the account after this request; absent if it is not registered
 	At         receiptAt               `json:"at"`
-	Tick       uint64                  `json:"tick,omitempty"` // the tick this request asked for; absent on a report
+	Tick       uint64                  `json:"tick,omitempty"` // the tick this request asked for; absent on a report or a resolve
 	Pad        string                  `json:"pad"`            // zeros, to the size class
 }
 

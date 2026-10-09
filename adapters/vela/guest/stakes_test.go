@@ -361,4 +361,30 @@ func TestHorizenMainnetDeployment(t *testing.T) {
 	if testConfig().Oracle.CutoffBuffer >= MinPublicCutoffBuffer {
 		t.Error("the local deployment no longer shows that Anvil has no floor")
 	}
+
+	// The combined application of 2026-10-09 (README section 13): BTC 900 and
+	// the House event with the owner's times, its resolver and the first Base
+	// deposit index it reads. The question is a stand-in for the Keccak-256 of
+	// the published rules text; the registry ID is cast's (keccak of
+	// abi.encode(26514, registry, rulesHash, 2, question, start, cutoff, end,
+	// voidableAfter)).
+	ev := mainnetParams()
+	ev.Event = &EventTerms{Question: "0x8b274231f25af5afa0b3e27addf25da81482d7911d11663d3f9f6bafa0eeb4bd", Start: 1791504000, Cutoff: 1793743200, End: 1793743201, VoidableAfter: 1801439999}
+	ev.Resolver, ev.DepositsFrom = resolver, 41
+	spec, err := ev.Event.spec(ev.Engine)
+	if err != nil || spec.RegistryRoundID != "0x74cc1384ba1a7ff802800f94848df98128a8d2cddb0f4221a39734e439a61943" || spec.End%900 == 0 {
+		t.Fatalf("the House event: %+v %v", spec, err)
+	}
+	r = result(t, Deploy(testApp, marshal(ev), testSalt))
+	if s := state(t, r.State); r.Error != "" || s.DepositsSeen != 41 || len(s.Engine.Rounds) != 0 {
+		t.Fatalf("mainnet deploy with the event: %q", r.Error)
+	}
+	sync := padded(requestEnvelope{1, state(t, r.State).domain(), keeper, epoch, keeper + ":sync", "command", requestBody{Type: "sync"}})
+	r = result(t, ProcessRequest(testApp, raw(keeper), requestTypeProcess, sync, r.State))
+	tick := words(3, HorizenMainnet, 0, 1000, 1791600000, 1, 0, 0)
+	copy(tick[76:96], raw(endpoint))
+	r = result(t, TrustedRequest(testApp, tick, r.State))
+	if s := state(t, r.State); r.Error != "" || len(s.Engine.Rounds) != 3 || status(s, engine.RoundID(s.Engine.Config, spec)) != "open" {
+		t.Fatalf("the first mainnet tick: %q %+v", r.Error, s.Engine.Rounds)
+	}
 }

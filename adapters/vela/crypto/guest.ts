@@ -1,10 +1,13 @@
 /** Evaluation-only client side of the ZEDGE Vela guest (adapters/vela/guest).
- * The canonical engine-command encoder, the three envelope bodies the guest
- * accepts, the request IDs its receipts carry and decoders for its public
- * records. No keys, RPC or storage.
+ * The canonical engine-command encoder, the four envelope bodies the guest
+ * accepts, the request IDs its receipts carry, decoders for its public
+ * records, and the operator-resolved event's round and signed result. No
+ * keys, RPC or storage.
  * The protocol is adapters/vela/guest/README.md; the shared test vectors are
  * adapters/vela/guest/testdata/vectors.json.
  */
+import { AbiCoder, keccak256, sha256, toUtf8Bytes } from "ethers";
+
 export interface EngineDomain {
   chainId: number;
   endpoint: string;
@@ -74,7 +77,7 @@ export interface EngineReceipt {
  * multiple of RECEIPT_BYTES. */
 export const RECEIPT_BYTES = 8192;
 export interface ReceiptBody {
-  type: "command" | "sync" | "report";
+  type: "command" | "sync" | "report" | "resolve";
   /** "staged": a book command waits for the tick that applies it; its result
    * comes back as `outcome` with the account's next request. */
   status: "applied" | "retry" | "rejected" | "staged" | "requested";
@@ -103,7 +106,7 @@ export interface ReceiptBody {
    * it. Compare `timestamp` with the block that carried the request; a large
    * gap means the clock was stale or held back. All zero before the first tick. */
   at: { tick: number; block: number; timestamp: number };
-  /** The tick this request asked for. Absent on a report receipt: a report asks for none. */
+  /** The tick this request asked for. Absent on a report or resolve receipt: neither asks for one. */
   tick?: number;
   /** Zeros. Ignore. */
   pad: string;
@@ -212,6 +215,67 @@ export function reportBody(fullReportHex: string): { type: "report"; report: str
   return { type: "report", report: btoa(binary) };
 }
 
+/** The terms of a deployment's operator-resolved Yes/No event (guest README
+ * section 13), as its deploy parameters carry them: the 0x Keccak-256 of the
+ * exact rules text, and its times in UTC seconds. */
+export interface EventTerms {
+  question: string;
+  start: number;
+  cutoff: number;
+  end: number;
+  voidableAfter: number;
+}
+
+/** The event's engine round exactly as engine.NewEventSpec and engine.RoundID
+ * derive it, from the deployment's canonical engine configuration JSON (a
+ * manifest's engineConfigJson, application ID included). `id` (64 hex, no 0x)
+ * names the round in commands, holdings and the resolver's signed result;
+ * `spec.registryRoundId` names it in the guest's settle record. Up is Yes,
+ * Down is No. */
+export function eventRound(engineConfigJson: string, event: EventTerms): { id: string; spec: EngineRound } {
+  const { question, start, cutoff, end, voidableAfter } = event;
+  // A fraction or an unsafe integer is refused by the ABI encoder below.
+  if (!/^0x[0-9a-f]{64}$/.test(question) || /^0x0{64}$/.test(question) || !(0 < start && start < cutoff && cutoff <= end && end < voidableAfter && voidableAfter <= 0xffff_ffff)) {
+    throw new Error("Invalid event terms.");
+  }
+  const o = (JSON.parse(engineConfigJson) as { oracle: { chainId: number; registry: string; rulesHash: string } }).oracle;
+  // Asset 2: a registry asset that does not exist, so this can never name a price round.
+  const registryRoundId = keccak256(AbiCoder.defaultAbiCoder().encode(["uint256", "address", "bytes32", "uint8", "bytes32", "uint64", "uint64", "uint64", "uint64"],
+    [o.chainId, o.registry, o.rulesHash, 2, question, start, cutoff, end, voidableAfter]));
+  const spec: EngineRound = { asset: "EVENT", feed: question, registryRoundId, start, end, cutoff, observationWindow: 0, openingDeadline: start, voidableAfter };
+  return { id: sha256(toUtf8Bytes(`{"config":${engineConfigJson},"round":${JSON.stringify(spec)}}`)).slice(2), spec };
+}
+
+export const EVENT_RESULT_TYPES = {
+  EventResult: [{ name: "applicationId", type: "uint64" }, { name: "roundId", type: "bytes32" }, { name: "outcome", type: "uint8" }],
+} as const;
+
+/** The EIP-712 typed data the event's resolver signs: outcome 1 (Yes, Up) or
+ * 2 (No, Down) for engine round `roundId` of this deployment (engine domain:
+ * chain, endpoint, application). viem: `account.signTypedData(t)`; ethers:
+ * `wallet.signTypedData(t.domain, t.types, t.message)`. */
+export function eventResultTypedData(domain: EngineDomain, roundId: string, outcome: 1 | 2) {
+  if (!/^[0-9a-f]{64}$/.test(roundId) || (outcome !== 1 && outcome !== 2)) throw new Error("An event result is outcome 1 or 2 for a 64-hex engine round ID.");
+  return { domain: { name: "ZEDGE Event", version: "1", chainId: BigInt(domain.chainId), verifyingContract: domain.endpoint }, types: EVENT_RESULT_TYPES,
+    primaryType: "EventResult" as const, message: { applicationId: BigInt(domain.applicationId), roundId: `0x${roundId}`, outcome } };
+}
+
+/** The request ID an event result's envelope must carry, and of the receipt it gets. */
+export function resolveRequestId(account: string): string {
+  return `${account}:resolve`;
+}
+/** Envelope body that hands the guest the resolver's signed result, padded
+ * like every request (pad.ts):
+ * `session.encryptCommand(resolveRequestId(account), padBody(session, resolveRequestId(account), resolveBody(outcome, signature)))`.
+ * Anyone may send it: the guest checks the signature against the resolver
+ * pinned at deploy. `signature` is what signTypedData returns: 0x, r, s, v. */
+export function resolveBody(outcome: 1 | 2, signature: string): { type: "resolve"; outcome: 1 | 2; signature: string } {
+  if ((outcome !== 1 && outcome !== 2) || !/^0x[0-9a-f]{128}(1b|1c)$/.test(signature)) {
+    throw new Error("An event result is outcome 1 or 2 and a 65-byte signature in lowercase 0x hex with v 27 or 28.");
+  }
+  return { type: "resolve", outcome, signature };
+}
+
 /** SHA-256 of each public record's label: the app event subtypes the guest
  * publishes (guest README section 11). */
 export const SUBTYPES = {
@@ -235,8 +299,10 @@ const hash = (word: string) => `0x${word}`;
 const addr = (word: string) => `0x${word.slice(24)}`;
 
 /** A round the guest opened (kind 1), resolved (2) or voided (3), from a
- * report (source 1), the registry (2) or its own void rule (3). Outcome 1 Up,
- * 2 Down, 3 Void, 0 while open. Price is the 18-decimal integer. */
+ * report (source 1), the registry (2), its own void rule (3, the event's
+ * timeout void included) or the event's resolver (4). Outcome 1 Up (Yes),
+ * 2 Down (No), 3 Void, 0 while open. Price is the 18-decimal integer; it,
+ * the time and the report hash are zero for the event. */
 export function decodeSettle(data: string) {
   const w = recordWords(data, 7);
   return { roundId: hash(w[0]!), kind: Number(big(w[1]!)), outcome: Number(big(w[2]!)), price: big(w[3]!), observationsTimestamp: Number(big(w[4]!)),
