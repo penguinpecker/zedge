@@ -17,9 +17,13 @@ export type Quote = { cents: number; shares: number };
 /** The house's lowest resting sell (`ask`) and highest resting buy (`bid`) on each side, null where it has none, for the round that
  * starts at `start` (unix seconds), as of `at` (ms, the house bot's latest order state). */
 export type House = { at: number; start: number; up: { ask: Quote | null; bid: Quote | null }; down: { ask: Quote | null; bid: Quote | null } };
+/** The event house's quotes for the event's engine round `round` (0x and 64 hex), as of `at` (ms): up is Yes, down is No. */
+export type EventHouse = { at: number; round: Hex; up: House["up"]; down: House["down"] };
 /** The previous, current and next rounds, the latest minute price and the house's quotes (null when the indexer's copy is over 20 s
- * old or of another round). */
-export type Live = { head: Head; rounds: ApiRound[]; price: Tick | null; house: House | null };
+ * old or of another round), and the event house's (null when over 60 s old, after the event's cutoff, or none). */
+export type Live = { head: Head; rounds: ApiRound[]; price: Tick | null; house: House | null; event: EventHouse | null };
+/** The event's public settle record, once it has one (/v1/event): where it is, for confirmSettle. */
+export type ApiEvent = { head: Head; round: Hex; registryRoundId: Hex; settle: SettleRef | null };
 export type ApiRequest = { requestId: Hex; block: bigint; logIndex: number; txHash: Hex; completed: { block: bigint; txHash: Hex; status: number } | null; ciphertexts: Uint8Array[] };
 /** One page of an account's requests, newest first; `more` when older ones exist. */
 export type AccountPage = { head: Head; more: boolean; requests: ApiRequest[] };
@@ -80,10 +84,19 @@ function house(value: unknown): House | null {
     return { at: h.at as number, start, up: quotes(h.up), down: quotes(h.down) };
   } catch { return null; }
 }
+/** The event house's quotes, or null, read on their own like the house's: a malformed copy costs only the event's prices. */
+function eventHouse(value: unknown): EventHouse | null {
+  if (value === null || value === undefined) return null;
+  try {
+    const e = obj(value);
+    need(Object.keys(e).sort().join() === "at,down,round,up" && Number.isSafeInteger(e.at) && (e.at as number) > 0);
+    return { at: e.at as number, round: hash(e.round), up: quotes(e.up), down: quotes(e.down) };
+  } catch { return null; }
+}
 function live(body: unknown): Live {
   const v = obj(body), price = v.price === null ? null : toTicks({ prices: [v.price] })[0];
   need(price !== undefined);
-  return { head: head(v.head), rounds: rounds(v.rounds, 4), price, house: house(v.house) };
+  return { head: head(v.head), rounds: rounds(v.rounds, 4), price, house: house(v.house), event: eventHouse(v.event) };
 }
 function page(body: unknown): AccountPage {
   const v = obj(body);
@@ -109,6 +122,8 @@ export function readApi(fetcher: Fetcher = (url, init) => fetch(url, init)) {
     btc: (from: number, to: number) => read(fetcher, `/v1/btc?from=${from}&to=${to}`, 5_000, (b) => { need(Array.isArray(obj(b).prices)); return toTicks(b); }),
     /** The last 24 hours of rounds and the current one. */
     rounds: () => read(fetcher, "/v1/rounds", 3_000, (b) => { const v = obj(b); return { head: head(v.head), rounds: rounds(v.rounds, 200) }; }),
+    /** The event's settle record, null until it has one. */
+    event: () => read(fetcher, "/v1/event", 5_000, (b): ApiEvent => { const v = obj(b); return { head: head(v.head), round: hash(v.round), registryRoundId: hash(v.registryRoundId), settle: settleRef(v.settle) }; }),
     /** One page of this account's requests, newest first, below `before` (the last one of the page above). */
     account: (address: string, before?: { block: number; logIndex: number }, limit = 50) => read(fetcher, "/v1/account", 8_000, page,
       { method: "POST", cache: "no-store", headers: { "content-type": "application/json" }, body: JSON.stringify({ address, ...(before ? { before } : {}), limit }) }),

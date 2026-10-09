@@ -1,0 +1,51 @@
+ZEDGE market rules: US House 2026
+
+Question: Will Democrats win control of the US House in the 3 November 2026 midterms?
+
+1. Yes and No
+Yes wins if the Democratic Party wins control of the US House of Representatives in the elections for the 120th Congress, as defined in rule 2. Otherwise No wins, unless the market is void under rule 7.
+On the exchange, Yes is the outcome Up and No is the outcome Down.
+
+2. Control
+A party wins control if members elected under its label win at least 218 of the 435 voting seats. If no party wins 218 seats, control belongs to the party of the first Speaker elected by the 120th Congress.
+- Delegates and the Resident Commissioner do not count.
+- Minnesota's Democratic-Farmer-Labor Party and North Dakota's Democratic-NPL Party count as Democratic.
+- A seat counts for the party whose label its winner was elected under, even if the winner later changes party or leaves the seat.
+- Runoffs decide their seats.
+- An independent counts for a party only if they join its caucus, or announce that they will, by 4 January 2027 23:59 Eastern Time. Otherwise they count for no party.
+- Special elections to the current (119th) Congress do not count.
+
+3. Sources, in this order
+(a) The Associated Press call that a party has won a House majority, matched by at least two of ABC News, CBS News, CNN, Fox News, NBC News and Decision Desk HQ, with none of them withdrawing its call.
+(b) If (a) is not met by 15 December 2026 00:00 UTC, or the outlets disagree: certified results as compiled by the Clerk of the House.
+(c) If (b) cannot decide it: the Speaker test in rule 2.
+
+4. Who posts the result
+ZEDGE, the operator of this exchange, posts the result. It signs the result with its resolver wallet, whose address is published with this market's deployment record. The exchange accepts a result only with that signature, and only from 3 November 2026 22:00:01 UTC.
+The operator posts no earlier than 24 hours after source (a) is met, and aims to post within 72 hours after that. If the result comes from (b) or (c), it aims to post within 72 hours of that source being available. The post names the sources used.
+A result counts as posted when the exchange accepts it. A posted result is final: it cannot be changed or reversed.
+
+5. Trading
+An order is accepted only if the exchange processes it before 3 November 2026 22:00:00 UTC (5:00 pm Eastern Time). Orders still resting then are cancelled. The house may stop quoting earlier.
+After that time you cannot buy or sell. You can still merge one Yes share and one No share back into 1 USDC.
+Money in this market stays locked until the result is posted or the market is void. Before the cutoff you can sell only if someone is buying.
+
+6. Payout
+Each winning share pays 1 USDC and each losing share pays 0. Winnings are paid into your trading balance when the result is posted, or shortly after.
+
+7. Void
+If no result has been posted by 31 January 2027 23:59:59 UTC, the market is void and every Yes share and every No share pays 0.50 USDC. This applies whatever the reason, for example if the elections are postponed or the outcome cannot be decided under these rules.
+A void does not refund the price you paid. With Yes near 90 cents, a void moves about 40 cents per share from Yes holders to No holders.
+The operator cannot void the market in any other way. It can, however, cause a void by not posting a result.
+
+8. Limits
+A share pays 1 USDC. For each account, the gap between what it would be paid if Yes wins and if No wins may not pass 50 USDC, counting each of its resting orders as filled or not, whichever makes the gap wider. Added up over all accounts, the gaps of the shares they hold, including shares offered for sale, may not pass 200 USDC; this includes the house that quotes this market. An order that would pass a limit is refused. The exchange's BTC house account is exempt from both limits.
+
+9. Fees
+There is no trading fee.
+
+10. Conflict of interest
+The operator posts the result and also runs the house that quotes this market. The house is often the other side of your trade and may hold positions in this market. A late or missing result, which ends in a void, can benefit a house that holds the less likely side.
+
+11. Where it is offered
+Use this market only where doing so is lawful for you.

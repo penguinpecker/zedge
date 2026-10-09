@@ -2,7 +2,7 @@
  * the 1 s clock, and the ticket's prices, the house's quotes or an estimate. */
 import { countdown } from "../lib/market.ts";
 import { buyLimit, sellLimit } from "./fair.ts";
-import type { ApiRound, House } from "./read-api.ts";
+import type { ApiRound, EventHouse, House } from "./read-api.ts";
 
 /** A round's start, order cutoff and end, in unix seconds. */
 export type RoundTimes = { start: number; cutoff: number; end: number };
@@ -46,6 +46,11 @@ export const HOUSE_STALE_MS = 30_000;
 /** The house's quotes when they are for the round starting at `start` and fresh at `nowMs` (chain time), else null. */
 export const houseFor = (house: House | null | undefined, start: number | null, nowMs: number): House | null =>
   house && house.start === start && nowMs - house.at <= HOUSE_STALE_MS ? house : null;
+/** How old the event house's quotes may be: the indexer's own 60 s, the page's 2 s read and a margin. */
+export const EVENT_STALE_MS = 90_000;
+/** The event house's quotes when they are for engine round `id` (64 hex) and fresh at `nowMs` (chain time), else null. */
+export const eventHouseFor = (event: EventHouse | null | undefined, id: string | null, nowMs: number): EventHouse | null =>
+  event && id && event.round === `0x${id}` && nowMs - event.at <= EVENT_STALE_MS ? event : null;
 
 /** One side on the ticket: the price shown, the buy's and the close's limits, and whether they are estimates. */
 export type SidePrice = { ask: number | null; buy: number | null; sell: number | null; est: boolean };
@@ -53,7 +58,7 @@ export type SidePrice = { ask: number | null; buy: number | null; sell: number |
  * A fill executes at the resting order's price (engine/matching.go), so a buy at the house's ask pays that ask or less, and a
  * close at its bid gets that bid or more. Without them: the ask for the house's fair value `up` (askCents), marked est., and the
  * one-click limits with their slack (fair.ts). */
-export function sidePrice(house: House | null, up: number | null, side: "up" | "down"): SidePrice {
+export function sidePrice(house: Pick<House, "up" | "down"> | null, up: number | null, side: "up" | "down"): SidePrice {
   if (house) { const q = house[side]; return { ask: q.ask?.cents ?? null, buy: q.ask?.cents ?? null, sell: q.bid?.cents ?? null, est: false }; }
   const p = up === null ? null : side === "up" ? up : 1 - up;
   return p === null ? { ask: null, buy: null, sell: null, est: true } : { ask: askCents(p), buy: buyLimit(p), sell: sellLimit(p), est: true };
@@ -69,6 +74,11 @@ export function tradable(registry: { phase: number; times: RoundTimes; opening: 
   if (engine && phase <= 2 && now >= engine.times.start && now < engine.times.cutoff - ORDER_MARGIN) return { ...engine.times, opening: engine.opening };
   return null;
 }
+
+/** The Portfolio's name for a holding: the event's round (by name), a BTC round of the last day (by its start, in `starts`), or an
+ * earlier BTC round. */
+export const holdingKind = (roundId: string, starts: ReadonlyMap<string, number>, eventId: string | null): "event" | "round" | "earlier" =>
+  roundId === eventId ? "event" : starts.has(roundId) ? "round" : "earlier";
 
 export type RoundResult = { start: number; outcome: "up" | "down" | "void" | null; open: bigint | null; close: bigint | null };
 /** The results strip: every round that ended in the last 24 hours, oldest first, from the read API's rounds with the shared live

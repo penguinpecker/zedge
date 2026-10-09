@@ -21,7 +21,7 @@ test("the feed reads its day from /v1/btc once, then each minute from the shared
   const bodies: Record<string, unknown> = { "/api/btc": { prices: [[M + 180, 104]] } };
   const env: FeedEnv = { fetch: async (url) => { urls.push(url); return { ok: ok || url !== "/api/btc", json: async () => bodies[url] ?? { prices: [[M, 101], [M + 60, 102]] } }; }, now: () => now,
     setTimeout: (fn) => { timers.push(fn); return 0 as unknown as ReturnType<typeof setTimeout> }, clearTimeout: () => { timers.length = 0; },
-    live: async () => ({ head: { block: 1, time: M }, rounds: [], price: price && { t: price[0] * 1000, p: price[1] }, house: null }) };
+    live: async () => ({ head: { block: 1, time: M }, rounds: [], price: price && { t: price[0] * 1000, p: price[1] }, house: null, event: null }) };
   const next = async () => { timers.shift()!(); await new Promise((r) => setImmediate(r)); };
   const feed = createPriceFeed(M * 1000, (M + 900) * 1000, env);
   feed.resume(); await new Promise((r) => setImmediate(r));
@@ -61,7 +61,7 @@ test("a missing minute costs one point, not two, and merging reads never shrinks
   let price = { t: (M + 180) * 1000, p: 104 };
   const timers: (() => void)[] = [];
   const env: FeedEnv = { fetch: async () => ({ ok: true, json: async () => ({ prices: [[M, 101], [M + 60, 102], [M + 180, 104]] }) }), now: () => (M + 245) * 1000,
-    setTimeout: (fn) => { timers.push(fn); return 0 as unknown as ReturnType<typeof setTimeout> }, clearTimeout: () => {}, live: async () => ({ head: { block: 1, time: M }, rounds: [], price, house: null }) };
+    setTimeout: (fn) => { timers.push(fn); return 0 as unknown as ReturnType<typeof setTimeout> }, clearTimeout: () => {}, live: async () => ({ head: { block: 1, time: M }, rounds: [], price, house: null, event: null }) };
   const feed = createPriceFeed(M * 1000, (M + 300) * 1000, env);
   feed.resume(); await new Promise((r) => setImmediate(r));
   price = { t: (M + 240) * 1000, p: 105 };

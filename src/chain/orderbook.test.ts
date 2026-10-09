@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import { concat, encodeAbiParameters, hashTypedData, keccak256, parseAbiParameters, recoverTypedDataAddress, stringToHex, type Address, type Hex } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
-import { OPERATOR_KEYS_CHANGED, REQUEST_TYPEHASH, engineRound, normalizeSignature, parseOrderbookManifest, permitDomainSeparator, requestTypedData, verifyOrderbook, type ConfiguredOrderbook } from "./orderbook-manifest.ts";
+import { OPERATOR_KEYS_CHANGED, REQUEST_TYPEHASH, WITHDRAW_ONLY_TRIGGER, engineRound, normalizeSignature, parseOrderbookManifest, permitDomainSeparator, requestTypedData, runsPinnedCode, verifyOrderbook, type ConfiguredOrderbook } from "./orderbook-manifest.ts";
 import { parseStreamsManifest, StreamsMismatchError, type StreamsReader } from "./streams-manifest.ts";
 import { BASE_USDC, SUBTYPES, decodeCredit, decodePayout, decodeSettle, payoutTypedData, usdcPermitTypedData } from "./vault.ts";
 
@@ -165,6 +165,7 @@ function readers(overrides: Record<string, unknown> = {}, failing = ""): [Stream
   for (const pin of [m.endpoint, m.authenticator, m.tokenAllowlist]) codes[pin.address] = code(pin.runtimeCodeHash);
   const slots: Record<string, Hex> = { [t.address]: `0x${t.implementation.slice(2).padStart(64, "0")}`, [v.address]: `0x${v.implementation.slice(2).padStart(64, "0")}`,
     [m.custody.inbox.address]: `0x${m.custody.inbox.implementation.slice(2).padStart(64, "0")}`, ...(overrides.slots as Record<string, Hex> | undefined) };
+  Object.assign(codes, overrides.codes as Record<string, Hex> | undefined);
   const one = (chainId: number): StreamsReader => ({
     chainId: async () => Number(overrides[`chainId:${chainId}`] ?? chainId),
     code: async (address) => codes[address],
@@ -210,4 +211,26 @@ test("verification passes on the deployment as read, and fails closed on a new e
   // The engine must read the verified streams release.
   const other = structuredClone(streams); other.parameters.cutoffBuffer = "31";
   await assert.rejects(verifyOrderbook(m, other, ...readers()), StreamsMismatchError);
+});
+
+test("a trigger upgraded to the withdraw-only implementation verifies as withdraw-only, pinned by code wherever it was deployed; any other code fails closed", async () => {
+  assert.deepEqual([WITHDRAW_ONLY_TRIGGER.self, /^0x[0-9a-f]{64}$/.test(WITHDRAW_ONLY_TRIGGER.codeHash)], [[2711, 2752, 3057], true]);
+  const m = verifiable(), t = m.trigger.address, at = "0x2bb67a7177ef9351df8a0ce61b4194d34f06da3d" as const, other = "0x6ab7e3d929bb630d4e0f26d1e1313e697a4b86d7" as const;
+  const self = (a: string) => a.slice(2).padStart(64, "0");
+  // A stand-in runtime of 3,100 bytes holding its own address at the three immutable offsets; the pin is that code with them zeroed.
+  const body = "5b".repeat(3_100), code = (a: string) => `0x${[2711, 2752, 3057].reduce((c, o) => c.slice(0, 2 * o) + self(a) + c.slice(2 * o + 64), body)}` as Hex;
+  const pin = { codeHash: keccak256(code(`0x${"0".repeat(40)}`)), self: WITHDRAW_ONLY_TRIGGER.self };
+  const slot = (a: string) => ({ slots: { [t]: `0x${self(a)}` as Hex } });
+  assert.equal(runsPinnedCode(code(at), at, pin), true);
+  assert.equal((await verifyOrderbook(m, streams, ...readers({ ...slot(at), codes: { [at]: code(at) } }), pin)).withdrawOnly, true);
+  assert.equal((await verifyOrderbook(m, streams, ...readers({ ...slot(other), codes: { [other]: code(other) } }), pin)).withdrawOnly, true, "the deployer's nonce decides the address");
+  assert.equal((await verifyOrderbook(m, streams, ...readers(), pin)).withdrawOnly, undefined, "the manifest's own implementation");
+  for (const [why, over] of [
+    ["code copied from another address", { ...slot(at), codes: { [at]: code(other) } }],
+    ["other code", { ...slot(at), codes: { [at]: `0x${"60".repeat(3_100)}` } }],
+    ["no code", slot(at)],
+    ["a dirty slot", { slots: { [t]: `0x01${self(at).slice(2)}` }, codes: { [at]: code(at) } }],
+  ] as const) await assert.rejects(verifyOrderbook(m, streams, ...readers(over as Record<string, unknown>), pin), StreamsMismatchError, why);
+  // The real pin does not match the stand-in.
+  await assert.rejects(verifyOrderbook(m, streams, ...readers({ ...slot(at), codes: { [at]: code(at) } })), StreamsMismatchError);
 });

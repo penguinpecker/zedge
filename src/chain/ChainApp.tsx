@@ -9,7 +9,7 @@ import { BASE_RPC, DEFAULT_NETWORK, isNetworkId, NETWORKS, parseAtomicAmount, ty
 import { useChainWallet, WalletBoundary, type ChainWallet } from "./privy.tsx";
 import { fairUp, realizedSigma, stakeRoom } from "./fair.ts";
 import { chainClient, checkDeployment, checkOrderbook, loadManifest, loadOrderbook, observationPrice, exactObservationPrice, PHASES, priceCaptions, readChain, readRound, type ChainSnapshot, type RoundRead, type RoundState } from "./gateway.ts";
-import { clockPhase, countdownLine, houseFor, ORDER_MARGIN, roundResults, sidePrice, tradable, versus, type RoundResult, type RoundTimes } from "./market-view.ts";
+import { clockPhase, countdownLine, eventHouseFor, houseFor, ORDER_MARGIN, roundResults, sidePrice, tradable, versus, type RoundResult, type RoundTimes } from "./market-view.ts";
 import { confirmSettle, liveNow, readApi, type ApiRound, type House, type Live } from "./read-api.ts";
 import { createPriceFeed } from "./price-feed.ts";
 import { engineRound, LOT, OPERATOR_KEYS_CHANGED, type OrderbookManifest, type VerifiedOrderbook } from "./orderbook-manifest.ts";
@@ -20,6 +20,8 @@ import type { DeploymentManifest, VerifiedDeployment } from "./manifest.ts";
 import { STREAMS_MISMATCH_REASON, STREAMS_PLANNED_REASON, StreamsMismatchError } from "./streams-manifest.ts";
 import { rpcCooldownRemaining } from "./rpc.ts";
 import { createVerificationCache, verificationIsFresh, type ReadOnlyVerification } from "./verification-cache.ts";
+import { loadEvent, type PoliticsEvent } from "./events-manifest.ts";
+import EventMarket, { SIDE_NAME } from "./EventMarket.tsx";
 import "./chain.css";
 
 const LiveChart = lazy(() => import("./LiveChart.tsx"));
@@ -112,7 +114,9 @@ function Ticket({ priv, orderbook, wallet, round, slot, now, up, house, outcome,
   const wanted = limit && pay > 0 ? sharesFor(pay, limit) : 0, quantity = Math.min(wanted, room, offered);
   const toCutoff = round ? round.cutoff - now : null;
   const rest = waitingOrder(view, now);
-  const trading = Boolean(book && unlocked && round && toCutoff !== null && toCutoff > ORDER_MARGIN && !priv.busy && !rest);
+  // A book frozen for its replacement (orderbook-manifest.ts withdrawOnly) takes no deposit and no order: only withdrawals.
+  const frozen = Boolean(orderbook?.withdrawOnly);
+  const trading = Boolean(book && !frozen && unlocked && round && toCutoff !== null && toCutoff > ORDER_MARGIN && !priv.busy && !rest);
   const held = view && book ? view.holdings.find((h) => h.roundId === engineRound(book, round?.start ?? slot).id) : undefined;
   const free = (side: Side) => Math.floor((side === "up" ? held?.up ?? 0 : held?.down ?? 0) / LOT) * LOT;
   const total = (side: Side) => side === "up" ? (held?.up ?? 0) + (held?.reservedUp ?? 0) : (held?.down ?? 0) + (held?.reservedDown ?? 0);
@@ -128,6 +132,7 @@ function Ticket({ priv, orderbook, wallet, round, slot, now, up, house, outcome,
   const dep = priv.snapshot?.actions.find((a) => a.action === "Deposit"), moving = Boolean(dep && !dep.final);
   const [label, action, enabled] = !wallet.session ? ["Sign in to trade", onAccount, wallet.configured && !wallet.pending]
     : !book ? [loading ? "Loading…" : "Trading is not open yet", onAccount, false]
+    : frozen ? ["Withdraw your balance", onFunds, true]
     : !unlocked ? [priv.busy ? "Unlocking your account…" : "Unlock your account", () => void priv.run((a) => a.unlock()), !priv.busy]
     : cash === 0 ? depositing || moving ? [depositing ? "Depositing…" : "Deposit on its way…", deposit, false]
       // Credited, but the sync after it failed: the balance is short, so read it again rather than offer another deposit.
@@ -194,6 +199,9 @@ function ChainMarkets() {
   const [connection, setConnection] = useState<Connection | null>(null);
   const [marketIndex, setMarketIndex] = useState(0);
   const [page, setPage] = useState<"markets" | "portfolio" | "history">("markets");
+  // Crypto (the BTC rounds) or Politics (the event): `?market=politics` opens the second.
+  const [category, setCategory] = useState<"crypto" | "politics">(() => new URLSearchParams(window.location.search).get("market") === "politics" ? "politics" : "crypto");
+  const [eventSide, setEventSide] = useState<Side>("up");
   const [drawer, setDrawer] = useState<DrawerView | null>(null);
   const [book, setBook] = useState<"quotes" | "orders">("quotes");
   const [roundOffset, setRoundOffset] = useState(0);
@@ -237,6 +245,16 @@ function ChainMarkets() {
   // While Horizen cannot be read, funding still opens from the published manifest (read by the poll): deposits and withdrawals happen on Base.
   const [committedBook, setCommittedBook] = useState<VerifiedOrderbook | null>(null);
   const fundingBook = orderbook ?? (mismatch ? null : privateBook ?? committedBook);
+  // The Politics market: the events manifest of the published order book (events-manifest.ts), read once. Trading it still needs
+  // the verified book.
+  const [politics, setPolitics] = useState<{ event: PoliticsEvent | null; state: "loading" | "none" | "failed" }>({ event: null, state: "loading" });
+  const publishedBook = committedBook?.manifest ?? null;
+  useEffect(() => {
+    if (!publishedBook) return;
+    let on = true;
+    void loadEvent(publishedBook).then((event) => { if (on) setPolitics({ event, state: event ? "loading" : "none" }); }, () => { if (on) setPolitics({ event: null, state: "failed" }); });
+    return () => { on = false; };
+  }, [publishedBook]);
   const priv = usePrivate(wallet, fundingBook);
   const unlocked = Boolean(priv.snapshot?.unlocked), cash = priv.snapshot?.view?.cash ?? 0, onBase = priv.snapshot?.wallet ?? null;
   // The Deposit window: right after sign-up, and once a session for a signed-in account with nothing in it (no trading balance,
@@ -426,6 +444,13 @@ function ChainMarkets() {
     detail?.focus({ preventScroll: true });
   };
   const pick = (side: Side) => { setOutcome(side); document.getElementById("chain-ticket")?.scrollIntoView({ behavior: smooth(), block: "start" }); };
+  const pickEvent = (side: Side) => { setEventSide(side); document.getElementById("event-ticket")?.scrollIntoView({ behavior: smooth(), block: "start" }); };
+  const chooseCategory = (next: "crypto" | "politics") => {
+    setCategory(next);
+    const url = new URL(window.location.href);
+    if (next === "politics") url.searchParams.set("market", "politics"); else url.searchParams.delete("market");
+    window.history.replaceState(window.history.state, "", url);
+  };
   const refreshMarkets = () => {
     if (refreshing || cooldownRemaining(network) > 0) return;
     verificationCache.invalidate(network);
@@ -480,6 +505,7 @@ function ChainMarkets() {
   // The house's own quotes for the round being traded (the live read), when fresh: its real prices instead of the estimate.
   const house = houseFor(indexed?.house, ticketRound?.start ?? null, clock + skew);
   const askOf = (side: Side) => sidePrice(house, up, side).ask;
+  const eventQuotes = eventHouseFor(indexed?.event, politics.event?.id ?? null, clock + skew);
   const nowDelta = versus(spot?.p ?? null, openingExact);
   const liveLine = countdownLine(liveTimes, now);
   const onMarket = (next: MarketFeed) => setFeed((last) => last?.spot?.t === next.spot?.t && last?.closes.length === next.closes.length && last?.status === (next as { status?: string }).status ? last : next);
@@ -523,7 +549,13 @@ function ChainMarkets() {
       {/* Privy's sign-in errors: every sign-in path closes the account popup first, so they show here, under the header's Sign in. */}
       {!wallet.session && wallet.error && <div className="chain-status-banner warn" role="alert"><Warning size={21} /><div><strong>{wallet.error}</strong></div></div>}
       {(connectionError || (!verified && (planned || offline))) && <div className={`chain-status-banner ${connectionError ? "warn" : ""}`}>{connectionError ? <Warning size={21} /> : <Info size={21} />}<div><strong>{connectionError ? "Market checks unavailable" : planned ? "Public markets not available yet" : "Public markets unavailable"}</strong><p>{connectionError || offline}</p></div><button className="icon-button" aria-label="Refresh markets" disabled={refreshing || cooldownRemaining(network) > 0} onClick={refreshMarkets}><ArrowsClockwise size={20} /></button></div>}
+      {orderbook?.withdrawOnly && <div className="chain-status-banner warn" role="status"><Warning size={21} /><div><strong>This order book is closing</strong><p>Deposits and trading are off. You can still withdraw your balance to Base.</p></div></div>}
       {page === "markets" ? <>
+        <div className="chain-categories"><div className="chain-segment" role="group" aria-label="Market category">{(["crypto", "politics"] as const).map((c) => <button key={c} aria-pressed={category === c} onClick={() => chooseCategory(c)}>{c === "crypto" ? "Crypto" : "Politics"}</button>)}</div></div>
+        {category === "politics" ? <>
+          <div className="workspace-label"><div><span>POLITICS</span><CaretRight size={11} /><span>US HOUSE</span><CaretRight size={11} /><strong>2026 MIDTERMS</strong></div></div>
+          <EventMarket event={politics.event} state={politics.state} book={publishedBook} priv={priv} orderbook={orderbook} wallet={wallet} quotes={eventQuotes} now={now} outcome={eventSide} onOutcome={setEventSide} onAccount={() => openAccount()} onFunds={() => openAccount("funds")} />
+        </> : <>
         <section className="chain-market-cards" aria-label="Choose a market">{MARKETS.map((item, index) => <button className={`chain-market-card ${marketIndex === index ? "selected" : ""}`} key={item.id} aria-pressed={marketIndex === index} onClick={() => chooseMarket(index)}><span className="chain-card-heading"><span className={`coin ${item.asset.toLowerCase()} small`}><CurrencyBtc weight="bold" /></span><strong>{item.name}</strong><span className="chain-duration">{item.duration / 60}m</span></span><span className="chain-card-question">Higher or lower?</span>
           <span className="chain-card-prices"><span>Up <b title={house ? undefined : "Estimated price"}>{index === marketIndex ? cents(askOf("up")) : "—"}</b></span><span>Down <b title={house ? undefined : "Estimated price"}>{index === marketIndex ? cents(askOf("down")) : "—"}</b></span></span>
           <span className="chain-card-foot">{index === marketIndex && <span className={`chain-card-time ${liveLine.urgent ? "urgent" : ""}`}><Clock size={13} />{liveLine.time}</span>}<span>{loading ? "Loading…" : verified ? "View round" : "Unavailable"}<CaretRight /></span></span></button>)}</section>
@@ -551,11 +583,14 @@ function ChainMarkets() {
           </div>
           <Ticket priv={priv} orderbook={orderbook} wallet={wallet} round={ticketRound} slot={liveTimes.start} now={now} up={up} house={house} outcome={outcome} onOutcome={setOutcome} loading={loading} onAccount={() => openAccount()} onFunds={() => openAccount("funds")} />
         </div>
-      </> : <section className="chain-panel chain-private-page"><div className="chain-panel-heading"><h2>{page === "portfolio" ? "Positions & balances" : "Fills & account history"}</h2><span className="chain-pill">{unlocked ? <LockKeyOpen size={13} /> : <LockKey size={13} />}{unlocked ? "Unlocked" : "Locked"}</span></div>{orderbook && snapshot && (unlocked || (page === "portfolio" && priv.snapshot?.cached)) ? page === "portfolio" ? <PrivatePortfolio {...{ onDeposit: () => openAccount("funds") }} priv={priv} book={orderbook.manifest} chainNow={chainNow} /> : <PrivateHistory priv={priv} fromBlock={later(snapshot.blockNumber > 604_800n ? snapshot.blockNumber - 604_800n : 0n, BigInt(orderbook.manifest.application.deployBlock))} /> : <PrivateEmpty title={page === "portfolio" ? "Your positions" : "Your records"} onOpen={() => openAccount()} open={Boolean(orderbook)} />}</section>}
+        </>}
+      </> : <section className="chain-panel chain-private-page"><div className="chain-panel-heading"><h2>{page === "portfolio" ? "Positions & balances" : "Fills & account history"}</h2><span className="chain-pill">{unlocked ? <LockKeyOpen size={13} /> : <LockKey size={13} />}{unlocked ? "Unlocked" : "Locked"}</span></div>{orderbook && snapshot && (unlocked || (page === "portfolio" && priv.snapshot?.cached)) ? page === "portfolio" ? <PrivatePortfolio {...{ onDeposit: () => openAccount("funds") }} priv={priv} book={orderbook.manifest} chainNow={chainNow}
+        event={politics.event && { id: politics.event.id, cutoff: politics.event.terms.cutoff }} onEvent={() => { setPage("markets"); chooseCategory("politics"); }} /> : <PrivateHistory priv={priv} fromBlock={later(snapshot.blockNumber > 604_800n ? snapshot.blockNumber - 604_800n : 0n, BigInt(orderbook.manifest.application.deployBlock))} /> : <PrivateEmpty title={page === "portfolio" ? "Your positions" : "Your records"} onOpen={() => openAccount()} open={Boolean(orderbook)} />}</section>}
       <details className="chain-details chain-deployment-details"><summary>Market details</summary><div className="chain-technical-grid"><dl><dt>Network</dt><dd>{NETWORKS[network].name} · {network}</dd><dt>Connection</dt><dd>{snapshot ? `Connected · block ${snapshot.blockNumber}` : "Not verified"}</dd><dt>Trading</dt><dd>{orderbook ? "Open (private order book)" : "Unavailable"}</dd><dt>Private access</dt><dd>{orderbook ? "Sign in to use" : active?.orderbookError || "Unavailable"}</dd></dl><dl><dt>Contract checks</dt><dd>{verified && verification ? `Matched release · checked ${verificationTime(verification.checkedAt)} UTC` : planned ? "Not available yet" : offline ? "Not available" : "Not verified"}</dd><dt>Roles and governance</dt><dd>{verified ? streams ? <>The round registry is upgradeable: its owner address <code>{streams.contracts.registry.owner}</code> can replace its code, including the round rules. The three price-route contracts are fixed. The registry’s code and owner and the upstream implementations and governance matched this release at the checked blocks, with no ownership transfer pending.</> : "Registry fixed; external provider governance requires separate review." : "Not verified"}</dd><dt>Private account</dt><dd>{unlocked ? "Unlocked" : "Locked"}</dd></dl></div>{verified && <><p>Release {verified.manifest.release}. Matching code and configuration does not verify private execution or imply a security audit.</p>{streams && <p><a href="https://github.com/penguinpecker/zedge/blob/feat/production-core/contracts/deployment/MAINNET.md" target="_blank" rel="noreferrer">Deployment record and source-verification details <ArrowSquareOut size={13} /></a></p>}<dl className="chain-address-list">{pins.map((pin) => <div key={pin.name}><dt>{pin.name.replace(/([A-Z])/g, " $1")} · {pin.chainId === 8453 ? "Base" : NETWORKS[network].name}</dt><dd><a href={`${pin.chainId === 8453 ? "https://basescan.org" : NETWORKS[network].blockExplorers.default.url}/address/${pin.address}`} target="_blank" rel="noreferrer">{pin.address}</a><code>{pin.runtimeCodeHash}</code></dd></div>)}</dl></>}</details>
       <SiteFooter mode="chain" status={<span>ZEDGE · {network === 2651420 ? "Testnet" : "Mainnet"}</span>} action={<button onClick={() => openAccount("security")}>Account security</button>} />
     </main>
-    {page === "markets" && <div className="chain-mobile-bar">{(["up", "down"] as const).map((side) => <button key={side} className={side} onClick={() => pick(side)}>{side === "up" ? "Up" : "Down"} <b>{cents(askOf(side))}</b></button>)}</div>}
+    {page === "markets" && category === "crypto" && <div className="chain-mobile-bar">{(["up", "down"] as const).map((side) => <button key={side} className={side} onClick={() => pick(side)}>{side === "up" ? "Up" : "Down"} <b>{cents(askOf(side))}</b></button>)}</div>}
+    {page === "markets" && category === "politics" && politics.event && <div className="chain-mobile-bar">{(["up", "down"] as const).map((side) => <button key={side} className={side} onClick={() => pickEvent(side)}>{SIDE_NAME[side]} <b>{cents(eventQuotes?.[side].ask?.cents ?? null)}</b></button>)}</div>}
     {drawer && <AccountDrawer view={drawer} onView={setDrawer} onClose={() => setDrawer(null)} network={network} wallet={wallet} orderbook={fundingBook} orderbookReason={active?.orderbookError ?? ""} priv={priv} onSignIn={signIn} />}
   </div>;
 }

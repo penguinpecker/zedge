@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowSquareOut, Check } from "@phosphor-icons/react";
 import { formatUnits } from "viem";
 import { transactionExplorerUrl } from "./networks.ts";
+import { holdingKind } from "./market-view.ts";
 import { engineRound, type VerifiedOrderbook } from "./orderbook-manifest.ts";
 import type { Snapshot } from "./private/client.ts";
 import type { PrivateState } from "./private/use-private.ts";
@@ -53,13 +54,15 @@ export function PrivateOrders({ priv, book, roundStart }: { priv: PrivateState; 
   </div>;
 }
 
-export function PrivatePortfolio({ priv, book, chainNow, onDeposit }: { priv: PrivateState; book: Book; chainNow: number; onDeposit?: () => void }) {
+/** `event`: the Politics market's round (events-manifest.ts), listed under its own name and left out of the opening sync. */
+export function PrivatePortfolio({ priv, book, chainNow, onDeposit, event, onEvent }: { priv: PrivateState; book: Book; chainNow: number; onDeposit?: () => void; event?: { id: string; cutoff: number } | null; onEvent?: () => void }) {
   const view = priv.snapshot?.view, unlocked = Boolean(priv.snapshot?.unlocked), { run } = priv;
   // A cached view (shown while the unlock syncs) is read-only: nothing is signed from it.
   const ready = unlocked && !priv.busy;
   // The settlement sweep pays out in the account's own name, and makers fill, which only the next receipt shows: a sync on opening,
   // when something could have changed and none was read in the last minute (each sync is a public request).
-  useEffect(() => { if (unlocked) void run((a) => a.refresh()); }, [unlocked, run]);
+  const eventId = event?.id ?? null;
+  useEffect(() => { if (unlocked) void run((a) => a.refresh(eventId ? [eventId] : [])); }, [unlocked, run, eventId]);
   const error = priv.error && <p className="chain-error" role="alert">{priv.error}</p>;
   // Unlocked with no view: the exchange opens the account on its first deposit.
   if (!view) return unlocked ? <div className="chain-private-list">
@@ -78,6 +81,12 @@ export function PrivatePortfolio({ priv, book, chainNow, onDeposit }: { priv: Pr
     <div className="chain-book-columns"><span>Round</span><span>Up / Down</span><span>Action</span></div>
     {view.holdings.length === 0 ? <div className="chain-empty chain-book-empty"><h3>No positions</h3></div> : view.holdings.map((h) => {
       const start = starts.get(h.roundId), sets = Math.min(h.up, h.down);
+      if (event && holdingKind(h.roundId, starts, event.id) === "event") return <div className="chain-book-row" key={h.roundId}>
+        <span>US House 2026 · Yes / No</span>
+        <span>{shares(h.up + h.reservedUp)} / {shares(h.down + h.reservedDown)}{h.reservedUp + h.reservedDown ? ` · ${shares(h.reservedUp + h.reservedDown)} offered` : ""}</span>
+        <span>{sets > 0 && <button className="chain-text-button" disabled={!ready} onClick={() => void priv.run((a) => a.merge(event, sets))}>Merge</button>}
+          {onEvent && <button className="chain-text-button" onClick={onEvent}>View</button>}</span>
+      </div>;
       return <div className="chain-book-row" key={h.roundId}>
         {start === undefined ? <span>Earlier round</span> : <span title={`${clock(start, "UTC")}–${clock(start + 900, "UTC")} UTC`}>{clock(start)}–{clock(start + 900)} {zone(start)}</span>}
         <span>{shares(h.up + h.reservedUp)} / {shares(h.down + h.reservedDown)}{h.reservedUp + h.reservedDown ? ` · ${shares(h.reservedUp + h.reservedDown)} offered` : ""}</span>

@@ -296,6 +296,25 @@ test("the automatic deposit takes only USDC from outside the vault, once; a send
   assert.deepEqual([s.log.filter((x) => x.startsWith("deposit")).length, account.snapshot.held], [1, 15_000_000n], "the send spent held USDC; nothing more goes in");
 });
 
+test("a withdraw-only book (its replacement credits deposits now) sends no deposit, automatic or clicked, and still pays out withdrawals", async () => {
+  const s = await stack({ transfers: true }), signer = wallet(), friend = "0x00000000000000000000000000000000000000cc";
+  s.history.push({ from: friend, to: signer.address, value: 30_000_000n }, { from: s.book.custody.vault.address, to: signer.address, value: 20_000_000n });
+  const { account, phases } = open(s, signer);
+  await account.unlock();
+  s.fund(account.account, 4_000_000);
+  account.withdrawOnly(true);
+  await account.refreshFunds();
+  await account.autoDeposit();
+  await assert.rejects(account.depositFromBase(5_000_000n), /Deposits are off/);
+  assert.deepEqual(s.log.filter((x) => x.startsWith("deposit")), [], "nothing reached the vault");
+  await account.sync();
+  await account.withdraw();
+  assert.equal(phases("Payout").at(-1), "Paid on Base · 4 USDC");
+  account.withdrawOnly(false);
+  await account.autoDeposit();
+  assert.deepEqual(s.log.filter((x) => x.startsWith("deposit")), ["deposit 30000000"]);
+});
+
 test("the automatic deposit stands aside for a deposit the user started while it read the history", async () => {
   const s = await stack({ transfers: true }), signer = wallet();
   s.history.push({ from: "0x00000000000000000000000000000000000000cc", to: signer.address, value: 30_000_000n }, { from: s.book.custody.vault.address, to: signer.address, value: 20_000_000n });
@@ -330,7 +349,7 @@ test("a book order goes Signing, Sending, Submitted, Waiting, Staged, Matching, 
   s.fund(account.account, 20_000_000);
   const quantity = sharesFor(5_000_000, 99);
   assert.equal(quantity, 5_050_000);
-  const result = await account.placeOrder({ roundStart: ROUND, outcome: "up", side: "buy", price: 99, quantity, tif: "ioc", expiry: ROUND + 870 });
+  const result = await account.placeOrder({ round: ROUND, outcome: "up", side: "buy", price: 99, quantity, tif: "ioc", expiry: ROUND + 870 });
   const seen = phases("Buy Up");
   assert.equal(seen[0], "Signing");
   assert.equal(seen[1], "Sending");
@@ -338,10 +357,10 @@ test("a book order goes Signing, Sending, Submitted, Waiting, Staged, Matching, 
   assert.deepEqual(seen.slice(3), ["Waiting for the operator", "Staged", "Matching", "Collecting result", "Filled"]);
   assert.equal(result.outcome?.status, "applied");
   assert.equal(account.snapshot.view?.nonce, 1, "the next nonce comes from the view");
-  const resting = await account.placeOrder({ roundStart: ROUND, outcome: "down", side: "buy", price: 10, quantity: 1_000_000, tif: "gtc", expiry: ROUND + 870 });
+  const resting = await account.placeOrder({ round: ROUND, outcome: "down", side: "buy", price: 10, quantity: 1_000_000, tif: "gtc", expiry: ROUND + 870 });
   assert.equal(resting.outcome?.receipt?.status, "resting");
   assert.equal(phases("Buy Down").at(-1), "Resting");
-  assert.throws(() => account.placeOrder({ roundStart: ROUND, outcome: "up", side: "buy", price: 50, quantity: 1000, tif: "gtc", expiry: ROUND + 871 }), /cutoff/);
+  assert.throws(() => account.placeOrder({ round: ROUND, outcome: "up", side: "buy", price: 50, quantity: 1000, tif: "gtc", expiry: ROUND + 871 }), /cutoff/);
 });
 
 /** A clock that is the chain's: it moves only while the client sleeps, then `onSleep` runs. */
@@ -369,6 +388,24 @@ test("one-click buy and close: a GTC at exactly the price shown that rests 20 s 
   // One that reaches the book after its expiry (a slow network) is refused as invalid by the engine: it was not filled in time.
   await account.buy(ROUND, "down", 30, 1_000_000, Number(s.time()) - 25);
   assert.equal(phases("Buy Down").at(-1), "Not filled: no seller at 30¢ within 20 s");
+});
+
+test("the event's one-click orders: by its engine round ID at exactly the price shown, named Yes and No, never resting past its own cutoff", async () => {
+  const s = await stack(), at = Number(s.time());
+  const { account, phases } = open(s, wallet(), memory(), chainClock(s));
+  await account.unlock();
+  s.fund(account.account, 10_000_000);
+  const event = { id: "ee".repeat(32), cutoff: at + 600 }, last = () => ({ ...order(s.commands.at(-1)), roundId: s.commands.at(-1)?.roundId });
+  await account.buy(event, "up", 93, 2_000_000, at);
+  assert.deepEqual(last(), { op: "place_order", side: "buy", price: 93, quantity: 2_000_000, tif: "gtc", expiry: at + 20, roundId: event.id });
+  assert.equal(phases("Buy Yes").at(-1), "Filled");
+  assert.deepEqual([phases("Buy Up").length, account.snapshot.view?.holdings[0].roundId], [0, event.id]);
+  // Ten seconds before the event's cutoff a close waits only until that cutoff, at exactly the bid shown.
+  s.advance((event.cutoff - 10 - Number(s.time())) * 1000);
+  await account.close(event, "up", 88, Number(s.time()));
+  assert.deepEqual(last(), { op: "place_order", side: "sell", price: 88, quantity: 2_000_000, tif: "gtc", expiry: event.cutoff, roundId: event.id });
+  assert.equal(phases("Sell Yes").at(-1), "Not filled: no buyer at 88¢ within 10 s");
+  assert.throws(() => account.placeOrder({ round: event, outcome: "down", side: "buy", price: 12, quantity: 1_000, tif: "gtc", expiry: event.cutoff + 1 }), /cutoff/);
 });
 
 test("a one-click order the house fills while it waits: all of it, or part with the rest expired and its cash released; one at a time, after a reload too", async () => {
@@ -539,7 +576,7 @@ test("the private view is read field by field; outcomes map to the drawer's word
   assert.equal(sharesFor(1, 99), 0);
 });
 
-const ORDER = { roundStart: ROUND, outcome: "up" as const, side: "buy" as const, price: 60, quantity: 1_000_000, tif: "ioc" as const, expiry: ROUND + 870 };
+const ORDER = { round: ROUND, outcome: "up" as const, side: "buy" as const, price: 60, quantity: 1_000_000, tif: "ioc" as const, expiry: ROUND + 870 };
 const LOST = { ok: false as const, status: 504, code: "UNKNOWN", message: "unreadable answer" };
 
 test("a relayer answer lost after the send is settled from the chain: the order and the deposit happen once, and nothing is signed again", async () => {
@@ -714,6 +751,22 @@ test("opening Portfolio syncs only when something could have changed, at most on
   t += 61_000;
   await account.refresh();
   assert.equal(syncs(), before + 1);
+  // The event's holding alone is no reason: it settles once, weeks away. Any other round's still is.
+  const event = "ee".repeat(32), view = s.views.get(account.account)!;
+  view.round = event;
+  t += 61_000;
+  await account.sync();
+  t += 61_000;
+  await account.refresh([event]);
+  assert.equal(syncs(), before + 2, "only the sync above");
+  await account.refresh();
+  assert.equal(syncs(), before + 3, "without the event's ID it is a held round like any other");
+  view.round = engineRound(s.book, ROUND).id;
+  t += 61_000;
+  await account.sync();
+  t += 61_000;
+  await account.refresh([event]);
+  assert.equal(syncs(), before + 5);
 });
 
 test("the wallet is asked only for this book's requests, Base USDC permits to its vault up to the largest deposit, and the key challenge", async () => {
@@ -1023,7 +1076,7 @@ test("History from the read API: pages newest first, each receipt decrypted once
 
 test("held rounds' results come from the shared live read; the chain is read only for rounds it lacks or when it fails, at most every 5 s", async () => {
   const id = (n: number) => keccak256(toHex(`round:${n}`)), settle = { kind: 2, outcome: 2, price: 1n, observationsTimestamp: 0, reportHash: id(9), source: 1, block: 1, txHash: id(8), logIndex: 0 };
-  let live: Live | null = { head: { block: 1, time: 1 }, price: null, house: null, rounds: [{ start: 0, registryRoundId: id(1), open: null, settle }, { start: 900, registryRoundId: id(2), open: null, settle: null }] as ApiRound[] };
+  let live: Live | null = { head: { block: 1, time: 1 }, price: null, house: null, event: null, rounds: [{ start: 0, registryRoundId: id(1), open: null, settle }, { start: 900, registryRoundId: id(2), open: null, settle: null }] as ApiRound[] };
   let reads = 0, t = 0;
   const chain = { settled: async () => { reads++; return [{ roundId: id(3), outcome: 1 }]; } } as unknown as Chain;
   const indexed = indexedChain(chain, { account: async () => null, live: async () => live }, () => t);
@@ -1036,7 +1089,7 @@ test("held rounds' results come from the shared live read; the chain is read onl
   t += 1; assert.deepEqual(await indexed.settled([id(3)], 0n), [{ roundId: id(3), outcome: 1 }]);
   assert.equal(reads, 2);
   // A stuck or catching-up indexer (head over 30 s behind) answers "no result yet" for a round the chain has settled: the chain.
-  live = { head: { block: 1, time: 1 }, price: null, house: null, rounds: [{ start: 0, registryRoundId: id(1), open: null, settle: null }] as ApiRound[] };
+  live = { head: { block: 1, time: 1 }, price: null, house: null, event: null, rounds: [{ start: 0, registryRoundId: id(1), open: null, settle: null }] as ApiRound[] };
   t = 32_000;
   assert.deepEqual(await indexed.settled([id(1)], 0n), [{ roundId: id(3), outcome: 1 }]);
   assert.equal(reads, 3);
