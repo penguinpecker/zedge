@@ -3,17 +3,21 @@
 // sending its own requests with its own gas (never through the relayer). Refuses to start without --mainnet or
 // --fork <loopback Anvil URL>. Never prints the key.
 //
-//   node --experimental-strip-types services/market-maker/main.mjs <command> (--mainnet | --fork URL) [--settings FILE]
-//   commands: run [--dry-run] | status | deposit <usdc> | withdraw <usdc>
+//   node --experimental-strip-types services/market-maker/main.mjs <command> (--mainnet | --fork URL) [--settings FILE] [--event [--events FILE]]
+//   commands: run [--dry-run] | status | deposit <usdc> | withdraw <usdc> | resolve <result file>
 // Custody is the Base vault: deposit signs a Base USDC permit and calls the vault's depositWithPermit (the house pays its own
 // Base gas); withdraw asks the engine for a payout to the house on Base, which the payout signer pays.
+// --event runs the same commands as the event house (README "Event house"): its own wallet, quoting the Yes/No event.
+// resolve sends the resolver's signed result (scripts/sign-event-result.mjs) from the house, or the event house with --event.
 import { createHash } from "node:crypto";
-import { closeSync, lstatSync, openSync, readFileSync, unlinkSync, writeSync } from "node:fs";
+import { closeSync, openSync, readFileSync, unlinkSync, writeSync } from "node:fs";
 import { createServer } from "node:http";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
+import { EVENT_FEEDS, checkResult, deploymentEvent, eventPlan, eventPrice, kalshiYes, polymarketMid } from "./event.mjs";
+import { readKey } from "./keyfile.mjs";
 import { LEAD, SHARE, apply, expire, fairUp, plan, quotes, realizedSigma, spotCheck, worstStake } from "./pricing.mjs";
 
 const CHAIN = 26514, BASE = 8453, DURATION = 900, PROCESS = 1, ASSOCIATEKEY = 3, PUB_KEY_NOT_REGISTERED = 9, MAX_REFUSALS = 3;
@@ -33,6 +37,9 @@ export function mainnetDeployment(book) {
   };
 }
 const committedBook = () => JSON.parse(readFileSync(new URL("../../public/deployments/26514-orderbook.json", import.meta.url), "utf8"));
+const committedEvents = () => {
+  try { return JSON.parse(readFileSync(new URL("../../public/deployments/26514-events.json", import.meta.url), "utf8")); } catch (e) { fail(`public/deployments/26514-events.json: ${e.message}`); }
+};
 // The thirdweb Horizen gateway is rate-limited without a client id; the operator keeps it in a private file.
 // An Alchemy key in ~/.config/zedge/alchemy.key gives Base reads a keyed endpoint; otherwise Base's own public one.
 const BASE_RPC = (() => { try { const k = readFileSync(`${homedir()}/.config/zedge/alchemy.key`, "utf8").trim(); if (/^[A-Za-z0-9_-]{16,64}$/.test(k)) return `https://base-mainnet.g.alchemy.com/v2/${k}`; } catch {} return "https://mainnet.base.org"; })();
@@ -42,7 +49,7 @@ const HORIZEN_RPC = (() => {
   try { const id = readFileSync(`${homedir()}/.config/zedge/thirdweb.id`, "utf8").trim(); if (/^[0-9a-f]{32}$/.test(id)) return `https://26514.rpc.thirdweb.com/${id}`; } catch {}
   return "https://26514.rpc.thirdweb.com";
 })();
-const USAGE = "usage: main.mjs <run [--dry-run] | status | deposit <usdc> | withdraw <usdc>> (--mainnet | --fork http://127.0.0.1:<port>) [--settings <file>]";
+const USAGE = "usage: main.mjs <run [--dry-run] | status | deposit <usdc> | withdraw <usdc> | resolve <result file>> (--mainnet | --fork http://127.0.0.1:<port>) [--settings <file>] [--event] [--events <events manifest, with --fork>]";
 const COINBASE = "https://api.exchange.coinbase.com/products/BTC-USD", KRAKEN = "https://api.kraken.com/0/public/Ticker?pair=XBTUSD";
 
 const lower = (x) => String(x).toLowerCase();
@@ -72,6 +79,11 @@ export function houseQuotes(view, r, now, at) {
     return { cents, shares: os.filter((o) => o.price === cents).reduce((n, o) => n + o.remaining, 0) / SHARE };
   };
   return { at, start: r.start, up: { ask: best("up", "sell"), bid: best("up", "buy") }, down: { ask: best("down", "sell"), bid: best("down", "buy") } };
+}
+/** The event house's /quotes body: houseQuotes of the event round, named by its engine round ID. Up is Yes, Down is No. */
+export function eventQuotes(view, r, now, at) {
+  const { up, down } = houseQuotes(view, r, now, at);
+  return { at, round: `0x${r.id}`, up, down };
 }
 
 /** --mainnet, or --fork with a loopback http URL. Nothing else runs. */
@@ -107,12 +119,18 @@ export async function checkBase(send, mode) {
 // Tuning: [default, lowest, highest]. The defaults are the spec's (README).
 const TUNING = { halfSpreadCents: [3, 1, 20], quoteShares: [10, 1, 1000], mintSets: [40, 1, 10_000], maxStakeUsdc: [100, 1, 2000],
   quoteLifetimeSeconds: [60, 60, 600], requoteDriftCents: [4, 1, 50], maxRpcPerRound: [6000, 50, 20_000], pollSeconds: [2, 2, 60] };
+// The event house's (README "Event house"): quotes that live hours, prices read every 15 to 30 s, and a stake below the
+// guest's 50 USDC per account, which binds it like any user. Its "round" for the brakes is each 15 minutes.
+const EVENT_TUNING = { halfSpreadCents: [2, 1, 20], quoteShares: [5, 1, 1000], mintSets: [10, 1, 10_000], maxStakeUsdc: [20, 1, 50],
+  quoteLifetimeSeconds: [14_400, 600, 86_400], requoteDriftCents: [3, 1, 50], maxRpcPerRound: [300, 50, 20_000], pollSeconds: [20, 15, 30] };
 const FORK_FIELDS = ["applicationFingerprint", "applicationId", "authenticator", "baseRpc", "endpoint", "epoch", "house", "keyFile", "origin", "registry", "trigger", "vault"];
 
-/** Settings: tuning, and under --fork only the fork's deployment (--mainnet uses the manifest's). Unknown fields are refused. */
-export function settingsFrom(json, mode, book = mode === "mainnet" ? committedBook() : null) {
+/** Settings: tuning (the event house's with `event`), and under --fork only the fork's deployment (--mainnet uses the
+ * manifest's, with the event house's own key file for `event`). Unknown fields are refused. */
+export function settingsFrom(json, mode, book = mode === "mainnet" ? committedBook() : null, event = false) {
   if (!json || typeof json !== "object" || Array.isArray(json)) fail("settings: expected a JSON object");
-  const s = { ...Object.fromEntries(Object.entries(TUNING).map(([k, [v]]) => [k, v])), minEthWei: 200_000_000_000_000n };
+  const tuning = event ? EVENT_TUNING : TUNING;
+  const s = { ...Object.fromEntries(Object.entries(tuning).map(([k, [v]]) => [k, v])), minEthWei: 200_000_000_000_000n };
   for (const [k, v] of Object.entries(json)) {
     if (k === "fork") continue;
     if (k === "minEthWei") {
@@ -120,7 +138,7 @@ export function settingsFrom(json, mode, book = mode === "mainnet" ? committedBo
       s.minEthWei = BigInt(v);
       continue;
     }
-    const range = TUNING[k];
+    const range = tuning[k];
     if (!range) fail(`settings: unknown field ${k}`);
     if (!Number.isInteger(v) || v < range[1] || v > range[2]) fail(`settings.${k}: an integer from ${range[1]} to ${range[2]}`);
     s[k] = v;
@@ -128,7 +146,7 @@ export function settingsFrom(json, mode, book = mode === "mainnet" ? committedBo
   if (s.mintSets < s.quoteShares) fail("settings.mintSets must be at least settings.quoteShares");
   if (mode === "mainnet") {
     if (json.fork !== undefined) fail("settings.fork is for --fork only; --mainnet uses the pinned deployment");
-    return { ...s, deployment: mainnetDeployment(book) };
+    return { ...s, deployment: { ...mainnetDeployment(book), ...(event && { keyFile: `${homedir()}/.config/zedge/event-house.key` }) } };
   }
   const f = json.fork;
   if (!f || typeof f !== "object" || Object.keys(f).sort().join() !== FORK_FIELDS.join()) fail(`settings.fork needs exactly: ${FORK_FIELDS.join(", ")}`);
@@ -139,13 +157,12 @@ export function settingsFrom(json, mode, book = mode === "mainnet" ? committedBo
   return { ...s, deployment: { ...f, keyFile: resolve(f.keyFile) } };
 }
 
-function readKey(file) {
-  let st;
-  try { st = lstatSync(file); } catch { fail(`${file}: no key file there`); }
-  if (!st.isFile() || (st.mode & 0o777) !== 0o600) fail(`${file}: must be a regular file (not a link) with mode 600`);
-  const key = readFileSync(file, "utf8").trim();
-  if (!/^0x[0-9a-fA-F]{64}$/.test(key)) fail(`${file}: expected 0x and 64 hex digits`);
-  return key;
+/** Which wallet may send: the BTC house only the pinned house; the event house any wallet but that one, whose 4 order slots
+ * the BTC book uses; neither the resolver, which only signs the result, offline. */
+export function checkSender(account, dep, event, resolver) {
+  if (!event && account !== dep.house) fail(`the key in ${dep.keyFile} is not the house ${dep.house}`);
+  if (event && account === dep.house) fail(`the key in ${dep.keyFile} is the BTC house's; the event house needs its own wallet`);
+  if (account === resolver) fail(`the key in ${dep.keyFile} is the resolver's, which never sends`);
 }
 
 /** One sending process per key: its requests are sequential, and the guest freezes an account holding a staged command. */
@@ -182,23 +199,43 @@ async function spot() {
   if (k) feeds.kraken = { mid: (Number(k.a?.[0]) + Number(k.b?.[0])) / 2, at };
   return spotCheck(feeds.coinbase, feeds.kraken, Date.now());
 }
+/** The event's price (event.mjs eventPrice): Polymarket and Kalshi read together, at most once per `pollSeconds`. A failed
+ * read keeps the last good one, which counts for 60 s. */
+async function eventOdds(pollSeconds) {
+  if (Date.now() - (feeds.oddsRead ?? 0) >= pollSeconds * 1000) {
+    feeds.oddsRead = Date.now();
+    const [pm, ks] = await Promise.allSettled([getJson(EVENT_FEEDS.polymarket), getJson(EVENT_FEEDS.kalshi)]);
+    const at = Date.now(), mid = pm.status === "fulfilled" && polymarketMid(pm.value), yes = ks.status === "fulfilled" && kalshiYes(ks.value);
+    if (mid) feeds.polymarket = { mid, at };
+    if (yes) feeds.kalshi = { ...yes, at };
+  }
+  return eventPrice(feeds.polymarket, feeds.kalshi, Date.now());
+}
 /** σ from the last 60 Coinbase 1-minute candles ([time, low, high, open, close, volume]). */
 async function sigma() {
   const candles = await getJson(`${COINBASE}/candles?granularity=60`);
   return realizedSigma([...candles].sort((x, y) => y[0] - x[0]).slice(0, 60).map((c) => Number(c[4])).reverse());
 }
 
-async function main(argv) {
+export async function main(argv) {
   const { values: a, positionals: [cmd, amount, ...extra] } = parseArgs({ args: argv, allowPositionals: true,
-    options: { mainnet: { type: "boolean" }, fork: { type: "string" }, settings: { type: "string" }, "dry-run": { type: "boolean" } } });
-  const arity = { run: 0, status: 0, deposit: 1, withdraw: 1 };
+    options: { mainnet: { type: "boolean" }, fork: { type: "string" }, settings: { type: "string" }, "dry-run": { type: "boolean" }, event: { type: "boolean" }, events: { type: "string" } } });
+  const arity = { run: 0, status: 0, deposit: 1, withdraw: 1, resolve: 1 };
   if (!Object.hasOwn(arity, cmd) || (amount === undefined ? 0 : 1) !== arity[cmd] || extra.length) fail(USAGE);
   if (a["dry-run"] && cmd !== "run") fail("--dry-run goes with run");
-  const t = target(a);
+  const t = target(a), event = !!a.event;
   let json = {};
   if (a.settings) try { json = JSON.parse(readFileSync(a.settings, "utf8")); } catch (e) { fail(`settings: ${e.message}`); }
-  const s = settingsFrom(json, t.mode);
+  const s = settingsFrom(json, t.mode, undefined, event);
   const dep = s.deployment, dry = !!a["dry-run"];
+  // The event's terms and resolver: the committed events manifest on mainnet, --events on a fork.
+  if (a.events !== undefined && t.mode !== "fork") fail("--events goes with --fork; --mainnet reads public/deployments/26514-events.json");
+  let events = null;
+  if (event || cmd === "resolve") {
+    if (t.mode === "mainnet") events = committedEvents();
+    else if (a.events === undefined) fail("--fork needs --events <events manifest> for the event");
+    else try { events = JSON.parse(readFileSync(a.events, "utf8")); } catch (e) { fail(`--events: ${e.message}`); }
+  }
 
   const crypto = new URL("../../adapters/vela/crypto/", import.meta.url);
   const { ethers } = await import(new URL("node_modules/ethers/lib.esm/index.js", crypto));
@@ -218,7 +255,7 @@ async function main(argv) {
   await checkNode((m, p) => provider.send(m, p), t.mode);
 
   const wallet = new ethers.Wallet(readKey(dep.keyFile), provider), account = lower(wallet.address);
-  if (account !== dep.house) fail(`the key in ${dep.keyFile} is not the house ${dep.house}`);
+  checkSender(account, dep, event, events?.resolver);
   if (cmd !== "status" && !dry) lock(dep.keyFile);
 
   const OBS = "tuple(int192 price,uint32 validFromTimestamp,uint32 observationsTimestamp,uint32 expiresAt,bytes32 reportHash,uint8 decimals)";
@@ -249,6 +286,7 @@ async function main(argv) {
       observationWindow: Number(cfg.observationWindow), openingGrace: Number(cfg.openingGrace), voidGrace: Number(cfg.voidGrace), cutoffBuffer: Number(cfg.cutoffBuffer) } };
   const sessionRulesHash = sha256(JSON.stringify(config));
   if (t.mode === "mainnet" && sessionRulesHash !== dep.sessionRulesHash) fail("the engine configuration rebuilt from the registry is not the deployed one");
+  const ev = events && deploymentEvent(JSON.stringify(config), events, codec); // { domain, id, spec, terms, resolver }
 
   // The operator's keys and the request fee: pinned on mainnet, taken at start on a fork; re-checked every round.
   const [enclaveKey, teeSigner, fee] = await Promise.all([auth.getPubSecp521r1().then(lower), auth.getTeeSigner().then(lower), endpoint.minFeePerRequest()]);
@@ -340,12 +378,12 @@ async function main(argv) {
     orders: v.orders.map((o) => `${o.side} ${o.outcome} ${o.remaining / SHARE}@${o.price}${o.filled ? ` filled ${o.filled / SHARE}` : ""}`),
     holdings: v.holdings.map((h) => `${h.roundId.slice(0, 8)} up ${(h.up + h.reservedUp) / SHARE} down ${(h.down + h.reservedDown) / SHARE}`) });
 
-  /** One engine command (or a sync) in one request. The nonce comes from the latest view, plus one for a staged
-   * command that has not come back yet; a wrong guess is a private refusal whose receipt carries the right view. */
+  /** One engine command (or a sync, or the event's signed result) in one request. The nonce comes from the latest view, plus
+   * one for a staged command that has not come back yet; a wrong guess is a private refusal whose receipt carries the right view. */
   async function send(c) {
-    const isSync = c.op === "sync", nonce = view.nonce + 1 + (staged ? 1 : 0);
-    const id = isSync ? codec.syncRequestId(account) : codec.commandId(account, nonce);
-    const body = isSync ? codec.syncBody() : codec.commandBody({ domain: config.domain, id, nonce, account, ...c });
+    const isSync = c.op === "sync", isResult = c.op === "resolve", nonce = view.nonce + 1 + (staged ? 1 : 0);
+    const id = isSync ? codec.syncRequestId(account) : isResult ? codec.resolveRequestId(account) : codec.commandId(account, nonce);
+    const body = isSync ? codec.syncBody() : isResult ? codec.resolveBody(c.outcome, c.signature) : codec.commandBody({ domain: config.domain, id, nonce, account, ...c });
     const done = await request(c.op, PROCESS, await session.encryptCommand(id, padBody(session, id, body)));
     if (done.status !== 0) { log("failed", { op: c.op, errorCode: done.errorCode, error: done.errorMessage }); return { done }; }
     const b = await readReceipt(done.cts, id);
@@ -387,6 +425,13 @@ async function main(argv) {
 
   // ---- subcommands
 
+  if (cmd === "status" && event) {
+    const head = await provider.getBlock("latest"), price = await eventOdds(0);
+    const [eth, baseEth, walletUsdc, queue] = await Promise.all([provider.getBalance(account), base.getBalance(account), baseUsdc.balanceOf(account), endpoint.getPendingRequestsSize()]);
+    return log("status", { mode: t.mode, eventHouse: account, eth: ethers.formatEther(eth), baseEth: ethers.formatEther(baseEth), baseUsdc: usdc(walletUsdc),
+      queue: Number(queue), chainTime: head.timestamp, sessionRulesHash, eventTerms: { round: `0x${ev.id}`, registryRoundId: ev.spec.registryRoundId, ...ev.terms, resolver: ev.resolver },
+      price, quotes: price.ok ? quotes(price.p, s.halfSpreadCents) : null });
+  }
   if (cmd === "status") {
     const head = await provider.getBlock("latest"), r = roundAt(Math.floor(head.timestamp / DURATION) * DURATION);
     const [eth, baseEth, walletUsdc, queue, open] = await Promise.all([provider.getBalance(account), base.getBalance(account), baseUsdc.balanceOf(account),
@@ -423,6 +468,16 @@ async function main(argv) {
     if (r.body?.status !== "applied") fail(`withdrawal not applied: ${r.body?.reason || r.done.errorMessage || "unreadable receipt"}`);
     return log("withdrawal requested", { usdc: usdc(atoms), to: account, note: "the payout signer pays it to the house on Base" });
   }
+  if (cmd === "resolve") {
+    // Checked here first (a wrong file costs nothing), then by the guest: the resolver's signature of this event's outcome.
+    let result;
+    try { result = JSON.parse(readFileSync(amount, "utf8")); } catch (e) { fail(`result: ${e.message}`); }
+    const outcome = checkResult(result, ev, { ethers, codec }, (await provider.getBlock("latest")).timestamp);
+    await startup(); // its tick moves the exchange's clock past the end before the result is judged
+    const r = await send({ op: "resolve", outcome, signature: result.signature });
+    if (r.body?.status !== "applied") fail(`result not applied: ${r.body?.reason || r.done.errorMessage || "unreadable receipt"} (judged at exchange time ${r.body?.at?.timestamp ?? "unknown"})`);
+    return log("result applied", { answer: result.answer, round: result.round, tx: r.done.tx, note: "every holder is paid; the public settle record has kind 2, source 4" });
+  }
 
   // ---- run: one decision per loop, at most one request in flight
 
@@ -439,16 +494,17 @@ async function main(argv) {
   // GET /quotes for the indexer on the private network: the house's resting quotes only, never balances or keys. Not under --dry-run,
   // whose orders are simulated. Built per request from the latest view (a receipt shows at once) at the chain time now, the last read
   // plus the time since, so a quote that expires while the bot waits on a request or an error drops out. A server error is logged
-  // and the bot quotes on without it.
-  if (process.env.HOUSE_QUOTES_PORT && !dry) {
+  // and the bot quotes on without it. The event house serves the event's on EVENT_HOUSE_QUOTES_PORT.
+  const quotesPort = process.env[event ? "EVENT_HOUSE_QUOTES_PORT" : "HOUSE_QUOTES_PORT"];
+  if (quotesPort && !dry) {
     const server = createServer((req, res) => {
       if (req.method !== "GET" || req.url !== "/quotes") return res.writeHead(404).end();
-      const body = decided && houseQuotes(view, r, decided.now + Math.floor((Date.now() - decided.at) / 1000), decided.at);
+      const body = decided && (event ? eventQuotes : houseQuotes)(view, r, decided.now + Math.floor((Date.now() - decided.at) / 1000), decided.at);
       res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" }).end(JSON.stringify(body));
     });
     const serverError = (e) => log("quotes server error", { code: e.code ?? e.name });
     server.on("error", serverError);
-    try { server.listen(Number(process.env.HOUSE_QUOTES_PORT), "::", () => log("serving quotes", { port: server.address().port })); } catch (e) { serverError(e); }
+    try { server.listen(Number(quotesPort), "::", () => log("serving quotes", { port: server.address().port })); } catch (e) { serverError(e); }
   }
   /** Queue and gas guards, read just before a request. A needed cancel goes out below the ETH floor while it can. */
   async function clear(c, optional = false) {
@@ -458,7 +514,29 @@ async function main(argv) {
     if (eth < s.minEthWei && !pulls(c.op, optional)) return note(`house ETH ${ethers.formatEther(eth)} is below the floor`), false;
     return true;
   }
-  log("running", { mode: t.mode, dryRun: dry, house: account, settings: { ...s, deployment: undefined } });
+  log("running", { mode: t.mode, dryRun: dry, house: account, eventRound: ev ? `0x${ev.id}` : undefined, settings: { ...s, deployment: undefined } });
+  /** Under a stop: cancels what rests in the open round, then reports. Returns true: stopped. */
+  async function halt(now) {
+    if (!dry && view.orders.some((o) => o.roundId === r.id && o.expiry > now) && now < r.cutoff && (await clear({ op: "cancel_all" }))) await send({ op: "cancel_all", roundId: r.id });
+    log("stopped", summary(view));
+    return true;
+  }
+  /** Sends command c (under --dry-run, applies it to the simulated view) unless the round's brakes hold it; a needed cancel
+   * passes them. `idle` is why there is nothing to send, or null. Returns false: not stopped. */
+  async function act(c, optional, idle, now, p) {
+    const held = !c ? idle
+      : pulls(c.op, optional) ? null
+      : r.refusals >= MAX_REFUSALS ? `${r.refusals} refusals this round; no new quotes until the next`
+      : rpcCalls - r.calls0 > s.maxRpcPerRound ? `RPC budget of ${s.maxRpcPerRound} calls spent this round` : null;
+    if (!c || held) { if (held) note(held); await nap(); return false; }
+    if (dry) { log("would send", { ...c, p, optional }); view = apply(expire(view, now), { ...c, id: `dry:${++n}` }); if (optional) lastOptional = Date.now(); await nap(); return false; }
+    if (!(await clear(c, optional))) { await nap(); return false; }
+    if (optional) lastOptional = Date.now();
+    noted = "";
+    r.requests++;
+    if (refused(await send(c))) r.refusals++;
+    return false;
+  }
   /** One decision. Returns true once stopped. */
   async function step() {
     // The exchange's clock is the later of the block time and a Chainlink report's time, which a receipt shows (guest README §8.3).
@@ -469,11 +547,7 @@ async function main(argv) {
       r = { ...roundAt(start), blocked, requests: 0, refusals: 0, calls0: rpcCalls, open: null, sigma: null, crossChecked: !cross, crossChecks: 0, crossAt: 0, syncs: 0, syncAt: 0 };
     }
     decided = { now, at: Date.now() };
-    if (stopping) { // cancel what rests in the open round, then exit
-      if (!dry && view.orders.some((o) => o.roundId === r.id && o.expiry > now) && now < r.cutoff && (await clear({ op: "cancel_all" }))) await send({ op: "cancel_all", roundId: r.id });
-      log("stopped", summary(view));
-      return true;
-    }
+    if (stopping) return halt(now);
     if (!r.open && !r.blocked) {
       // The engine's own opening (from the exact Chainlink report) first; the registry's record is the fallback.
       const o = await engineOpening(r, head.number) ?? await opening(registry, r, head.number);
@@ -503,22 +577,29 @@ async function main(argv) {
       if (await clear({ op: "sync" })) { r.syncs++; r.syncAt = Date.now(); r.requests++; await send({ op: "sync" }); } else await nap();
       return false;
     }
-    const held = !c ? (p === null && !sp.ok ? sp.reason : null)
-      : pulls(c.op, optional) ? null
-      : r.refusals >= MAX_REFUSALS ? `${r.refusals} refusals this round; no new quotes until the next`
-      : rpcCalls - r.calls0 > s.maxRpcPerRound ? `RPC budget of ${s.maxRpcPerRound} calls spent this round` : null;
-    if (!c || held) { if (held) note(held); await nap(); return false; }
-    if (dry) { log("would send", { ...c, p, optional }); view = apply(expire(view, now), { ...c, id: `dry:${++n}` }); if (optional) lastOptional = Date.now(); await nap(); return false; }
-    if (!(await clear(c, optional))) { await nap(); return false; }
-    if (optional) lastOptional = Date.now();
-    noted = "";
-    r.requests++;
-    if (refused(await send(c))) r.refusals++;
-    return false;
+    return act(c, optional, p === null && !sp.ok ? sp.reason : null, now, p);
+  }
+  /** One event-house decision (README "Event house"). Its r is the event round, whose brakes count afresh every 15 minutes.
+   * No sync after startup: its one round settles after the cutoff, when it has nothing to quote. */
+  async function stepEvent() {
+    const head = await provider.getBlock("latest"), now = Math.max(head.timestamp, clock), window = Math.floor(now / DURATION) * DURATION;
+    if (r?.window !== window) {
+      const blocked = await deploymentProblem();
+      if (r) log("window done", { start: r.window, requests: r.requests, refusals: r.refusals, rpcCalls: rpcCalls - r.calls0, ethBefore: r.eth0, ethAfter: r.eth, cycle: +cycle.toFixed(1) });
+      r = { id: ev.id, start: ev.terms.start, cutoff: ev.terms.cutoff, window, blocked, requests: 0, refusals: 0, calls0: rpcCalls };
+    }
+    decided = { now, at: Date.now() };
+    if (stopping) return halt(now);
+    if (r.blocked) { note(r.blocked); await nap(); return false; }
+    const price = now < r.cutoff ? await eventOdds(s.pollSeconds) : { ok: false, reason: "trading closed" };
+    let c = eventPlan(view, r, now, price, s, { cycle, optional: false }), optional = false;
+    if (!c && Date.now() - lastOptional >= 15_000) optional = !!(c = eventPlan(view, r, now, price, s, { cycle }));
+    if (Date.now() - beat >= 60_000) { beat = Date.now(); log("market", { secondsToCutoff: r.cutoff - now, price, quotes: price.ok ? quotes(price.p, s.halfSpreadCents) : null, ...summary(view) }); }
+    return act(c, optional, price.ok ? null : price.reason, now, price.p ?? null);
   }
   for (;;) {
     try {
-      if (await step()) return;
+      if (await (event ? stepEvent : step)()) return;
       errors = 0;
     } catch (e) {
       const limited = /429|Too Many Requests|rate limit/i.test(`${e.shortMessage ?? ""} ${e.message ?? ""} ${e.info?.responseStatus ?? ""}`);

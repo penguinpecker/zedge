@@ -19,6 +19,17 @@ house-bot)
   export HOME="$d" # main.mjs reads $HOME/.config/zedge/*; its pid lock lands here, never on the volume
   [ -n "${HOUSE_QUOTES_PORT:-}" ] || export HOUSE_QUOTES_PORT=8080 # GET /quotes for the indexer, private network only
   set -- node --experimental-strip-types services/market-maker/main.mjs ${MM_ARGS:-run --mainnet --settings services/market-maker/railway.settings.json} ;;
+event-house)
+  # The event's quotes, from its own wallet: the house's 4 order slots are the BTC book's (services/market-maker/README.md)
+  mkdir -p "$d/.config/zedge"
+  put .config/zedge/event-house.key "${ZEDGE_EVENT_HOUSE_KEY:-}"
+  put .config/zedge/thirdweb.id "${ZEDGE_THIRDWEB_ID:-}"
+  put .config/zedge/alchemy.key "${ZEDGE_ALCHEMY_KEY:-}"
+  [ -z "${ZEDGE_HORIZEN_RPC:-}" ] || put .config/zedge/horizen.url "$ZEDGE_HORIZEN_RPC"
+  unset ZEDGE_EVENT_HOUSE_KEY ZEDGE_THIRDWEB_ID ZEDGE_ALCHEMY_KEY ZEDGE_HORIZEN_RPC
+  export HOME="$d"
+  [ -n "${EVENT_HOUSE_QUOTES_PORT:-}" ] || export EVENT_HOUSE_QUOTES_PORT=8080 # GET /quotes for the indexer, private network only
+  set -- node --experimental-strip-types services/market-maker/main.mjs ${MM_ARGS:-run --event --mainnet} ;;
 payout-signer)
   put payout-signer.key "${PAYOUT_SIGNER_KEY:-}"
   put64 payout-signer.env "${PAYOUT_SIGNER_ENV_B64:-}"
@@ -41,8 +52,10 @@ indexer)
   put indexer.env "$(printf 'DATABASE_URL=%s\nINDEXER_HORIZEN_RPC_URL=%s\nINDEXER_SOLANA_RPC_URL=%s\n' "${DATABASE_URL:-}" "${ZEDGE_HORIZEN_RPC:-}" "${ZEDGE_SOLANA_RPC:-}")"
   # Optional and not a secret: the house bot's quotes, e.g. http://house-bot.railway.internal:8080/quotes
   [ -z "${ZEDGE_HOUSE_QUOTES_URL:-}" ] || printf '\nINDEXER_HOUSE_URL=%s\n' "$ZEDGE_HOUSE_QUOTES_URL" >> "$d/indexer.env"
+  # The same for the event house's, e.g. http://event-house.railway.internal:8080/quotes
+  [ -z "${ZEDGE_EVENT_HOUSE_QUOTES_URL:-}" ] || printf '\nINDEXER_EVENT_HOUSE_URL=%s\n' "$ZEDGE_EVENT_HOUSE_QUOTES_URL" >> "$d/indexer.env"
   unset DATABASE_URL ZEDGE_HORIZEN_RPC ZEDGE_SOLANA_RPC
   set -- node --experimental-strip-types services/indexer/main.mjs --settings "$d/indexer.env" ;;
-*) echo "start: set ZEDGE_SERVICE to house-bot, payout-signer, keeper or indexer" >&2; exit 64 ;;
+*) echo "start: set ZEDGE_SERVICE to house-bot, event-house, payout-signer, keeper or indexer" >&2; exit 64 ;;
 esac
 exec "$@"
