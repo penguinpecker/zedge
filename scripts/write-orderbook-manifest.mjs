@@ -4,13 +4,18 @@
  * Horizen inbox) of contracts/deployment/custody.json. Refuses anything those do not agree on. No keys, no transactions.
  *
  *   node scripts/write-orderbook-manifest.mjs --rpc https://26514.rpc.thirdweb.com --base-rpc https://base-rpc.publicnode.com \
- *     --checkpoint evidence/vela-mainnet/checkpoint.json --deploy-tx 0x… [--relayer 0x…] [--release NAME] --out FILE
+ *     --checkpoint evidence/vela-mainnet/checkpoint.json --deploy-tx 0x… [--relayer 0x…] [--release NAME] --out FILE \
+ *     [--rules public/events/us-house-2026.txt --events-out public/deployments/26514-events.json]
  *
- * Without --relayer it writes the "planned" manifest (its five head fields only, no reads): the site and the relayer stay closed.
+ * Without --relayer it writes the "planned" manifest (its five head fields only, no reads, --release required): the site and the
+ * relayer stay closed. The release defaults to orderbook-mainnet-<UTC date of the deploy transaction>. A deployment with an event
+ * (docs/cutover-politics.md) also gets the events manifest: its event, resolver and depositsFrom, which the order-book manifest's
+ * strict shape cannot carry; --rules must be the file under public/ whose Keccak-256 the deployment committed to.
  * Use the thirdweb gateway or a fork for Horizen, never the operator's Caldera endpoint.
  */
 import { createHash } from 'node:crypto';
 import { readFile, writeFile } from 'node:fs/promises';
+import { relative, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { createPublicClient, decodeFunctionData, encodeAbiParameters, hexToString, http, keccak256, parseAbi, parseAbiParameters, parseEventLogs, stringToHex } from 'viem';
 
@@ -20,7 +25,8 @@ const sha256 = (text) => createHash('sha256').update(text).digest('hex');
 const isAddress = (value) => typeof value === 'string' && /^0x[0-9a-fA-F]{40}$/.test(value);
 const SLOT = '0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc';
 const USDCE = '0xdf7108f8b10f9b9ec1aba01cca057268cbf86b6c';
-const RELEASE_DATE = '2026-10-07';
+const PARAMS = ['engine', 'applicationFingerprint', 'origin', 'epoch', 'markets', 'stakeLimits', 'chainlink', 'custody', 'event', 'resolver', 'depositsFrom'];
+const EVENT_KEYS = ['questionHash', 'start', 'cutoff', 'end', 'voidableAfter'];
 
 /** The engine configuration exactly as the guest stores it (the deploy request's, with the application ID filled in), in its canonical key order. */
 export function engineConfigJson(engine, applicationId) {
@@ -36,6 +42,26 @@ export function engineConfigJson(engine, applicationId) {
 export function permitDomainSeparator(name, version, chainId, token) {
   return keccak256(encodeAbiParameters(parseAbiParameters('bytes32, bytes32, bytes32, uint256, address'), [
     keccak256(stringToHex('EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)')), keccak256(stringToHex(name)), keccak256(stringToHex(version)), BigInt(chainId), token]));
+}
+
+/** The events manifest of a deployment's constructor parameters, or null for one without an event (the 10-07 application). The event,
+ * its resolver and depositsFrom come together; the rules text (the file the site serves, at `rules.path` under public/) must hash to
+ * the event's question hash. */
+export function eventsManifest(p, { release, applicationId, deployTx, rules }) {
+  const extra = Object.keys(p).filter((k) => !PARAMS.includes(k));
+  need(extra.length === 0, `unexpected deploy parameters: ${extra.join(', ')}`);
+  if (p.event === undefined && p.resolver === undefined && p.depositsFrom === undefined) return null;
+  const e = p.event, uint = (x) => Number.isSafeInteger(x) && x > 0;
+  need(e && typeof e === 'object' && JSON.stringify(Object.keys(e).sort()) === JSON.stringify([...EVENT_KEYS].sort()), 'the event parameter needs exactly questionHash, start, cutoff, end, voidableAfter');
+  need(/^0x[0-9a-f]{64}$/.test(e.questionHash) && EVENT_KEYS.slice(1).every((k) => uint(e[k])) && e.start < e.cutoff && e.cutoff < e.end && e.end < e.voidableAfter && e.voidableAfter < 2 ** 32,
+    'the event needs a question hash and times start < cutoff < end < voidableAfter within 32 bits');
+  need(e.end % 900 !== 0, 'the event must end off the 900 s grid, or it shares the all-accounts limit with a BTC round');
+  need(/^0x[0-9a-f]{40}$/.test(p.resolver ?? '') && !/^0x0{40}$/.test(p.resolver), 'the resolver must be a lowercase address');
+  need(![p.stakeLimits.house, p.engine.authority, p.engine.domain.endpoint, p.custody.vault, p.custody.inbox].map(lower).includes(p.resolver), 'the resolver is one of the deployment\'s own roles');
+  need(uint(p.depositsFrom), 'a deployment with an event needs depositsFrom, the last inbox index its predecessor processed');
+  need(rules && /^\/(?!.*\.\.)[\w./-]+$/.test(rules.path) && keccak256(rules.bytes) === e.questionHash, '--rules must be the file under public/ that hashes to the event\'s question hash');
+  return { schemaVersion: 1, kind: 'zedge-events', chainId: 26514, release, application: applicationId, deployTx, resolver: p.resolver, depositsFrom: p.depositsFrom,
+    event: { rules: rules.path, questionHash: e.questionHash, start: e.start, cutoff: e.cutoff, end: e.end, voidableAfter: e.voidableAfter } };
 }
 
 /** One client and reader per chain, every read at the block taken first. */
@@ -76,11 +102,11 @@ export async function custodySection(release, base, horizen) {
 
 async function main() {
   const { values: a } = parseArgs({ options: { rpc: { type: 'string' }, 'base-rpc': { type: 'string' }, checkpoint: { type: 'string' }, 'deploy-tx': { type: 'string' },
-    custody: { type: 'string', default: new URL('../contracts/deployment/custody.json', import.meta.url).pathname }, relayer: { type: 'string' }, out: { type: 'string' }, release: { type: 'string' } } });
+    custody: { type: 'string', default: new URL('../contracts/deployment/custody.json', import.meta.url).pathname }, relayer: { type: 'string' }, out: { type: 'string' }, release: { type: 'string' },
+    rules: { type: 'string' }, 'events-out': { type: 'string' } } });
   need(a.out, '--out is required');
-  const release = a.release ?? `orderbook-mainnet-${RELEASE_DATE}`;
-  const head = { schemaVersion: 3, kind: 'zedge-private-orderbook', chainId: 26514, status: a.relayer ? 'configured' : 'planned', release };
-  if (a.relayer === undefined) return { manifest: head, out: a.out };
+  const head = (release) => ({ schemaVersion: 3, kind: 'zedge-private-orderbook', chainId: 26514, status: a.relayer ? 'configured' : 'planned', release });
+  if (a.relayer === undefined) { need(a.release, '--release is required for a planned manifest'); return { manifest: head(a.release), out: a.out }; }
   need(isAddress(a.relayer), '--relayer must be an address');
   need(a.rpc && a['base-rpc'] && a.checkpoint && /^0x[0-9a-fA-F]{64}$/.test(a['deploy-tx'] ?? ''), '--rpc, --base-rpc, --checkpoint and --deploy-tx are required');
   need(!/calderachain/i.test(a.rpc), 'use the thirdweb gateway or a fork: the live operator depends on Caldera');
@@ -133,8 +159,14 @@ async function main() {
   need(k?.chainId === 8453 && lower(k.vault) === custody.vault.address && lower(k.inbox) === custody.inbox.address && lower(k.usdc) === custody.usdc.address, 'the guest custody parameter does not name the custody release');
   need(p.chainlink?.feedId === engine.oracle.btcFeedId && Array.isArray(p.chainlink.configs), 'unexpected chainlink parameter');
   const config = engineConfigJson(engine, applicationId);
+  const release = a.release ?? `orderbook-mainnet-${new Date(Number((await hz.client.getBlock({ blockNumber: receipt.blockNumber })).timestamp) * 1000).toISOString().slice(0, 10)}`;
+  const publicDir = new URL('../public/', import.meta.url).pathname;
+  const rules = a.rules && { path: `/${relative(publicDir, resolve(a.rules))}`, bytes: await readFile(a.rules) };
+  need(!rules || !rules.path.startsWith('/..'), '--rules must be a file under public/ (the site serves it)');
+  const events = eventsManifest(p, { release, applicationId, deployTx: lower(a['deploy-tx']), rules });
+  need(Boolean(events) === Boolean(a['events-out']), events ? '--events-out is required: this deployment has an event' : '--events-out is only for a deployment with an event');
 
-  const manifest = { ...head,
+  const manifest = { ...head(release),
     endpoint: { address: endpoint, runtimeCodeHash: codes[0], eip712: { name: 'Vela', version: '0' }, requestTypehash: typehash, protocolVersion: 0,
       minFeePerRequestWei: minFee.toString(), maxQueueSize: maxQueue.toString(), operator: lower(operator) },
     authenticator: { address: authenticator, runtimeCodeHash: codes[1], owner: lower(owner), teeSigner: lower(signer), enclavePublicKey: lower(enclaveKey) },
@@ -148,11 +180,12 @@ async function main() {
     custody,
     relayer: { path: '/api/relay', facilitator: lower(a.relayer) },
   };
-  return { manifest, out: a.out };
+  return { manifest, out: a.out, events, eventsOut: a['events-out'] };
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  const { manifest, out } = await main();
+  const { manifest, out, events, eventsOut } = await main();
   await writeFile(out, `${JSON.stringify(manifest, null, 2)}\n`);
+  if (events) { await writeFile(eventsOut, `${JSON.stringify(events, null, 2)}\n`); console.log(`wrote ${eventsOut}: event ${events.event.questionHash}, resolver ${events.resolver}, depositsFrom ${events.depositsFrom}`); }
   console.log(`wrote ${out}: ${manifest.status}${manifest.application ? `, application ${manifest.application.id}, rules ${manifest.application.sessionRulesHash}, vault ${manifest.custody.vault.address}` : ''}`);
 }
