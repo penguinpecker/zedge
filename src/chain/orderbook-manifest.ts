@@ -195,12 +195,31 @@ export function engineRound(book: Pick<ConfiguredOrderbook, "application">, star
 
 // ---------------------------------------------------------------- verification against the chain, at one block
 
-export type VerifiedOrderbook = { manifest: ConfiguredOrderbook; verified: true };
+/** `withdrawOnly`: the trigger proxy runs WITHDRAW_ONLY_TRIGGER, so the application credits no new deposit (it is being replaced,
+ * docs/cutover-politics.md): its balances can still be withdrawn, and the site offers nothing else. */
+export type VerifiedOrderbook = { manifest: ConfiguredOrderbook; verified: true; withdrawOnly?: true };
+
+/** The trigger implementations a book's proxy may run: the manifest's own (`trigger.implementation`, pinned by address and code hash),
+ * or WithdrawOnlyBookClockTrigger (adapters/vela/stack/contracts), which the cutover's freeze deploys at an address only the deployer's
+ * nonce decides. So that one is pinned by its code: the Keccak-256 of its runtime with its one immutable, UUPS's own address, zeroed
+ * at these byte offsets, where the deployed code must hold exactly its own address. Measured on the forge build that reproduces the
+ * live BookClockTrigger 0x6f85… byte for byte (same offsets there). */
+export const WITHDRAW_ONLY_TRIGGER = { codeHash: "0x92103c702b6d02b2ef76c06e80b9b477ea1454b9755fe287142fe080b83ac706" as Hex, self: [2711, 2752, 3057] } as const;
+/** Whether `code`, deployed at `at`, is the pinned code. */
+export function runsPinnedCode(code: Hex | undefined, at: Address, pin: { codeHash: Hex; self: readonly number[] }): boolean {
+  let hex = code?.slice(2).toLowerCase() ?? "";
+  const word = at.slice(2).toLowerCase().padStart(64, "0");
+  for (const start of pin.self) {
+    if (hex.slice(2 * start, 2 * start + 64) !== word) return false;
+    hex = `${hex.slice(0, 2 * start)}${"0".repeat(64)}${hex.slice(2 * start + 64)}`;
+  }
+  return keccak256(`0x${hex}`) === pin.codeHash;
+}
 
 /** Release identity and operator-key checks at the readers' blocks (Horizen, and Base for the vault). Fails closed on any change,
  * including a new executor key. `streams` is the already-verified streams manifest: the engine configuration must name its
  * registry, oracle, rules, feeds and collateral. */
-export async function verifyOrderbook(m: OrderbookManifest, streams: StreamsManifest, reader: StreamsReader, base: StreamsReader): Promise<VerifiedOrderbook> {
+export async function verifyOrderbook(m: OrderbookManifest, streams: StreamsManifest, reader: StreamsReader, base: StreamsReader, frozen = WITHDRAW_ONLY_TRIGGER): Promise<VerifiedOrderbook> {
   if (m.status !== "configured") throw new Error(ORDERBOOK_PLANNED_REASON);
   const mismatch = (ok: boolean, message = "Private order book checks did not pass.") => { if (!ok) throw new StreamsMismatchError(message); };
   const g = m.application.engine, o = g.oracle, p = streams.parameters;
@@ -212,6 +231,7 @@ export async function verifyOrderbook(m: OrderbookManifest, streams: StreamsMani
   const read = (at: Address, signature: string, args?: readonly unknown[]) => reader.read(at, signature, args);
   const equal = (at: Address, signature: string, expected: unknown, args?: readonly unknown[], message?: string) => read(at, signature, args).then((v) => mismatch(lower(v) === lower(expected), message));
   const e = m.endpoint.address, t = m.trigger, app = BigInt(m.application.id);
+  let withdrawOnly = false;
   const jobs: Promise<unknown>[] = [m.endpoint, m.authenticator, m.tokenAllowlist, { address: t.implementation, runtimeCodeHash: t.implementationCodeHash }].map(async (pin) => {
     const code = await reader.code(pin.address);
     mismatch(Boolean(code && code !== "0x" && keccak256(code) === pin.runtimeCodeHash));
@@ -228,7 +248,13 @@ export async function verifyOrderbook(m: OrderbookManifest, streams: StreamsMani
     equal(m.authenticator.address, "owner() view returns (address)", m.authenticator.owner, undefined, OPERATOR_KEYS_CHANGED),
     equal(m.authenticator.address, "getTeeSigner() view returns (address)", m.authenticator.teeSigner, undefined, OPERATOR_KEYS_CHANGED),
     equal(m.authenticator.address, "getPubSecp521r1() view returns (bytes)", m.authenticator.enclavePublicKey, undefined, OPERATOR_KEYS_CHANGED),
-    reader.storage(t.address, STREAMS_SLOTS.implementation).then((w) => mismatch(Boolean(w && /^0x[0-9a-f]{64}$/i.test(w) && BigInt(w) === BigInt(t.implementation)))),
+    reader.storage(t.address, STREAMS_SLOTS.implementation).then(async (w) => {
+      mismatch(Boolean(w && /^0x0{24}[0-9a-f]{40}$/i.test(w)));
+      const at = `0x${w!.slice(-40).toLowerCase()}` as Address;
+      if (at === t.implementation) return;
+      mismatch(runsPinnedCode(await reader.code(at), at, frozen));
+      withdrawOnly = true;
+    }),
     equal(t.address, "owner() view returns (address)", t.owner), equal(t.address, "processorEndpoint() view returns (address)", e),
     equal(t.address, "registry() view returns (address)", t.registry), equal(t.address, "inbox() view returns (address)", t.inbox),
     equal(t.address, "asset() view returns (uint8)", 0), equal(t.address, "duration() view returns (uint32)", 900),
@@ -236,5 +262,5 @@ export async function verifyOrderbook(m: OrderbookManifest, streams: StreamsMani
   const failures = (await Promise.allSettled(jobs)).flatMap((job) => job.status === "rejected" ? [job.reason as unknown] : []);
   // A changed operator key is named; any other difference is a mismatch; a failed read is only a failed read.
   if (failures.length) throw failures.find((f) => f instanceof StreamsMismatchError && f.message === OPERATOR_KEYS_CHANGED) ?? failures.find((f) => f instanceof StreamsMismatchError) ?? failures[0];
-  return { manifest: m, verified: true };
+  return withdrawOnly ? { manifest: m, verified: true, withdrawOnly: true } : { manifest: m, verified: true };
 }
