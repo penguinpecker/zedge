@@ -113,6 +113,7 @@ test("the CLI: --out writes what it prints, never over a file; nothing before th
   const r = node("sign-event-result.mjs", file, "no", "--events", events, "--out", out);
   assert.equal(r.status, 0, r.stderr);
   assert.equal(readFileSync(out, "utf8"), r.stdout);
+  assert.equal(statSync(out).mode & 0o777, 0o600, "only the owner can read a signed result");
   assert.equal(JSON.parse(r.stdout).answer, "No");
   const again = node("sign-event-result.mjs", file, "yes", "--events", events, "--out", out);
   assert.equal(again.status, 1);

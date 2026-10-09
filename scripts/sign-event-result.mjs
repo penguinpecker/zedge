@@ -62,7 +62,7 @@ async function cli(argv) {
   outcomeOf(answer); // before the manifests are read
   const result = await signResult(keyFile, answer, json(a.book ?? new URL("26514-orderbook.json", deployments)), json(a.events ?? new URL("26514-events.json", deployments)));
   const text = `${JSON.stringify(result, null, 2)}\n`;
-  if (a.out) writeFileSync(a.out, text, { flag: "wx" });
+  if (a.out) writeFileSync(a.out, text, { flag: "wx", mode: 0o600 }); // a bearer result once the event has ended: owner-only, like the key
   process.stdout.write(text);
 }
 

@@ -213,7 +213,7 @@ The operator posts the result as a signature from a dedicated resolver wallet, p
    - The script recovers the signer and refuses unless it is the pinned resolver.
    - It refuses any answer but yes or no.
    - It refuses before the event's end, by this computer's clock. A signed result settles the event for whoever sends it, so sign one answer only, once it is known, and keep the file to yourself until it is applied. Use `--check` to test the key.
-   - It prints the result, and with `--out` also writes it, never over an existing file.
+   - It prints the result, and with `--out` also writes it with mode 600, never over an existing file.
    - The result is final once applied, so check the answer against the rules' sources first.
 4. **Send it,** after the event's end: `node scripts/sign-event-result.mjs submit result.json --mainnet --event`. This is `main.mjs resolve result.json --mainnet --event`.
    - **Before any request**, it refuses the file unless it is exactly a result of this deployment's event, signed by the pinned resolver, and the chain has reached the event's end.
