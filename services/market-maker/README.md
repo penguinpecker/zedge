@@ -20,6 +20,9 @@ node --experimental-strip-types services/market-maker/main.mjs <command> (--main
   deposit <usdc>    moves Base USDC from the house wallet into the ZEDGE vault with a permit (the house sends it and pays the Base gas);
                     the order book credits it about a minute later
   withdraw <usdc>   asks the order book to pay free private cash to the house on Base; the payout signer pays it
+  resolve <file>    sends the event's signed result (see The event's result)
+
+  --event           any command as the event house, with its own wallet (see Event house)
 ```
 
 The bot refuses to start unless exactly one target is named:
@@ -139,6 +142,85 @@ on every interface (`::`, so Railway's private network reaches it); anything els
 - **Never in the way.** Not served under `--dry-run`, whose orders are simulated. A server error (a port in use, a bad port) is
   logged as `quotes server error` and the bot quotes on without it.
 
+## Event house
+
+A second house quotes the Yes/No event, "Will Democrats win control of the US House in the 3 November 2026 midterms?" (Yes is Up, No is Down). It is the same bot with `--event`, running as its own Railway service (`ZEDGE_SERVICE=event-house`) from its own wallet. The BTC house cannot quote it: its 4 order slots are all in use.
+
+```
+node scripts/new-key.mjs ~/.config/zedge/event-house.key      # once, in your own Terminal: prints only the address
+node --experimental-strip-types services/market-maker/main.mjs status --event --mainnet
+node --experimental-strip-types services/market-maker/main.mjs deposit 20 --event --mainnet
+node --experimental-strip-types services/market-maker/main.mjs run --event --mainnet [--dry-run]
+```
+
+- **The event.** Read from `public/deployments/26514-events.json` (with `--fork`, from `--events <file>`). It must name the application of the order-book manifest. The engine round ID comes from `eventRound()` in `adapters/vela/crypto/guest.ts`.
+- **The wallet.** On mainnet the key is `~/.config/zedge/event-house.key`, with the same file rules as the house's. The bot refuses the BTC house's key and the resolver's.
+  - **What to fund.** Horizen ETH for its requests: about 0.00006 ETH a day at the defaults (about 34 requests), so about 0.0015 ETH to the cutoff; the operator pays about 0.6 times that again. Base ETH and USDC for the deposit. 20 USDC covers the defaults.
+- **The price.** Yes is read every `pollSeconds` (20 s) from two places:
+  - the Polymarket CLOB midpoint of the Yes token;
+  - Kalshi's `CONTROLH-2026-D` bid and ask.
+
+  A read counts for 60 s.
+  - **Both up:** the price is Polymarket's midpoint, if it is within 3 cents of Kalshi's mid.
+  - **Polymarket down:** the price is Kalshi's mid. polymarket.com does not resolve from the owner's Mac, so this case is expected.
+  - **No price:** if Kalshi is down (Polymarket alone has no spread to check and nothing to check it against), if Kalshi's spread is above 5 cents, or if the two differ by more than 3 cents.
+  - With no price it sends a `cancel_all` while its quotes rest. A quote lasts hours, so none may stay up with no price behind it.
+- **Quotes.** These are `quotes()` and `plan()` of `pricing.mjs`, as for BTC, around that price:
+  - a mint of sets for the asks, and the four sides on their own expiry grids;
+  - drift pulls, and the 4-order limit;
+  - at Polymarket's 0.905 and a 2-cent half-spread: Yes 88/93, No 7/12.
+
+  Quotes live 4 hours (`quoteLifetimeSeconds`). Each side rotates every 4 hours, the four an hour apart: 24 requests a day when nothing moves.
+- **The cutoff.** It places nothing from cutoff − 120 (3 Nov 2026 21:58 UTC) and sends a backstop `cancel_all` from cutoff − 90. No quote outlives cutoff − 60. After the cutoff it only waits, and can be stopped. Before the event's `start` it places nothing.
+- **Stake.** The guest does not exempt it: at most 50 USDC of worst stake (the account limit). Its held shares also count toward the 200 USDC limit for all accounts together, with every user's. `maxStakeUsdc` (default 20) cannot be set above 50. With the defaults it sells about 15 shares of one side before that side's asks stop.
+- **Guards as for BTC.** The same queue and ETH guards, the same refusal and RPC brakes, the same lock and stop. The brakes count per 15 minutes instead of per round.
+  - **One difference:** needed cancels pass the brakes only until 3 of them are refused or fail in one 15-minute window. Its quotes rest for hours, so a cancel that keeps failing would otherwise go out back to back, below the ETH floor, until its wallet and the operator's ran dry. It tries again in the next window.
+- **No syncs after startup.** Its one round settles only after the cutoff, when it has nothing to quote, so the BTC house's settlement sync has no use here.
+- **Quotes for the site.** `GET /quotes` on `EVENT_HOUSE_QUOTES_PORT` (`start.sh` sets 8080). The indexer reads it as `INDEXER_EVENT_HOUSE_URL` (`ZEDGE_EVENT_HOUSE_QUOTES_URL` on Railway). The body is `null` until the first decision, then:
+
+  ```
+  { "at": 1791563300000, "round": "0x<64 hex: the event's engine round ID>",
+    "up":   { "ask": { "cents": 93, "shares": 5 }, "bid": { "cents": 88, "shares": 5 } },
+    "down": { "ask": { "cents": 12, "shares": 5 }, "bid": { "cents": 7, "shares": 5 } } }
+  ```
+
+  It follows the same rules as the house's body, with `round` in place of `start`.
+- **Railway.**
+  - Variables: `ZEDGE_SERVICE=event-house`, the key as `ZEDGE_EVENT_HOUSE_KEY`, and the house's `ZEDGE_THIRDWEB_ID`, `ZEDGE_ALCHEMY_KEY` and optional `ZEDGE_HORIZEN_RPC`.
+  - `MM_ARGS` replaces the default `run --event --mainnet`. For a dry run: `MM_ARGS='run --event --mainnet --dry-run'`.
+
+| Setting (with `--event`) | Default | Range |
+| --- | --- | --- |
+| `halfSpreadCents` | 2 | 1–20 |
+| `quoteShares` | 5 | 1–1,000 |
+| `mintSets` | 10 | ≥ `quoteShares` |
+| `maxStakeUsdc` | 20 | 1–50 |
+| `quoteLifetimeSeconds` | 14,400 | 600–86,400 |
+| `requoteDriftCents` | 3 | 1–50 |
+| `maxRpcPerRound` | 300 per 15 minutes | 50–20,000 |
+| `pollSeconds` | 20 | 15–30 |
+| `minEthWei` | `"200000000000000"` | — |
+
+## The event's result
+
+The operator posts the result as a signature from a dedicated resolver wallet, pinned at deploy. The guest checks it (guest README §13), so a request carrying it can come from any registered sender. The resolver key never sends a transaction and needs no gas.
+
+1. **Make the resolver wallet,** in your own Terminal: `node scripts/new-key.mjs ~/.config/zedge/resolver.key`. The key goes to that file with mode 600, and only the address is printed. A file that already exists is never replaced. Keep the key offline, with a backup. If it is lost, no result can be posted and the event voids on 31 Jan 2027.
+2. **Before the deploy, check the address:** `node scripts/sign-event-result.mjs ~/.config/zedge/resolver.key --check`. This signs a test message that cannot settle anything and prints the address it recovers to. That address must be the one passed to `deploy-book.mjs --resolver`.
+3. **Sign the result** (offline): `node scripts/sign-event-result.mjs ~/.config/zedge/resolver.key yes|no --out result.json`.
+   - The deployment comes from the committed manifests (`--book` and `--events` override them).
+   - The script recovers the signer and refuses unless it is the pinned resolver.
+   - It refuses any answer but yes or no.
+   - It refuses before the event's end, by this computer's clock. A signed result settles the event for whoever sends it, so sign one answer only, once it is known, and keep the file to yourself until it is applied. Use `--check` to test the key.
+   - It prints the result, and with `--out` also writes it, never over an existing file.
+   - The result is final once applied, so check the answer against the rules' sources first.
+4. **Send it,** after the event's end: `node scripts/sign-event-result.mjs submit result.json --mainnet --event`. This is `main.mjs resolve result.json --mainnet --event`.
+   - **Before any request**, it refuses the file unless it is exactly a result of this deployment's event, signed by the pinned resolver, and the chain has reached the event's end.
+   - **Then** it sends one sync, so the exchange clock passes the end, and then the result.
+   - **The sender:** `--event` sends from the event house, whose service sends nothing after the cutoff (one sync if it restarts, so do not redeploy it meanwhile). Without it the BTC house sends, and then its Railway bot must be in dry run first, or the two race on one nonce.
+   - **What a refusal means:** `resolve: refused by the engine` judged at a time before the end means the clock was stale; send it again. `resolve: nothing to apply` means the event does not exist (it was never created, or it is already archived).
+5. **Publish** `result.json` (for example as `public/events/us-house-2026-result.json`), so that anyone can recover the signer. The guest's own public record is a `settle` record for the event's registry round ID: kind 2, outcome 1 (Yes) or 2 (No), source 4.
+
 ## Logs
 
 Logs are one JSON line per event. They include the house's private view (cash, orders, holdings, stake), which is the operator's own data, so do not send these logs to a third party. A `round done` line records the round's requests, refusals, JSON-RPC calls, the house's ETH before and after, and the request cycle in seconds.
@@ -161,6 +243,24 @@ The test runs offline in under a second. It checks:
 - **The start guard:** a non-loopback or HTTPS fork URL, a loopback node that is not Anvil, no target named, and both targets named are each refused.
 - **The settings example** holds the defaults; `maxRpcPerRound` takes up to 20,000.
 - **Quotes for the site:** the lowest resting sell and the highest resting buy per outcome, expired, filled and other-round orders left out; during a rotation, the staged replacement, not the ask expiring within 2 s.
+
+`event.test.mjs` checks the event house:
+
+- **Feeds:** Polymarket's midpoint and Kalshi's answer as the live APIs gave them, and refusals of anything else.
+- **Price rules:** both up, Polymarket down, Kalshi down, both down, 3 cents apart against more, and a 5-cent spread against a wider one.
+- **Quotes:** 88/93 and 7/12 at 0.905 and at Kalshi's 0.9005.
+- **Plan:** nothing before the start; the mint and four 4-hour quotes; the stake cap after repeated fills; a `cancel_all` when the price goes; the cutoff.
+- **Brakes:** a needed cancel passes them, the event house's only until 3 of its cancels are refused in a window.
+- **The `/quotes` body.**
+- **Settings, the wallet guards, and the event against the guest's vectors.**
+
+`node --test scripts/sign-event-result.test.mjs` checks the resolver's tools:
+
+- **The key file:** mode 600, only the address printed, never replaced; a file of another mode, a link, a folder or junk is refused.
+- **Signing:** the round trip, and that the result is in the guest's format; a yes or no only; nothing before the event's end.
+- **Wrong results refused:** a key that is not the resolver, and a result changed in any field.
+- **The guest's vector:** a byte-for-byte match with the signature the Go guest accepts.
+- **`--check`.**
 
 ## Not yet proven
 
