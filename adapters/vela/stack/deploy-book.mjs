@@ -15,7 +15,7 @@
 // must have code. N is proven from the chain (cutover.mjs facts prints it) and on mainnet --deposits-from must repeat it;
 // a fork, where no operator serves the old application, may take --deposits-from alone. The event's question hash is the
 // Keccak-256 of --rules (default public/events/us-house-2026.txt). On mainnet the guest must already be in the Railway
-// manager's artifact store (runbook step 6), which is read over `railway ssh` in the zedge-vela project (--railway-project its
+// manager's artifact store (runbook step 1), which is read over `railway ssh` in the zedge-vela project (--railway-project its
 // ID; --blobs if SHARED_DATA_FOLDER is elsewhere); after the request the script always waits for DeployRequestCompleted and the
 // state root, then registers the deployer's key with the new application and sends the first syncs, which start its clock and
 // create the next BTC rounds. Rerun-safe: each transaction's hash goes into the checkpoint (evidence/vela-book-politics[-fork]/)
@@ -207,7 +207,7 @@ check("trigger: proxy to the implementation, owner the deployer, our endpoint, t
   lower(await trigger.registry()) === REGISTRY && lower(await trigger.inbox()) === INBOX && (await trigger.asset()) === 0n && (await trigger.duration()) === 900n);
 passOrDie();
 
-// ---- the guest must already be in the manager's artifact store (runbook step 6): without it the request fails and is wasted
+// ---- the guest must already be in the manager's artifact store (runbook step 1): without it the request fails and is wasted
 if (!fork && !ck.steps[k]?.gasUsed) {
   check(`guest ${WASM_SHA256} in the Railway manager's artifact store (${a.blobs ?? RAILWAY.blobs})`, blobInPlace(WASM_SHA256, { project: a["railway-project"], blobs: a.blobs }));
   passOrDie();
@@ -254,7 +254,7 @@ if (!fork || a.wait) {
   await firstSyncs();
 } else console.log("  (fork without --wait: no manager, so the request stays queued; nothing more to check)");
 console.log(`\n${fork ? "FORK" : "LIVE"}: book application ${s.applicationId}, trigger ${TRIGGER} (implementation ${impl}), guest ${WASM_SHA256}, depositsFrom ${N}`);
-console.log(`  next (runbook step 8): scripts/write-orderbook-manifest.mjs --deploy-tx ${s.hash} --rules ${a.rules ?? "public/events/us-house-2026.txt"} …`);
+console.log(`  next (runbook step 7): scripts/write-orderbook-manifest.mjs --deploy-tx ${s.hash} --rules ${a.rules ?? "public/events/us-house-2026.txt"} …`);
 
 /** A new application has no clock until a tick is applied, and rounds are only created by ticks (guest README section 8,
  * Bootstrap): the deployer registers its key with it and sends one sync, whose tick starts the clock and creates the next two
@@ -309,5 +309,5 @@ async function firstSyncs() {
   check(`the new application asks for deposits from ${N + 1n}`, w[1] === N + 1n);
   check(`BTC rounds ${t1} and ${t1 + 900} (${new Date(t1 * 1000).toISOString()}) exist in the new application`, ids.every((id) => held.includes(id)));
   passOrDie();
-  console.log("  the event round is not in the tick request (the guest never asks the trigger about it): confirm it with the event house (runbook step 10)");
+  console.log("  the event round is not in the tick request (the guest never asks the trigger about it): confirm it with the event house (runbook step 10e)");
 }
