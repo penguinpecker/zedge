@@ -2,7 +2,8 @@
 /** The event's result, signed with the resolver key (services/market-maker/README.md, "The event's result").
  *
  *   node scripts/sign-event-result.mjs <resolver key file> <yes|no> [--out FILE] [--book FILE] [--events FILE]
- *       Offline. Signs the result, recovers the signer and refuses unless it is the resolver the deployment pinned; prints the
+ *       Offline, and only after the event's end by this computer's clock. Signs the result, recovers the signer and refuses
+ *       unless it is the resolver the deployment pinned; prints the
  *       result and with --out also writes it (never over a file). The manifests default to the committed
  *       public/deployments/26514-orderbook.json and 26514-events.json.
  *   node scripts/sign-event-result.mjs <resolver key file> --check
@@ -34,9 +35,12 @@ export function outcomeOf(answer) {
   return a === "yes" ? 1 : a === "no" ? 2 : refuse(`the result is yes or no, not ${JSON.stringify(answer)}`);
 }
 
-/** The signed result of `answer` for the deployment of `book` and `events`, checked to recover to its pinned resolver. */
-export async function signResult(keyFile, answer, book, events) {
+/** The signed result of `answer` for the deployment of `book` and `events`, checked to recover to its pinned resolver. Refused
+ * before the event's end by this computer's clock (`now`, UTC seconds): a signed result settles the event for whoever sends it,
+ * so none exists before the answer can be known. */
+export async function signResult(keyFile, answer, book, events, now = Math.floor(Date.now() / 1000)) {
   const outcome = outcomeOf(answer), event = deploymentEvent(book.application.engineConfigJson, events, codec);
+  if (now < event.terms.end) refuse(`no result is signed before the event's end, ${new Date(event.terms.end * 1000).toISOString()}; --check tests the key`);
   const result = resultBody(event, outcome, await new Wallet(readKey(keyFile)).signTypedData(...resultTypedData(event, outcome, codec)));
   checkResult(result, event, { ethers: { verifyTypedData }, codec });
   return result;

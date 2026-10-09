@@ -211,12 +211,13 @@ The operator posts the result as a signature from a dedicated resolver wallet, p
    - The deployment comes from the committed manifests (`--book` and `--events` override them).
    - The script recovers the signer and refuses unless it is the pinned resolver.
    - It refuses any answer but yes or no.
+   - It refuses before the event's end, by this computer's clock. A signed result settles the event for whoever sends it, so sign one answer only, once it is known, and keep the file to yourself until it is applied. Use `--check` to test the key.
    - It prints the result, and with `--out` also writes it, never over an existing file.
    - The result is final once applied, so check the answer against the rules' sources first.
 4. **Send it,** after the event's end: `node scripts/sign-event-result.mjs submit result.json --mainnet --event`. This is `main.mjs resolve result.json --mainnet --event`.
    - **Before any request**, it refuses the file unless it is exactly a result of this deployment's event, signed by the pinned resolver, and the chain has reached the event's end.
    - **Then** it sends one sync, so the exchange clock passes the end, and then the result.
-   - **The sender:** `--event` sends from the event house, whose service sends nothing after the cutoff. Without it the BTC house sends, and then its Railway bot must be in dry run first, or the two race on one nonce.
+   - **The sender:** `--event` sends from the event house, whose service sends nothing after the cutoff (one sync if it restarts, so do not redeploy it meanwhile). Without it the BTC house sends, and then its Railway bot must be in dry run first, or the two race on one nonce.
    - **What a refusal means:** `resolve: refused by the engine` judged at a time before the end means the clock was stale; send it again. `resolve: nothing to apply` means the event does not exist (it was never created, or it is already archived).
 5. **Publish** `result.json` (for example as `public/events/us-house-2026-result.json`), so that anyone can recover the signer. The guest's own public record is a `settle` record for the event's registry round ID: kind 2, outcome 1 (Yes) or 2 (No), source 4.
 
@@ -255,8 +256,8 @@ The test runs offline in under a second. It checks:
 
 `node --test scripts/sign-event-result.test.mjs` checks the resolver's tools:
 
-- **The key file:** mode 600, only the address printed, never replaced.
-- **Signing:** the round trip, and that the result is in the guest's format; a yes or no only.
+- **The key file:** mode 600, only the address printed, never replaced; a file of another mode, a link, a folder or junk is refused.
+- **Signing:** the round trip, and that the result is in the guest's format; a yes or no only; nothing before the event's end.
 - **Wrong results refused:** a key that is not the resolver, and a result changed in any field.
 - **The guest's vector:** a byte-for-byte match with the signature the Go guest accepts.
 - **`--check`.**

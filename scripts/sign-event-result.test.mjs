@@ -2,7 +2,7 @@
 //   node --test scripts/sign-event-result.test.mjs
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -18,6 +18,9 @@ const book = JSON.parse(readFileSync(new URL("../public/deployments/26514-orderb
 // An events manifest for the committed application, as the manifest writer would write it for the House event.
 const eventsFor = (resolver) => ({ schemaVersion: 1, kind: "zedge-events", chainId: 26514, release: "test", application: book.application.id, deployTx: `0x${"0".repeat(64)}`,
   resolver, depositsFrom: 8, event: { rules: "/events/us-house-2026.txt", questionHash: keccak256(toUtf8Bytes("rules")), start: 1_791_500_400, cutoff: 1_793_743_200, end: 1_793_743_201, voidableAfter: 1_801_439_999 } });
+const END = 1_793_743_201; // the event's end: signing waits for it
+/** The same events, with the times moved to `cutoff` (the CLI signs by this computer's clock). */
+const at = (events, cutoff) => ({ ...events, event: { ...events.event, start: cutoff - 3600, cutoff, end: cutoff + 1, voidableAfter: cutoff + 86_400 } });
 
 test("new-key: a mode 600 key file, its address alone on stdout, never over a file", () => {
   const file = join(dir, "new", "resolver.key"), r = node("new-key.mjs", file);
@@ -33,22 +36,41 @@ test("new-key: a mode 600 key file, its address alone on stdout, never over a fi
   assert.equal(readKey(file), key, "the first key is kept");
 });
 
+test("key files: only a regular file of mode 600 holding one key is read", () => {
+  const file = join(dir, "modes.key"), link = join(dir, "modes-link.key"), key = Wallet.createRandom().privateKey;
+  writeKey(file, key);
+  assert.equal(readKey(file), key);
+  chmodSync(file, 0o640);
+  assert.throws(() => readKey(file), /mode 600/, "readable by others");
+  chmodSync(file, 0o600);
+  symlinkSync(file, link);
+  assert.throws(() => readKey(link), /not a link/);
+  const folder = join(dir, "folder.key");
+  mkdirSync(folder, { mode: 0o600 });
+  assert.throws(() => readKey(folder), /regular file/, "mode 600 but no file");
+  const junk = join(dir, "junk.key");
+  writeFileSync(junk, "0x1234\n", { mode: 0o600 });
+  assert.throws(() => readKey(junk), /64 hex digits/);
+  assert.throws(() => readKey(join(dir, "none.key")), /no key file/);
+});
+
 test("sign: the result recovers to the resolver, in the format the guest takes; only yes or no", async () => {
   const file = join(dir, "resolver.key"), wallet = Wallet.createRandom(), resolver = wallet.address.toLowerCase();
   writeKey(file, wallet.privateKey);
   const events = eventsFor(resolver), event = deploymentEvent(book.application.engineConfigJson, events, codec);
-  const result = await signResult(file, "Yes", book, events);
+  const result = await signResult(file, "Yes", book, events, END);
   assert.deepEqual([result.outcome, result.answer, result.round, result.applicationId, result.resolver], [1, "Yes", `0x${event.id}`, book.application.id, resolver]);
   assert.equal(verifyTypedData(...resultTypedData(event, 1, codec), result.signature).toLowerCase(), resolver);
   assert.deepEqual(codec.resolveBody(result.outcome, result.signature), { type: "resolve", outcome: 1, signature: result.signature });
-  assert.equal((await signResult(file, "no", book, events)).outcome, 2);
-  for (const answer of ["maybe", "", "1", "yes ", "void", "constructor"]) await assert.rejects(signResult(file, answer, book, events), /yes or no/, answer);
-  await assert.rejects(signResult(file, "yes", book, eventsFor(`0x${"4".repeat(40)}`)), /not by the resolver/, "a key that is not the pinned resolver");
+  assert.equal((await signResult(file, "no", book, events, END)).outcome, 2);
+  for (const answer of ["maybe", "", "1", "yes ", "void", "constructor"]) await assert.rejects(signResult(file, answer, book, events, END), /yes or no/, answer);
+  await assert.rejects(signResult(file, "yes", book, eventsFor(`0x${"4".repeat(40)}`), END), /not by the resolver/, "a key that is not the pinned resolver");
+  await assert.rejects(signResult(file, "yes", book, events, END - 1), /before the event's end/, "a signed result is final for whoever sends it: none before the end");
 
   // What the submit step checks before it spends a request.
   const ethers = { verifyTypedData };
   assert.equal(checkResult(result, event, { ethers, codec }), 1);
-  const no = await signResult(file, "no", book, events);
+  const no = await signResult(file, "no", book, events, END);
   assert.throws(() => checkResult({ ...result, outcome: 2, answer: "No" }, event, { ethers, codec }), /signed by/, "Yes's signature on a No");
   assert.throws(() => checkResult({ ...no, outcome: 1 }, event, { ethers, codec }), /not a signed result/, "an outcome that does not match its answer");
   assert.throws(() => checkResult({ ...no, outcome: 3 }, event, { ethers, codec }), /not a signed result/, "a void is not a result");
@@ -67,7 +89,7 @@ test("sign: the guest's own vector, byte for byte", async () => {
   writeKey(file, keccak256(toUtf8Bytes("zedge-vela-guest-vector:resolver"))); // the vectors' resolver key
   const events = { ...eventsFor(v.resolver), chainId: 31337, application: "17429726349691885448",
     event: { rules: "/events/test.txt", questionHash: v.event.question, start: v.event.start, cutoff: v.event.cutoff, end: v.event.end, voidableAfter: v.event.voidableAfter } };
-  const result = await signResult(file, "no", { application: { engineConfigJson: v.engineConfig } }, events);
+  const result = await signResult(file, "no", { application: { engineConfigJson: v.engineConfig } }, events, v.event.end);
   assert.deepEqual([result.round, result.outcome, result.signature], [`0x${v.roundId}`, v.outcome, v.signature]);
 });
 
@@ -84,10 +106,10 @@ test("--check: a test signature that recovers to the key's address; the CLI prin
   assert.match(bad.stderr, /yes or no/);
 });
 
-test("the CLI: --out writes what it prints, never over a file", () => {
+test("the CLI: --out writes what it prints, never over a file; nothing before the end", () => {
   const file = join(dir, "cli.key"), wallet = Wallet.createRandom(), events = join(dir, "events.json"), out = join(dir, "result.json");
   writeKey(file, wallet.privateKey);
-  writeFileSync(events, JSON.stringify(eventsFor(wallet.address.toLowerCase())));
+  writeFileSync(events, JSON.stringify(at(eventsFor(wallet.address.toLowerCase()), 1_700_000_000))); // ended in 2023
   const r = node("sign-event-result.mjs", file, "no", "--events", events, "--out", out);
   assert.equal(r.status, 0, r.stderr);
   assert.equal(readFileSync(out, "utf8"), r.stdout);
@@ -95,4 +117,10 @@ test("the CLI: --out writes what it prints, never over a file", () => {
   const again = node("sign-event-result.mjs", file, "yes", "--events", events, "--out", out);
   assert.equal(again.status, 1);
   assert.equal(JSON.parse(readFileSync(out, "utf8")).answer, "No", "the first result is kept");
+  const future = join(dir, "future-events.json");
+  writeFileSync(future, JSON.stringify(at(eventsFor(wallet.address.toLowerCase()), 4_000_000_000))); // ends in 2096
+  const early = node("sign-event-result.mjs", file, "yes", "--events", future);
+  assert.equal(early.status, 1);
+  assert.match(early.stderr, /before the event's end/);
+  assert.equal(early.stdout, "", "no signature printed");
 });
