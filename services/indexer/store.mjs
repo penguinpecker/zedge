@@ -14,6 +14,10 @@ const CHUNK = 1_000; // rows per insert (a statement takes at most 65,535 parame
 const moved = () => Object.assign(new Error("INDEXER_CURSOR_MOVED"), { code: "INDEXER_CURSOR_MOVED", lost: true });
 const n = (v) => v === null ? null : Number(v);
 
+/** The writer's advisory lock key for an application id. Ids are uint64 (the deploy request id's first 8 bytes), Postgres keys a
+ * signed bigint: an id from 2^63 up takes the key 2^64 below it, so every id has its own key. */
+export const lockKey = (id) => BigInt.asIntN(64, BigInt(id)).toString();
+
 /** The schema and both cursors (Horizen from `start`, the block before the application's deployment). Writer only. */
 export async function prepare(writer, start) {
   await writer.unsafe(await readFile(new URL("./schema.sql", import.meta.url), "utf8"));
@@ -35,6 +39,12 @@ export const writes = (writer) => ({
     if ((await sql`update cursors set block = ${fork.block}, hash = ${bytes(fork.hash)}, time = ${fork.time} where name = ${name} and block = ${expect.block}`).count !== 1) throw moved();
     for (const table of Object.keys(TABLES)) await sql`delete from ${sql(table)} where block > ${fork.block}`;
   }),
+  /** Whether a request at or below `start` (the block before this application's deployment) is held: only another application
+   * can have left one, in a database not yet reset after a switch-over (README). */
+  async foreign(start) {
+    const [r] = await writer`select exists (select 1 from requests where block <= ${start}) as yes`;
+    return r.yes;
+  },
   async held(from) {
     return new Set((await writer`select minute from btc_minutes where minute >= ${from}`).map((r) => Number(r.minute)));
   },

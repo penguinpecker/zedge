@@ -2,12 +2,13 @@
 // reaches it same-origin through a Vercel rewrite, whose CDN shares the public GETs. An account is asked for in a POST body,
 // never in the URL, and that answer is never cached. Nothing here logs an address, an IP, a body or a URL: only error codes.
 import { gzipSync } from "node:zlib";
-import { decodeClock } from "../../adapters/vela/crypto/guest.ts";
+import { decodeClock, eventRound } from "../../adapters/vela/crypto/guest.ts";
 import { engineRound } from "../../src/chain/orderbook-manifest.ts";
 import { decodeSettle } from "../../src/chain/vault.ts";
 
 export const ROUND = 900, MAX_ROUNDS = 200, RESULTS_ROUNDS = 96, PRICE_MINUTES = 120, MAX_MINUTES = 1_440, PAGE = 50, MAX_PAGE = 100, MAX_BODY = 1_024;
 export const HOUSE_MS = 20_000; // the house's quotes are left out of /v1/live once the latest good copy was fetched longer ago than this
+export const EVENT_MS = 60_000; // and the event house's, after this
 /** Balances below these get an alert in /v1/status (wei). The relayer's: twice its refusal floor (server/relay.ts RELAY_MIN_BALANCE_WEI). */
 export const LOW = { operator: 5_000_000_000_000_000n, house: 5_000_000_000_000_000n, relayer: 1_000_000_000_000_000n };
 const SHORT = "public, max-age=0, s-maxage=1, stale-while-revalidate=4";
@@ -30,19 +31,45 @@ function windowed(limit, ms = 10_000) {
 }
 
 const exactly = (v, keys) => Boolean(v) && typeof v === "object" && !Array.isArray(v) && Object.keys(v).sort().join() === keys;
-/** The house bot's /quotes answer (services/market-maker README), checked field by field: another service's output. Null when it has
- * none yet; anything malformed throws. */
-export function parseHouse(v) {
-  if (v === null) return null;
-  const need = (ok) => { if (!ok) throw Object.assign(new Error("INDEXER_HOUSE_SHAPE"), { code: "INDEXER_HOUSE_SHAPE" }); };
+const shape = (code) => (ok) => { if (!ok) throw Object.assign(new Error(code), { code }); };
+/** `up` and `down` of a /quotes answer: each { ask, bid }, each { cents 1-99, shares > 0 } or null. */
+function sides(v, need) {
   const level = (q) => {
     if (q === null) return null;
     need(exactly(q, "cents,shares") && Number.isInteger(q.cents) && q.cents >= 1 && q.cents <= 99 && Number.isFinite(q.shares) && q.shares > 0);
     return { cents: q.cents, shares: q.shares };
   };
   const side = (x) => { need(exactly(x, "ask,bid")); return { ask: level(x.ask), bid: level(x.bid) }; };
+  return { up: side(v.up), down: side(v.down) };
+}
+/** The house bot's /quotes answer (services/market-maker README), checked field by field: another service's output. Null when it has
+ * none yet; anything malformed throws. */
+export function parseHouse(v) {
+  if (v === null) return null;
+  const need = shape("INDEXER_HOUSE_SHAPE");
   need(exactly(v, "at,down,start,up") && Number.isSafeInteger(v.at) && v.at > 0 && Number.isSafeInteger(v.start));
-  return { at: v.at, start: v.start, up: side(v.up), down: side(v.down) };
+  return { at: v.at, start: v.start, ...sides(v, need) };
+}
+/** The event house's /quotes answer, checked the same way: `round` (the event's engine round id, 0x and 64 lowercase hex) in place of
+ * `start`; up is Yes, down is No. */
+export function parseEventHouse(v) {
+  if (v === null) return null;
+  const need = shape("INDEXER_EVENT_HOUSE_SHAPE");
+  need(exactly(v, "at,down,round,up") && Number.isSafeInteger(v.at) && v.at > 0 && typeof v.round === "string" && /^0x[0-9a-f]{64}$/.test(v.round));
+  return { round: v.round, at: v.at, ...sides(v, need) };
+}
+
+/** This application's event from the events manifest (public/deployments/26514-events.json; null without one): its engine round id
+ * (0x), the registry round id its settle records carry, and its cutoff. A manifest of another application, or with bad terms, throws. */
+export function eventOf(manifest, book) {
+  if (manifest === null) return null;
+  const e = manifest?.event;
+  if (!(manifest?.kind === "zedge-events" && manifest.schemaVersion === 1 && manifest.chainId === 26514 && manifest.application === book.application.id && e && typeof e === "object"
+    && ["start", "cutoff", "end", "voidableAfter"].every((k) => Number.isSafeInteger(e[k])))) {
+    throw new Error("the events manifest is not this application's");
+  }
+  const { id, spec } = eventRound(book.application.engineConfigJson, { question: e.questionHash, start: e.start, cutoff: e.cutoff, end: e.end, voidableAfter: e.voidableAfter });
+  return { round: `0x${id}`, registryRoundId: spec.registryRoundId, cutoff: spec.cutoff };
 }
 
 function only(params, allowed) {
@@ -67,17 +94,23 @@ function readBody(req) {
 }
 
 /** `deps`: { db (store.mjs reads), book, origin, now() in ms, chain() → { head, balances: { role: { address, wei } } }, log,
- * house?() → { copy (parseHouse's), at (ms it was fetched) } }. */
+ * house?() → { copy (parseHouse's), at (ms it was fetched) }, event? (eventOf's), eventHouse?() → { copy (parseEventHouse's), at } }. */
 export function handler(deps) {
   const perClient = { GET: windowed(120), POST: windowed(20) }, perEdge = windowed(2_000);
   const counted = new Set();
   const price = (p) => p && [p.minute, Number(p.price) / 1e18];
+  // A stored settle record as served; null when it is not one.
+  const settle = (r) => {
+    const s = decodeSettle(r.data);
+    return s && { kind: s.kind, outcome: s.outcome, price: s.price.toString(), observationsTimestamp: s.observationsTimestamp, reportHash: s.reportHash,
+      source: s.source, block: r.block, txHash: r.txHash, logIndex: r.logIndex };
+  };
+  // Only these BTC rounds' records: the event's carry another registry round id and never land here.
   const rounds = async (starts) => {
     const ids = starts.map((s) => engineRound(deps.book, s).spec.registryRoundId), byRound = new Map(ids.map((id) => [id, []]));
     for (const r of await deps.db.settles(ids)) {
-      const s = decodeSettle(r.data);
-      if (s) byRound.get(r.roundId)?.push({ kind: s.kind, outcome: s.outcome, price: s.price.toString(), observationsTimestamp: s.observationsTimestamp, reportHash: s.reportHash,
-        source: s.source, block: r.block, txHash: r.txHash, logIndex: r.logIndex });
+      const s = settle(r);
+      if (s) byRound.get(r.roundId)?.push(s);
     }
     // Kind 1 opens a round; 2 resolves it and 3 voids it.
     return starts.map((start, i) => ({ start, registryRoundId: ids[i], open: byRound.get(ids[i]).find((s) => s.kind === 1) ?? null, settle: byRound.get(ids[i]).findLast((s) => s.kind !== 1) ?? null }));
@@ -93,7 +126,17 @@ export function handler(deps) {
       const start = Math.floor(now / ROUND) * ROUND;
       const [head, last, list, latest] = await Promise.all([deps.db.head(), deps.db.clock(), rounds([start - ROUND, start, start + ROUND]), deps.db.latestPrice()]);
       const h = deps.house?.(), house = h && deps.now() - h.at <= HOUSE_MS && h.copy?.start === start ? h.copy : null;
-      return [{ head, clock: last && clock(last), rounds: list, price: price(latest), house }, SHORT];
+      // The event house's quotes: for this application's event only, and only until its trading cutoff.
+      const e = deps.eventHouse?.(), event = e && deps.event && deps.now() - e.at <= EVENT_MS && e.copy?.round === deps.event.round && now < deps.event.cutoff ? e.copy : null;
+      return [{ head, clock: last && clock(last), rounds: list, price: price(latest), house, event }, SHORT];
+    },
+    async "GET /v1/event"(params) {
+      only(params, []);
+      if (!deps.event) throw refuse(404, "Not found.");
+      const [head, records] = await Promise.all([deps.db.head(), deps.db.settles([deps.event.registryRoundId])]);
+      // Kind 2 is the resolver's result (source 4), kind 3 the timeout void (source 3); null until then.
+      const settled = records.map(settle).filter((s) => s && s.kind !== 1);
+      return [{ head, round: deps.event.round, registryRoundId: deps.event.registryRoundId, settle: settled.at(-1) ?? null }, FIXED(5)];
     },
     async "GET /v1/btc"(params, now) {
       only(params, ["minutes", "from", "to"]);

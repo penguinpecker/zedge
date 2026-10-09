@@ -216,7 +216,7 @@ OWNER ACCOUNT. Use one `git archive` export of that commit and redeploy each wit
 | --- | --- | --- |
 | a | **New** payout-signer service (step 7 of the preparation) | Log shows the new application ID. Today's payout signer keeps running untouched. |
 | b | keeper (not within 30 s before to 60 s after a boundary) | Order-book lane `running … application <new>`; registry lane unchanged. |
-| c | indexer | Per the indexer lane: either a new database, or its cursor reset and application tables truncated. |
+| c | indexer | Same database. It serves at once and logs `waiting` until the reset in `services/indexer/README.md` (Switch-over): once the old indexer deployment is removed, run that SQL; then `indexing` from the new deploy block − 1, prices and the old rows kept. |
 | d | house-bot | Still `--dry-run`. |
 | e | event house | Dry run (event house lane). |
 | f | Vercel: site and relayer from the same export | The served `index-<hash>.js` equals a local build of the export. `/deployments/26514-orderbook.json` names the new application. A private-trading tab verifies again. |
@@ -258,7 +258,7 @@ There are three rules. They follow from one fact: two applications read one inbo
 | Before step 3 | Nothing was sent: unpause the house (`MM_ARGS` back, redeploy). |
 | After step 3, before step 5 sent its deploy request | To give up: thaw the old trigger, OWNER KEY: `node adapters/vela/stack/cutover.mjs thaw` (dry run), then add `--broadcast-mainnet`. The old application then credits from N + 1 again, and the site's pin matches again. Unpause the house. |
 | Step 5's deploy request failed (`DeployRequestCompleted` status ≠ 0) | The endpoint refunds the slot and clears the trigger. Either forward-fix (fix the cause, move `evidence/vela-book-politics/checkpoint.json` aside, rerun step 5), or give up as in the row above: no other application exists. |
-| The new application is deployed and has credited nothing | To give up: first freeze the new application's trigger (`cutover.mjs freeze --trigger <new trigger> --broadcast-mainnet`), confirm with `facts --new …` that it has no credit record, and only then thaw the old trigger as above (`thaw` refuses until the new trigger is frozen). Redeploy the services from the old export, except that the new payout signer is stopped. |
+| The new application is deployed and has credited nothing | To give up: first freeze the new application's trigger (`cutover.mjs freeze --trigger <new trigger> --broadcast-mainnet`), confirm with `facts --new …` that it has no credit record, and only then thaw the old trigger as above (`thaw` refuses until the new trigger is frozen). Redeploy the services from the old export, except that the new payout signer is stopped. If the indexer's reset (step 8 c) already ran, first follow the rollback order at the end of the Switch-over section of `services/indexer/README.md`. |
 | The new application has credited anything | Forward-fix only. Both payout signers keep running. The old application stays withdraw-only for good. |
 
 Never use a volume backup or database copy on the manager (`/vela`). The old application's state is never touched by any step here, so no rollback needs one.

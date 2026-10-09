@@ -13,11 +13,11 @@ import postgres from "postgres";
 import { privateFile } from "../keeper/journal.mjs";
 import { SOLANA_RPC, SOURCES } from "../keeper/solana.mjs";
 import { parseOrderbookManifest } from "../../src/chain/orderbook-manifest.ts";
-import { handler, parseHouse } from "./api.mjs";
+import { eventOf, handler, parseEventHouse, parseHouse } from "./api.mjs";
 import { RANGE, step } from "./follow.mjs";
 import { pricesStep } from "./prices.mjs";
 import { rows } from "./rows.mjs";
-import { prepare, reads, writes } from "./store.mjs";
+import { lockKey, prepare, reads, writes } from "./store.mjs";
 
 const POLL_MS = 1_000; // Horizen makes a block about every second
 const DEPTH = 3, REWIND = 600; // confirmation depth, and how far a reorg rewinds (~10 min: the reorg ceiling)
@@ -47,6 +47,26 @@ function jsonRpc(url) {
   };
 }
 
+/** The latest good answer of a quotes URL (null: none) and when it was fetched: one request at a time, about once a second, 800 ms
+ * each. `name` labels its log lines, which say only when reading starts or stops working. */
+function quotes(url, parse, name, state) {
+  const latest = { copy: null, at: 0 };
+  if (url) (async () => {
+    for (let ok = null; !state.stopping;) {
+      const t = Date.now();
+      try {
+        const r = await fetch(url, { redirect: "error", signal: AbortSignal.timeout(800) });
+        if (r.status !== 200) { await r.body?.cancel().catch(() => {}); throw Object.assign(new Error(name), { code: `${name.toUpperCase()}_HTTP_${r.status}` }); }
+        Object.assign(latest, { copy: parse(await r.json()), at: Date.now() });
+        if (ok !== true) log({ [name]: "reading" });
+        ok = true;
+      } catch (e) { if (ok !== false) log({ [name]: "unread", error: codeOf(e) }); ok = false; } // a change of state only, not every second
+      await sleep(t + 1_000 - Date.now());
+    }
+  })();
+  return () => latest;
+}
+
 /** The value of `fn` for `ms`, failures included, so a burst of status reads costs one RPC batch. */
 function memo(ms, fn) {
   let at = 0, value = null;
@@ -69,8 +89,13 @@ async function main(argv) {
   if (!/^https:\/\/\S+$/.test(solanaUrl)) fail("INDEXER_SOLANA_RPC_URL: an https:// endpoint");
   const houseUrl = env.INDEXER_HOUSE_URL || null; // optional: the house bot's GET /quotes on the private network
   if (houseUrl && !/^https?:\/\/\S+$/.test(houseUrl)) fail("INDEXER_HOUSE_URL: an http:// or https:// URL");
+  const eventHouseUrl = env.INDEXER_EVENT_HOUSE_URL || null; // optional: the event house's GET /quotes on the private network
+  if (eventHouseUrl && !/^https?:\/\/\S+$/.test(eventHouseUrl)) fail("INDEXER_EVENT_HOUSE_URL: an http:// or https:// URL");
+  // The application followed is the one these manifests in the image name: a switch-over ships new ones (README).
   const book = parseOrderbookManifest(JSON.parse(await readFile(new URL("../../public/deployments/26514-orderbook.json", import.meta.url), "utf8")));
   if (book.status !== "configured") fail("the order-book manifest is planned: nothing to index yet");
+  const event = eventOf(await readFile(new URL("../../public/deployments/26514-events.json", import.meta.url), "utf8")
+    .then(JSON.parse, (e) => e.code === "ENOENT" ? null : Promise.reject(e)), book);
   const horizen = jsonRpc(env.INDEXER_HORIZEN_RPC_URL), solana = jsonRpc(solanaUrl);
   if (Number((await horizen([{ method: "eth_chainId", params: [] }]))[0]) !== 26514) fail("INDEXER_HORIZEN_RPC_URL: wrong chain");
 
@@ -88,22 +113,9 @@ async function main(argv) {
     const [head, ...wei] = await horizen([{ method: "eth_blockNumber", params: [] }, ...Object.values(roles).map((r) => ({ method: "eth_getBalance", params: [r, "latest"] }))]);
     return { head: Number(head), balances: Object.fromEntries(Object.entries(roles).map(([role, address], i) => [role, { address, wei: BigInt(wei[i]) }])) };
   });
-  // The house's resting quotes for /v1/live: the latest good copy and when it was fetched. Every instance reads them, one request a second.
-  const house = { copy: null, at: 0 };
-  if (houseUrl) (async () => {
-    for (let ok = null; !state.stopping;) {
-      const t = Date.now();
-      try {
-        const r = await fetch(houseUrl, { redirect: "error", signal: AbortSignal.timeout(800) });
-        if (r.status !== 200) { await r.body?.cancel().catch(() => {}); throw Object.assign(new Error("house"), { code: `HOUSE_HTTP_${r.status}` }); }
-        Object.assign(house, { copy: parseHouse(await r.json()), at: Date.now() });
-        if (ok !== true) log({ house: "reading" });
-        ok = true;
-      } catch (e) { if (ok !== false) log({ house: "unread", error: codeOf(e) }); ok = false; } // a change of state only, not every second
-      await sleep(t + 1_000 - Date.now());
-    }
-  })();
-  const server = createServer(handler({ db: reads(sql), book, origin: book.application.origin, now: Date.now, chain, log, house: () => house }));
+  // The house's and the event house's resting quotes for /v1/live. Every instance reads them.
+  const house = quotes(houseUrl, parseHouse, "house", state), eventHouse = quotes(eventHouseUrl, parseEventHouse, "eventHouse", state);
+  const server = createServer(handler({ db: reads(sql), book, origin: book.application.origin, now: Date.now, chain, log, house, event, eventHouse }));
   server.requestTimeout = 15_000;
   server.listen(Number(process.env.PORT) || 8080);
 
@@ -114,15 +126,22 @@ async function main(argv) {
     await Promise.allSettled([sql.end({ timeout: 5 }), writer.end({ timeout: 5 })]);
     process.exit(0);
   });
-  log({ status: "serving", application: book.application.id });
+  log({ status: "serving", application: book.application.id, event: event?.round ?? null });
 
   // Railway's deploy overlap: the old container holds the lock until it stops.
-  const locked = () => writer`select pg_try_advisory_lock(${book.application.id}::bigint) as ok`.then(([r]) => r.ok, (e) => { log({ status: "database", error: codeOf(e) }); return false; });
+  const locked = () => writer`select pg_try_advisory_lock(${lockKey(book.application.id)}::bigint) as ok`.then(([r]) => r.ok, (e) => { log({ status: "database", error: codeOf(e) }); return false; });
   while (!state.stopping && !(await locked())) await sleep(5_000);
   if (state.stopping) return;
   state.held = true;
-  await prepare(writer, start);
   const store = writes(writer);
+  // Rows of another application (a database not yet reset after a switch-over, README) are never written over: wait for the reset.
+  for (let waiting = false; ;) {
+    const foreign = await prepare(writer, start).then(() => store.foreign(start)).catch((e) => { log({ status: "database", error: codeOf(e) }); return null; });
+    if (foreign === false) break;
+    if (foreign && !waiting) { waiting = true; log({ status: "waiting", reason: "rows of another application: reset the database (README)" }); }
+    await sleep(5_000);
+    if (state.stopping) return;
+  }
   log({ status: "indexing", from: (await store.cursor("horizen")).block });
 
   const run = async (name, once) => {

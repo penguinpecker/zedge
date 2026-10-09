@@ -1,9 +1,10 @@
 // store.mjs against a real Postgres. Skips unless TEST_DATABASE_URL names a throwaway database (CI runs one; locally, for example
 // `docker run --rm -d -p 55432:5432 -e POSTGRES_PASSWORD=test postgres:17-alpine` and postgres://postgres:test@127.0.0.1:55432/postgres).
 import { strict as assert } from "node:assert";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { bytes } from "./rows.mjs";
-import { prepare, reads, writes } from "./store.mjs";
+import { lockKey, prepare, reads, writes } from "./store.mjs";
 
 const url = process.env.TEST_DATABASE_URL;
 const b = (byte, n = 32) => bytes(`0x${byte.repeat(n)}`), h = (byte, n = 32) => `0x${byte.repeat(n)}`;
@@ -57,6 +58,57 @@ test("schema, compare-and-set writes, account pages, rewinds and prices on Postg
     assert.deepEqual(await w.cursor("solana"), { block: 0, hash: null, time: 2_002, sig: "s3" });
     const s = await r.status();
     assert.deepEqual([s.horizen, s.minute, s.dbBytes > 0], [{ block: 20, time: 1_020 }, 1_980, true]);
+  } finally {
+    await Promise.all([sql.end(), writer.end()]);
+  }
+});
+
+test("the writer's lock key: an application id is a uint64, a Postgres lock key a signed bigint", () => {
+  assert.equal(lockKey("7408397676477227659"), "7408397676477227659", "below 2^63: the id itself, the key the README's reset checks");
+  assert.equal(lockKey("9223372036854775808"), "-9223372036854775808");
+  assert.equal(lockKey("18446744073709551615"), "-1");
+});
+
+// README "Switch-over to a new application": the reset exactly as written there.
+const reset = readFileSync(new URL("./README.md", import.meta.url), "utf8").match(/```sql\n([\s\S]*?)```/)[1];
+
+test("switch-over: a new application waits on the old one's rows; the README's reset keeps prices and the old rows, and only once the old writer is gone",
+  { skip: !url && "TEST_DATABASE_URL is not set" }, async () => {
+  const { default: postgres } = await import("postgres");
+  const sql = postgres(url, { max: 2, onnotice: () => {} }), writer = postgres(url, { max: 1, onnotice: () => {} });
+  const old = lockKey("7408397676477227659");
+  try {
+    await sql`drop schema if exists app_7408397676477227659 cascade`;
+    await sql`drop table if exists cursors, requests, completions, receipts, records, btc_minutes`;
+    await prepare(writer, 9); // the old application, deployed at block 10
+    const w = writes(writer);
+    await w.write("horizen", { block: 9 }, { block: 20, hash: h("aa"), time: 1_020 }, range);
+    await w.prices({ sig: null }, { sig: "s1", time: 2_000 }, [{ minute: 1_920, price: "2", observed_at: 1_921, signature: "s1" }]);
+    assert.equal(await w.foreign(9), false, "its own rows");
+    assert.equal(await w.foreign(12), true, "a new application deployed at block 13 finds the old one's requests at 10 and 12");
+    assert.equal(await w.foreign(10), true);
+
+    // The old writer still holds its lock: the reset refuses and changes nothing.
+    await writer`select pg_advisory_lock(${old}::bigint)`;
+    await assert.rejects(sql.unsafe(reset), /is still running/);
+    assert.equal(Number((await sql`select count(*) as n from requests`)[0].n), 3);
+    await writer`select pg_advisory_unlock(${old}::bigint)`;
+    // A new application's id may be 2^63 or more: its indexer still takes its own lock.
+    const [high] = await writer`select pg_try_advisory_lock(${lockKey("18446744073709551615")}::bigint) as ok, pg_advisory_unlock(${lockKey("18446744073709551615")}::bigint) as freed`;
+    assert.deepEqual({ ...high }, { ok: true, freed: true });
+
+    await sql.unsafe(reset);
+    assert.deepEqual((await sql`select name, block, sig from cursors order by name`).map((r) => [r.name, Number(r.block), r.sig]), [["solana", 0, "s1"]]);
+    assert.deepEqual((await sql`select minute, price from btc_minutes`).map((r) => [Number(r.minute), r.price]), [[1_920, "2"]]);
+    assert.deepEqual(await Promise.all(["requests", "completions", "receipts", "records"].map(async (t) => Number((await sql`select count(*) as n from ${sql("app_7408397676477227659")}.${sql(t)}`)[0].n))), [3, 1, 2, 2]);
+    assert.equal((await sql`select to_regclass('public.requests') as t`)[0].t, null);
+    await assert.rejects(sql.unsafe(reset), /already exists/, "a second run changes nothing");
+
+    await prepare(writer, 12); // the new application's indexer, on its next look
+    assert.equal(await w.foreign(12), false);
+    assert.deepEqual(await w.cursor("horizen"), { block: 12, hash: null, time: null, sig: null });
+    assert.equal(Number((await sql`select count(*) as n from requests`)[0].n), 0);
+    assert.deepEqual(await reads(sql).settles([h("22")]), []);
   } finally {
     await Promise.all([sql.end(), writer.end()]);
   }
