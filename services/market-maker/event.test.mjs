@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import * as codec from "../../adapters/vela/crypto/guest.ts";
-import { deploymentEvent, eventPlan, eventPrice, kalshiYes, polymarketMid } from "./event.mjs";
+import { deploymentEvent, eventPlan, eventPrice, kalshiYes, polymarketMid, polymarketSpread } from "./event.mjs";
 import { brakes, checkSender, eventQuotes, main, settingsFrom } from "./main.mjs";
 import { SHARE, apply, quotes, worstStake } from "./pricing.mjs";
 
@@ -37,6 +37,8 @@ const only = (fields) => ({ markets: [{ ...kalshi.markets[2], ...fields }] });
 
 test("feeds: Polymarket's midpoint and Kalshi's CONTROLH-2026-D, as their APIs answer, and nothing else", () => {
   assert.equal(polymarketMid({ mid: "0.905" }), 0.905);
+  assert.equal(polymarketSpread({ spread: "0.01" }), 0.01);
+  for (const bad of [{ spread: 0.01 }, { spread: "-0.01" }, { spread: "1" }, {}, null]) assert.equal(polymarketSpread(bad), null, JSON.stringify(bad));
   for (const bad of [{ mid: 0.905 }, { mid: "0" }, { mid: "1" }, { mid: "x" }, {}, null, "0.905"]) assert.equal(polymarketMid(bad), null, JSON.stringify(bad));
   assert.deepEqual(kalshiYes(kalshi), { bid: 0.9, ask: 0.901 });
   assert.equal(kalshiYes({ markets: kalshi.markets.slice(0, 2) }), null, "the Republican and the 2028 markets are not this one");
@@ -51,7 +53,10 @@ test("price rules: Polymarket checked against Kalshi, Kalshi alone when Polymark
   assert.deepEqual(eventPrice(pm, k, now), { ok: true, p: 0.905, source: "polymarket" }, "both up: Polymarket's midpoint");
   for (const down of [undefined, { ...pm, at: now - 60_001 }]) assert.deepEqual(eventPrice(down, k, now), { ok: true, p: 0.9005, source: "kalshi" }, "Polymarket down: Kalshi's mid");
   assert.equal(eventPrice(pm, { ...k, at: now - 60_000 }, now).ok, true, "a read counts for 60 s");
-  assert.match(eventPrice(pm, { ...k, at: now - 60_001 }, now).reason, /Kalshi unavailable/, "Kalshi down: Polymarket alone has no spread and no check");
+  const kDown = { ...k, at: now - 60_001 };
+  assert.deepEqual(eventPrice({ ...pm, spread: 0.01 }, kDown, now), { ok: true, p: 0.905, source: "polymarket" }, "Kalshi down: Polymarket alone, with its spread");
+  assert.equal(eventPrice({ ...pm, spread: 0.05 }, kDown, now).ok, true, "a 5-cent Polymarket spread is still a price");
+  for (const spread of [undefined, null, 0.0501]) assert.match(eventPrice({ ...pm, spread }, kDown, now).reason, /Kalshi unavailable, and Polymarket's spread/, `spread ${spread}`);
   assert.match(eventPrice(undefined, undefined, now).reason, /unavailable/, "both down");
   assert.equal(eventPrice({ mid: 0.9305, at: now }, k, now).ok, true, "3 cents apart is still a price");
   assert.match(eventPrice({ mid: 0.9306, at: now }, k, now).reason, /differ by more than 3 cents/);

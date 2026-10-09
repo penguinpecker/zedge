@@ -157,13 +157,14 @@ node --experimental-strip-types services/market-maker/main.mjs run --event --mai
 - **The wallet.** On mainnet the key is `~/.config/zedge/event-house.key`, with the same file rules as the house's. The bot refuses the BTC house's key and the resolver's.
   - **What to fund.** Horizen ETH for its requests: about 0.00006 ETH a day at the defaults (about 34 requests), so about 0.0015 ETH to the cutoff; the operator pays about 0.6 times that again. Base ETH and USDC for the deposit. 20 USDC covers the defaults.
 - **The price.** Yes is read every `pollSeconds` (20 s) from two places:
-  - the Polymarket CLOB midpoint of the Yes token;
+  - the Polymarket CLOB midpoint and spread of the Yes token;
   - Kalshi's `CONTROLH-2026-D` bid and ask.
 
   A read counts for 60 s.
   - **Both up:** the price is Polymarket's midpoint, if it is within 3 cents of Kalshi's mid.
   - **Polymarket down:** the price is Kalshi's mid. polymarket.com does not resolve from the owner's Mac, so this case is expected.
-  - **No price:** if Kalshi is down (Polymarket alone has no spread to check and nothing to check it against), if Kalshi's spread is above 5 cents, or if the two differ by more than 3 cents.
+  - **Kalshi down:** the price is Polymarket's midpoint alone, only while its own spread is read and at most 5 cents (owner decision 2026-10-09).
+  - **No price:** if both are down, if the spread that applies is above 5 cents, or if the two differ by more than 3 cents.
   - With no price it sends a `cancel_all` while its quotes rest. A quote lasts hours, so none may stay up with no price behind it.
 - **Quotes.** These are `quotes()` and `plan()` of `pricing.mjs`, as for BTC, around that price:
   - a mint of sets for the asks, and the four sides on their own expiry grids;
@@ -247,7 +248,7 @@ The test runs offline in under a second. It checks:
 `event.test.mjs` checks the event house:
 
 - **Feeds:** Polymarket's midpoint and Kalshi's answer as the live APIs gave them, and refusals of anything else.
-- **Price rules:** both up, Polymarket down, Kalshi down, both down, 3 cents apart against more, and a 5-cent spread against a wider one.
+- **Price rules:** both up, Polymarket down, Kalshi down (Polymarket alone with a 5-cent spread or less, refused with none or a wider one), both down, 3 cents apart against more, and a 5-cent spread against a wider one.
 - **Quotes:** 88/93 and 7/12 at 0.905 and at Kalshi's 0.9005.
 - **Plan:** nothing before the start; the mint and four 4-hour quotes; the stake cap after repeated fills; a `cancel_all` when the price goes; the cutoff.
 - **Brakes:** a needed cancel passes them, the event house's only until 3 of its cancels are refused in a window.

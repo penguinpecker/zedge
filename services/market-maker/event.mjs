@@ -9,6 +9,7 @@ const refuse = (message) => { throw Object.assign(new Error(message), { refused:
  * Party control the House after the 2026 Midterm elections?". Kalshi: the CONTROLH series, whose CONTROLH-2026-D is Yes. */
 export const EVENT_FEEDS = {
   polymarket: "https://clob.polymarket.com/midpoint?token_id=83247781037352156539108067944461291821683755894607244160607042790356561625563",
+  polymarketSpread: "https://clob.polymarket.com/spread?token_id=83247781037352156539108067944461291821683755894607244160607042790356561625563",
   kalshi: "https://api.elections.kalshi.com/trade-api/v2/markets?series_ticker=CONTROLH&status=open",
 };
 
@@ -16,6 +17,12 @@ export const EVENT_FEEDS = {
 export function polymarketMid(body) {
   const mid = typeof body?.mid === "string" ? Number(body.mid) : NaN;
   return mid > 0 && mid < 1 ? mid : null;
+}
+
+/** Polymarket's {"spread": "0.01"}: the Yes book's spread in dollars, or null. */
+export function polymarketSpread(body) {
+  const spread = typeof body?.spread === "string" ? Number(body.spread) : NaN;
+  return spread >= 0 && spread < 1 ? spread : null;
 }
 
 /** Kalshi's Yes bid and ask in dollars for CONTROLH-2026-D while it trades with both sides, or null. */
@@ -26,13 +33,18 @@ export function kalshiYes(body) {
 }
 
 const micro = (dollars) => Math.round(dollars * 1e6); // so that 3 cents compares as exactly 3 cents
-/** The Yes probability the house quotes around, or why there is none. `poly` { mid, at } and `kalshi` { bid, ask, at } are
- * the latest good reads (`at` in ms); each counts for 60 s. Polymarket's midpoint while Kalshi's mid is within 3 cents of
- * it; Kalshi's mid alone while Polymarket cannot be read. No price without Kalshi, the only feed that shows a spread, with
- * Kalshi's spread above 5 cents, or with the two more than 3 cents apart. */
+/** The Yes probability the house quotes around, or why there is none. `poly` { mid, spread, at } and `kalshi` { bid, ask, at }
+ * are the latest good reads (`at` in ms); each counts for 60 s. Polymarket's midpoint while Kalshi's mid is within 3 cents of
+ * it; Kalshi's mid alone while Polymarket cannot be read; Polymarket's midpoint alone while Kalshi cannot be read, only with
+ * its own spread read and at most 5 cents (owner decision 2026-10-09). No price with a spread above 5 cents, or with the two
+ * more than 3 cents apart. */
 export function eventPrice(poly, kalshi, nowMs) {
   const fresh = (f) => !!f && nowMs - f.at <= 60_000;
-  if (!fresh(kalshi)) return { ok: false, reason: fresh(poly) ? "Kalshi unavailable, and Polymarket alone is not quoted" : "Polymarket and Kalshi unavailable" };
+  if (!fresh(kalshi)) {
+    if (!fresh(poly)) return { ok: false, reason: "Polymarket and Kalshi unavailable" };
+    if (typeof poly.spread !== "number" || micro(poly.spread) > 50_000) return { ok: false, reason: "Kalshi unavailable, and Polymarket's spread is unread or above 5 cents" };
+    return { ok: true, p: poly.mid, source: "polymarket" };
+  }
   if (micro(kalshi.ask) - micro(kalshi.bid) > 50_000) return { ok: false, reason: "Kalshi's spread is above 5 cents" };
   const k = (micro(kalshi.bid) + micro(kalshi.ask)) / 2e6;
   if (!fresh(poly)) return { ok: true, p: k, source: "kalshi" };

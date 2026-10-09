@@ -16,7 +16,7 @@ import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
-import { EVENT_FEEDS, checkResult, deploymentEvent, eventPlan, eventPrice, kalshiYes, polymarketMid } from "./event.mjs";
+import { EVENT_FEEDS, checkResult, deploymentEvent, eventPlan, eventPrice, kalshiYes, polymarketMid, polymarketSpread } from "./event.mjs";
 import { readKey } from "./keyfile.mjs";
 import { LEAD, SHARE, apply, expire, fairUp, plan, quotes, realizedSigma, spotCheck, worstStake } from "./pricing.mjs";
 
@@ -212,9 +212,10 @@ async function spot() {
 async function eventOdds(pollSeconds) {
   if (Date.now() - (feeds.oddsRead ?? 0) >= pollSeconds * 1000) {
     feeds.oddsRead = Date.now();
-    const [pm, ks] = await Promise.allSettled([getJson(EVENT_FEEDS.polymarket), getJson(EVENT_FEEDS.kalshi)]);
+    const [pm, ps, ks] = await Promise.allSettled([getJson(EVENT_FEEDS.polymarket), getJson(EVENT_FEEDS.polymarketSpread), getJson(EVENT_FEEDS.kalshi)]);
     const at = Date.now(), mid = pm.status === "fulfilled" && polymarketMid(pm.value), yes = ks.status === "fulfilled" && kalshiYes(ks.value);
-    if (mid) feeds.polymarket = { mid, at };
+    const spread = ps.status === "fulfilled" ? polymarketSpread(ps.value) : null;
+    if (mid) feeds.polymarket = { mid, spread, at };
     if (yes) feeds.kalshi = { ...yes, at };
   }
   return eventPrice(feeds.polymarket, feeds.kalshi, Date.now());
