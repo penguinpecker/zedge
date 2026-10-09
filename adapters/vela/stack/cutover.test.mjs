@@ -2,7 +2,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import { keccak256, stringToBytes } from "viem";
-import { EVENT, RAILWAY, blobInPlace, chooseDepositsFrom, eventSpec, proveDepositsFrom, resolverProblem, runtimeOf } from "./cutover.mjs";
+import { EVENT, INBOX, RAILWAY, blobInPlace, chooseDepositsFrom, eventSpec, othersCrediting, proveDepositsFrom, resolverProblem, runtimeOf } from "./cutover.mjs";
 
 test("runtimeOf fills every immutable slot with the contract's own address", () => {
   const art = { deployedBytecode: { object: `0x60${"00".repeat(32)}61${"00".repeat(32)}5b`, immutableReferences: { 7: [{ start: 1, length: 32 }, { start: 34, length: 32 }] } } };
@@ -74,4 +74,12 @@ test("the guest is in the manager's artifact store only if sha256sum prints its 
   assert.equal(blobInPlace(sha, { project, run: run(`${sha}  ${path}\n`, 1) }), false, "a failed command");
   assert.equal(blobInPlace(sha, { project, blobs: "/other", run: run(`${sha}  /other/${sha}.wasm\n`) }), true, "a confirmed SHARED_DATA_FOLDER elsewhere");
   assert.throws(() => blobInPlace(sha, { run: run(`${sha}  ${path}\n`) }), /--railway-project/);
+});
+
+test("a thaw is allowed only while no other application's trigger reads the inbox without being withdraw-only", () => {
+  const self = "0x9ca46470b05350384c31c8b236af4df638cbb30d", other = "0x243cd8d89755f73ebfbe0c6c32add4188fe0d293";
+  const t = (app, trigger, over) => ({ app, trigger, inbox: INBOX.toUpperCase().replace("0X", "0x"), withdrawOnly: false, ...over });
+  assert.deepEqual(othersCrediting([t(1n, self), t(2n, other, { withdrawOnly: true }), t(3n, "0x" + "0".repeat(40), { inbox: null })], self), []);
+  assert.deepEqual(othersCrediting([t(1n, self), t(2n, other)], self), [`application 2 (trigger ${other})`]);
+  assert.deepEqual(othersCrediting([t(4n, "0x" + "1".repeat(40), { inbox: "0x" + "2".repeat(40) })], self), [], "a trigger on another inbox credits nothing here");
 });

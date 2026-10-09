@@ -6,9 +6,11 @@
 //   node adapters/vela/stack/cutover.mjs freeze [--trigger 0x…] [--implementation 0x…]         dry run: prints the transactions, sends nothing
 //   node adapters/vela/stack/cutover.mjs freeze --fork http://127.0.0.1:PORT                   Anvil fork of Horizen mainnet, deployer impersonated
 //   node adapters/vela/stack/cutover.mjs freeze --broadcast-mainnet                            ONLY the owner, after the go
+//   node adapters/vela/stack/cutover.mjs thaw [--trigger 0x…] [--fork URL | --broadcast-mainnet]   rollback only (runbook)
 //
 // freeze deploys WithdrawOnlyBookClockTrigger (or reuses --implementation, already deployed) and upgrades the trigger proxy to it;
-// build it first (forge build in contracts/). Horizen is read through the public gateway (1,000-block log windows), never the
+// thaw upgrades it back to the live BookClockTrigger implementation, and refuses while any other application's trigger reads the
+// same inbox without being withdraw-only. Build the contracts first (forge build in contracts/). Horizen is read through the public gateway (1,000-block log windows), never the
 // operator's RPC; Base logs through Tenderly's public gateway unless --base-rpc. deploy-book.mjs takes its checks from here.
 import { readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
@@ -104,6 +106,12 @@ export function resolverProblem(resolver, roles, nonce) {
   if (role) return `the resolver is the ${role[0]}: use a new dedicated wallet`;
   if (nonce !== 0) return `the resolver has sent ${nonce} Horizen transactions: use a new dedicated wallet`;
   return null;
+}
+
+/** The applications that would credit the inbox's deposits besides `self`: every trigger reading that inbox that is not withdraw-only.
+ * At most one application may ever credit them (runbook, Rollback), so a thaw needs this empty. */
+export function othersCrediting(triggers, self) {
+  return triggers.filter((t) => lower(t.trigger) !== lower(self) && lower(t.inbox) === lower(INBOX) && !t.withdrawOnly).map((t) => `application ${t.app} (trigger ${t.trigger})`);
 }
 
 /** The manager's copy of the guest, read over `railway ssh` with the owner's CLI: true only if sha256sum prints the guest's SHA-256
@@ -252,27 +260,51 @@ async function facts(a) {
 
 // ---------------------------------------------------------------- freeze
 
-async function freeze(a) {
+/** Every application's trigger that a deploy request on the endpoint ever registered (deployed or still pending; a failed deploy
+ * clears its own), with the inbox it reads and whether it is withdraw-only. */
+async function triggersOnTheEndpoint(c, head) {
+  const W = artifact("WithdrawOnlyBookClockTrigger");
+  const submitted = await scan(c, { address: ENDPOINT, event: parseAbi(["event DeployRequestSubmitted(uint64 indexed applicationId, bytes32 requestId, address indexed sender)"])[0], from: OLD.deployBlock, to: head });
+  const apps = [...new Set([...(await read(c, ENDPOINT, "getDeployedAppIds")), ...submitted.map((l) => l.args.applicationId)])];
+  return Promise.all(apps.map(async (app) => {
+    const trigger = lower(await read(c, ENDPOINT, "triggerContracts", [app]));
+    if (/^0x0{40}$/.test(trigger)) return { app, trigger, inbox: null, withdrawOnly: false };
+    const inbox = await read(c, trigger, "inbox").then(lower, () => null);
+    return { app, trigger, inbox, withdrawOnly: inbox !== null && await codeIs(c, await implementationOf(c, trigger), W) };
+  }));
+}
+
+async function freeze(a) { return upgrade(a, false); }
+async function thaw(a) { return upgrade(a, true); }
+
+async function upgrade(a, thawing) {
   if (a.fork && a["broadcast-mainnet"]) throw new Error("--fork or --broadcast-mainnet, not both");
   if (a.fork && !["127.0.0.1", "localhost", "[::1]"].includes(new URL(a.fork).hostname)) throw new Error("--fork takes a loopback URL");
   const c = client(a.fork ?? HORIZEN_RPC);
   if (await c.getChainId() !== 26514) throw new Error("the node is not Horizen mainnet 26514");
   if (a.fork && !/anvil/i.test(await c.request({ method: "web3_clientVersion" }))) throw new Error("--fork needs a local Anvil");
   const mode = a.fork ? `FORK ${a.fork} (Anvil, deployer impersonated)` : a["broadcast-mainnet"] ? "Horizen mainnet: BROADCAST" : "Horizen mainnet: DRY RUN, nothing is sent";
-  const trigger = lower(a.trigger ?? OLD.trigger), W = artifact("WithdrawOnlyBookClockTrigger");
+  const trigger = lower(a.trigger ?? OLD.trigger), W = artifact("WithdrawOnlyBookClockTrigger"), B = artifact("BookClockTrigger");
   const bindings = async () => Promise.all(["owner", "pendingOwner", "processorEndpoint", "registry", "inbox", "asset", "duration"].map((f) => read(c, trigger, f).then(String).then(lower)));
   const head = await c.getBlockNumber();
   const [state, before, was] = await Promise.all([triggerState(c, trigger, head), bindings(), answer(c, trigger)]);
   console.log(`${mode}\ntrigger ${trigger}: implementation ${state.implementation} (${state.code}), owner ${before[0]}; a tick asking from deposit 1 gets ${was.records} registry records and ${was.deposits} deposit records`);
-  if (state.frozen) { console.log(`already withdraw-only since block ${state.freezeBlock}: nothing to send`); return; }
-  if (state.code !== "BookClockTrigger") throw new Error("the proxy does not run BookClockTrigger: refusing");
+  if (!thawing && state.frozen) { console.log(`already withdraw-only since block ${state.freezeBlock}: nothing to send`); return; }
+  if (thawing && state.code === "BookClockTrigger") { console.log("already BookClockTrigger: nothing to send"); return; }
+  if (state.code !== (thawing ? "WithdrawOnlyBookClockTrigger" : "BookClockTrigger")) throw new Error(`the proxy does not run ${thawing ? "WithdrawOnlyBookClockTrigger" : "BookClockTrigger"}: refusing`);
+  if (thawing) {
+    const crediting = othersCrediting(await triggersOnTheEndpoint(c, head), trigger);
+    if (crediting.length) throw new Error(`a thaw would let two applications credit deposits; freeze these first: ${crediting.join(", ")}`);
+  }
   if (before[0] !== DEPLOYER || BigInt(before[1]) !== 0n) throw new Error("the trigger's owner is not the deployer, or a handover is pending");
   const [nonce, pendingNonce] = await Promise.all([c.getTransactionCount({ address: DEPLOYER, blockTag: "latest" }), c.getTransactionCount({ address: DEPLOYER, blockTag: "pending" })]);
   if (nonce !== pendingNonce) throw new Error(`the deployer has a transaction waiting (nonce ${nonce}, pending ${pendingNonce})`);
 
-  let implementation = a.implementation && lower(a.implementation);
+  let implementation = (a.implementation ?? (thawing ? OLD.implementation : undefined)) && lower(a.implementation ?? OLD.implementation);
   const txs = [];
-  if (implementation) {
+  if (thawing) {
+    if (!(await codeIs(c, implementation, B))) throw new Error(`${implementation} is not this source's BookClockTrigger`);
+  } else if (implementation) {
     if (!(await codeIs(c, implementation, W))) throw new Error(`${implementation} is not this source's WithdrawOnlyBookClockTrigger`);
   } else {
     implementation = lower(getContractAddress({ from: DEPLOYER, nonce: BigInt(nonce) }));
@@ -307,16 +339,17 @@ async function freeze(a) {
     upgradeBlock = rc.blockNumber;
   }
   const [after, now, impl] = await Promise.all([bindings(), answer(c, trigger), implementationOf(c, trigger)]);
-  const ok = impl === implementation && await codeIs(c, impl, W) && JSON.stringify(after) === JSON.stringify(before) && now.deposits === 0n;
-  console.log(`  ${ok ? "PASS" : "FAIL"} the proxy runs WithdrawOnlyBookClockTrigger at ${impl}, its state is unchanged, and a tick gets ${now.records} registry records and ${now.deposits} deposit records`);
+  const ok = impl === implementation && await codeIs(c, impl, thawing ? B : W) && JSON.stringify(after) === JSON.stringify(before) && (thawing || now.deposits === 0n);
+  console.log(`  ${ok ? "PASS" : "FAIL"} the proxy runs ${thawing ? "BookClockTrigger" : "WithdrawOnlyBookClockTrigger"} at ${impl}, its state is unchanged, and a tick gets ${now.records} registry records and ${now.deposits} deposit records`);
   if (!ok) throw new Error("the upgrade did not verify");
-  console.log(`\n${a.fork ? "FORK" : "LIVE"}: deposits frozen at block ${upgradeBlock}. Next (runbook step 3): wait for the old application to apply a tick asked after it, then cutover.mjs facts reads N.`);
+  console.log(thawing ? `\n${a.fork ? "FORK" : "LIVE"}: thawed at block ${upgradeBlock}; this application credits deposits again.`
+    : `\n${a.fork ? "FORK" : "LIVE"}: deposits frozen at block ${upgradeBlock}. Next (runbook step 4): wait for the old application to apply a tick asked after it, then cutover.mjs facts reads N.`);
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   const { values: a, positionals: [command] } = parseArgs({ allowPositionals: true, options: { fork: { type: "string" }, "broadcast-mainnet": { type: "boolean" },
     trigger: { type: "string" }, implementation: { type: "string" }, new: { type: "string" }, "base-rpc": { type: "string" } } });
-  const run = { facts, freeze }[command];
-  if (!run) { console.error("usage: cutover.mjs facts | freeze (see the header)"); process.exit(2); }
+  const run = { facts, freeze, thaw }[command];
+  if (!run) { console.error("usage: cutover.mjs facts | freeze | thaw (see the header)"); process.exit(2); }
   await run(a).catch((e) => { console.error(`cutover: ${e.shortMessage ?? e.message}`); process.exit(1); });
 }
