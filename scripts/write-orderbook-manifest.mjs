@@ -26,7 +26,7 @@ const isAddress = (value) => typeof value === 'string' && /^0x[0-9a-fA-F]{40}$/.
 const SLOT = '0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc';
 const USDCE = '0xdf7108f8b10f9b9ec1aba01cca057268cbf86b6c';
 const PARAMS = ['engine', 'applicationFingerprint', 'origin', 'epoch', 'markets', 'stakeLimits', 'chainlink', 'custody', 'event', 'resolver', 'depositsFrom'];
-const EVENT_KEYS = ['questionHash', 'start', 'cutoff', 'end', 'voidableAfter'];
+const EVENT_KEYS = ['question', 'start', 'cutoff', 'end', 'voidableAfter']; // the guest's EventTerms
 
 /** The engine configuration exactly as the guest stores it (the deploy request's, with the application ID filled in), in its canonical key order. */
 export function engineConfigJson(engine, applicationId) {
@@ -52,16 +52,16 @@ export function eventsManifest(p, { release, applicationId, deployTx, rules }) {
   need(extra.length === 0, `unexpected deploy parameters: ${extra.join(', ')}`);
   if (p.event === undefined && p.resolver === undefined && p.depositsFrom === undefined) return null;
   const e = p.event, uint = (x) => Number.isSafeInteger(x) && x > 0;
-  need(e && typeof e === 'object' && JSON.stringify(Object.keys(e).sort()) === JSON.stringify([...EVENT_KEYS].sort()), 'the event parameter needs exactly questionHash, start, cutoff, end, voidableAfter');
-  need(/^0x[0-9a-f]{64}$/.test(e.questionHash) && EVENT_KEYS.slice(1).every((k) => uint(e[k])) && e.start < e.cutoff && e.cutoff < e.end && e.end < e.voidableAfter && e.voidableAfter < 2 ** 32,
+  need(e && typeof e === 'object' && JSON.stringify(Object.keys(e).sort()) === JSON.stringify([...EVENT_KEYS].sort()), 'the event parameter needs exactly question, start, cutoff, end, voidableAfter');
+  need(/^0x[0-9a-f]{64}$/.test(e.question) && EVENT_KEYS.slice(1).every((k) => uint(e[k])) && e.start < e.cutoff && e.cutoff < e.end && e.end < e.voidableAfter && e.voidableAfter < 2 ** 32,
     'the event needs a question hash and times start < cutoff < end < voidableAfter within 32 bits');
   need(e.end % 900 !== 0, 'the event must end off the 900 s grid, or it shares the all-accounts limit with a BTC round');
   need(/^0x[0-9a-f]{40}$/.test(p.resolver ?? '') && !/^0x0{40}$/.test(p.resolver), 'the resolver must be a lowercase address');
   need(![p.stakeLimits.house, p.engine.authority, p.engine.domain.endpoint, p.custody.vault, p.custody.inbox].map(lower).includes(p.resolver), 'the resolver is one of the deployment\'s own roles');
   need(uint(p.depositsFrom), 'a deployment with an event needs depositsFrom, the last inbox index its predecessor processed');
-  need(rules && /^\/(?!.*\.\.)[\w./-]+$/.test(rules.path) && keccak256(rules.bytes) === e.questionHash, '--rules must be the file under public/ that hashes to the event\'s question hash');
+  need(rules && /^\/(?!.*\.\.)[\w./-]+$/.test(rules.path) && keccak256(rules.bytes) === e.question, '--rules must be the file under public/ that hashes to the event\'s question hash');
   return { schemaVersion: 1, kind: 'zedge-events', chainId: 26514, release, application: applicationId, deployTx, resolver: p.resolver, depositsFrom: p.depositsFrom,
-    event: { rules: rules.path, questionHash: e.questionHash, start: e.start, cutoff: e.cutoff, end: e.end, voidableAfter: e.voidableAfter } };
+    event: { rules: rules.path, questionHash: e.question, start: e.start, cutoff: e.cutoff, end: e.end, voidableAfter: e.voidableAfter } };
 }
 
 /** One client and reader per chain, every read at the block taken first. */

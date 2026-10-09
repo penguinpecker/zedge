@@ -19,7 +19,7 @@ const live = () => {
 };
 const RULES = { path: '/events/us-house-2026.txt', bytes: Buffer.from('Resolves Yes if members elected as Democrats win at least 218 of the 435 voting seats.\n') };
 const RESOLVER = '0x1111111111111111111111111111111111111111';
-const EVENT = { questionHash: keccak256(RULES.bytes), start: 1791534600, cutoff: 1793743200, end: 1793743201, voidableAfter: 1801439999 };
+const EVENT = { question: keccak256(RULES.bytes), start: 1791534600, cutoff: 1793743200, end: 1793743201, voidableAfter: 1801439999 };
 const next = (over = {}) => ({ ...live(), event: { ...EVENT }, resolver: RESOLVER, depositsFrom: 8, ...over });
 const ctx = { release: 'orderbook-mainnet-2026-10-12', applicationId: '11932061812661987618', deployTx: `0x${'e1'.repeat(32)}`, rules: RULES };
 
@@ -42,10 +42,12 @@ test('a deployment with the event: the events manifest, pinned', () => {
 test('the writer refuses a deployment whose event, resolver, depositsFrom or rules do not hold together', () => {
   const refuses = (p, message, c = ctx) => assert.throws(() => eventsManifest(p, c), message);
   refuses({ ...live(), extra: 1 }, /unexpected deploy parameters: extra/);
-  refuses({ ...live(), resolver: RESOLVER }, /exactly questionHash/);
-  refuses(next({ event: undefined }), /exactly questionHash/);
-  refuses(next({ event: { ...EVENT, label: 'x' } }), /exactly questionHash/);
-  refuses(next({ event: { ...EVENT, questionHash: '0x12' } }), /start < cutoff < end < voidableAfter/);
+  refuses({ ...live(), resolver: RESOLVER }, /exactly question,/);
+  refuses(next({ event: undefined }), /exactly question,/);
+  refuses(next({ event: { ...EVENT, label: 'x' } }), /exactly question,/);
+  const { question, ...times } = EVENT;
+  refuses(next({ event: { questionHash: question, ...times } }), /exactly question,/, ctx); // the events manifest's name is not the guest's
+  refuses(next({ event: { ...EVENT, question: '0x12' } }), /start < cutoff < end < voidableAfter/);
   refuses(next({ event: { ...EVENT, start: EVENT.cutoff } }), /start < cutoff < end < voidableAfter/);
   refuses(next({ event: { ...EVENT, end: EVENT.cutoff } }), /start < cutoff < end < voidableAfter/);
   refuses(next({ event: { ...EVENT, voidableAfter: EVENT.end } }), /start < cutoff < end < voidableAfter/);

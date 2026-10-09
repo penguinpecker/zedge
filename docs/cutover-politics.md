@@ -43,7 +43,7 @@ All are in this repository.
 
   It exits 1 if any check fails.
 - **`adapters/vela/stack/cutover.mjs freeze`**. A dry run unless `--fork URL` (a local Anvil fork) or `--broadcast-mainnet` (OWNER KEY). `--trigger` freezes another trigger proxy; `--implementation` reuses an already deployed `WithdrawOnlyBookClockTrigger`.
-- **`adapters/vela/stack/cutover.mjs thaw`**. Rollback only, same modes. Upgrades a trigger back to the live `BookClockTrigger` implementation. It refuses while any other application's trigger reads the same inbox without being withdraw-only, whether that application is deployed or its deploy request is still pending.
+- **`adapters/vela/stack/cutover.mjs thaw`**. Rollback only, same modes. Upgrades a trigger back to the live `BookClockTrigger` implementation. It refuses while any other application on the same inbox (deployed, or its deploy request still pending) is not withdraw-only, has a credit record, or has applied no tick asked after its freeze.
 - **`adapters/vela/stack/deploy-book.mjs`**. The new application: `--fork` (rehearsal) or `--broadcast-mainnet` (OWNER KEY).
 - **`scripts/write-orderbook-manifest.mjs`** (read-only). Writes `public/deployments/26514-orderbook.json` (same shape as today) and `public/deployments/26514-events.json` (event, resolver, depositsFrom).
 
@@ -163,6 +163,7 @@ It refuses to send in any of these cases:
 - N is not proven, or `--deposits-from` differs from it;
 - the resolver is any deployment role or has sent a transaction;
 - the trigger implementation is not this source's `BookClockTrigger`;
+- another application on the inbox (deployed, or an earlier run's pending request) is not withdraw-only;
 - the guest's SHA-256 is not in the manager's blobs.
 
 **Check**, all `PASS`:

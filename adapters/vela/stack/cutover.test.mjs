@@ -2,7 +2,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import { keccak256, stringToBytes } from "viem";
-import { EVENT, INBOX, RAILWAY, blobInPlace, chooseDepositsFrom, eventSpec, othersCrediting, proveDepositsFrom, resolverProblem, runtimeOf } from "./cutover.mjs";
+import { EVENT, INBOX, RAILWAY, blobInPlace, chooseDepositsFrom, codeName, eventSpec, othersCrediting, proveDepositsFrom, resolverProblem, runtimeOf, thawProblems } from "./cutover.mjs";
 
 test("runtimeOf fills every immutable slot with the contract's own address", () => {
   const art = { deployedBytecode: { object: `0x60${"00".repeat(32)}61${"00".repeat(32)}5b`, immutableReferences: { 7: [{ start: 1, length: 32 }, { start: 34, length: 32 }] } } };
@@ -19,6 +19,7 @@ test("N is proven only once the trigger is frozen and a tick asked after the fre
   assert.equal(proveDepositsFrom(proof({ credits: credits(3, 1, 2) })), 3n, "log order does not matter");
   assert.equal(proveDepositsFrom(proof({ credits: [] })), 0n);
   assert.throws(() => proveDepositsFrom(proof({ frozen: false })), /not WithdrawOnlyBookClockTrigger/);
+  assert.throws(() => proveDepositsFrom(proof({ freezeBlock: undefined })), /no Upgraded event dates the freeze/);
   assert.throws(() => proveDepositsFrom(proof({ lastClockBlock: 100n })), /no tick asked after the freeze/);
   assert.throws(() => proveDepositsFrom(proof({ lastClockBlock: undefined })), /no tick asked after the freeze/);
   assert.throws(() => proveDepositsFrom(proof({ credits: credits(1, 3) })), /skip or repeat index 2/);
@@ -44,7 +45,9 @@ test("the event parameter: the owner's times and the rules text's Keccak-256", (
   assert.equal(new Date(EVENT.voidableAfter * 1000).toISOString(), "2027-01-31T23:59:59.000Z");
   assert.equal(EVENT.end % 900, 1, "off the 900 s grid: no shared all-accounts limit with a BTC round");
   const rules = stringToBytes("Resolves Yes if ...\n");
-  assert.deepEqual(eventSpec(rules, 1791532800), { questionHash: keccak256(rules), start: 1791532800, ...EVENT });
+  // The guest's EventTerms names and order exactly: it refuses constructor parameters that do not re-encode byte for byte.
+  assert.equal(JSON.stringify(eventSpec(rules, 1791532800)),
+    `{"question":"${keccak256(rules)}","start":1791532800,"cutoff":1793743200,"end":1793743201,"voidableAfter":1801439999}`);
   assert.throws(() => eventSpec(rules, EVENT.cutoff), /start before its cutoff/);
   assert.throws(() => eventSpec(rules, 0), /start before its cutoff/);
   assert.throws(() => eventSpec(new Uint8Array(), 1791532800), /rules text is empty/);
@@ -76,10 +79,29 @@ test("the guest is in the manager's artifact store only if sha256sum prints its 
   assert.throws(() => blobInPlace(sha, { run: run(`${sha}  ${path}\n`) }), /--railway-project/);
 });
 
-test("a thaw is allowed only while no other application's trigger reads the inbox without being withdraw-only", () => {
+test("another application on the inbox credits deposits unless its trigger is withdraw-only (deploy-book refuses to add a second)", () => {
   const self = "0x9ca46470b05350384c31c8b236af4df638cbb30d", other = "0x243cd8d89755f73ebfbe0c6c32add4188fe0d293";
   const t = (app, trigger, over) => ({ app, trigger, inbox: INBOX.toUpperCase().replace("0X", "0x"), withdrawOnly: false, ...over });
   assert.deepEqual(othersCrediting([t(1n, self), t(2n, other, { withdrawOnly: true }), t(3n, "0x" + "0".repeat(40), { inbox: null })], self), []);
   assert.deepEqual(othersCrediting([t(1n, self), t(2n, other)], self), [`application 2 (trigger ${other})`]);
   assert.deepEqual(othersCrediting([t(4n, "0x" + "1".repeat(40), { inbox: "0x" + "2".repeat(40) })], self), [], "a trigger on another inbox credits nothing here");
+});
+
+test("a thaw is refused while another application on the inbox credits, has credited, or may still apply a payload from before its freeze", () => {
+  const self = "0x9ca46470b05350384c31c8b236af4df638cbb30d", other = "0x243cd8d89755f73ebfbe0c6c32add4188fe0d293";
+  const t = (over) => ({ app: 2n, trigger: other, inbox: INBOX.toLowerCase(), withdrawOnly: true, freezeBlock: 100n, lastClockBlock: 101n, credits: 0, ...over });
+  const old = { app: 1n, trigger: self, inbox: INBOX.toLowerCase(), withdrawOnly: false, credits: 8 };
+  assert.deepEqual(thawProblems([old, t()], self), [], "frozen, settled after its freeze, never credited: the rollback is safe");
+  assert.deepEqual(thawProblems([old, t({ inbox: "0x" + "2".repeat(40), withdrawOnly: false, credits: 3, lastClockBlock: undefined })], self), [], "another inbox");
+  assert.deepEqual(thawProblems([old, t({ withdrawOnly: false })], self), [`application 2 (trigger ${other}) credits deposits: freeze it first`]);
+  assert.deepEqual(thawProblems([old, t({ credits: 1 })], self), ["application 2 has credited 1 deposits: forward-fix only, never thaw"]);
+  assert.deepEqual(thawProblems([old, t({ lastClockBlock: 100n })], self), ["application 2 has applied no tick asked after its freeze: send it a sync"]);
+  assert.deepEqual(thawProblems([old, t({ lastClockBlock: undefined })], self), ["application 2 has applied no tick asked after its freeze: send it a sync"]);
+});
+
+test("a trigger reads as withdraw-only only if its code is WithdrawOnlyBookClockTrigger's and not BookClockTrigger's", () => {
+  assert.equal(codeName(true, false), "BookClockTrigger");
+  assert.equal(codeName(false, true), "WithdrawOnlyBookClockTrigger");
+  assert.equal(codeName(false, false), "unknown");
+  assert.throws(() => codeName(true, true), /build to the same code: rebuild/, "a stale build would prove a freeze that never happened");
 });

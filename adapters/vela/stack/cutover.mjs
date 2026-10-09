@@ -9,8 +9,8 @@
 //   node adapters/vela/stack/cutover.mjs thaw [--trigger 0x…] [--fork URL | --broadcast-mainnet]   rollback only (runbook)
 //
 // freeze deploys WithdrawOnlyBookClockTrigger (or reuses --implementation, already deployed) and upgrades the trigger proxy to it;
-// thaw upgrades it back to the live BookClockTrigger implementation, and refuses while any other application's trigger reads the
-// same inbox without being withdraw-only. Build the contracts first (forge build in contracts/). Horizen is read through the public gateway (1,000-block log windows), never the
+// thaw upgrades it back to the live BookClockTrigger implementation, and refuses while any other application on the same inbox is
+// not withdraw-only, has credited a deposit, or has applied no tick asked after its freeze. Build the contracts first (forge build in contracts/). Horizen is read through the public gateway (1,000-block log windows), never the
 // operator's RPC; Base logs through Tenderly's public gateway unless --base-rpc. deploy-book.mjs takes its checks from here.
 import { readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
@@ -73,6 +73,7 @@ export function runtimeOf(artifact, at) {
  * before the freeze can apply after it), and its credit records number 1…N exactly once, within the inbox. */
 export function proveDepositsFrom({ frozen, freezeBlock, lastClockBlock, credits, highest }) {
   if (!frozen) throw new Error("the old trigger is not WithdrawOnlyBookClockTrigger yet: run cutover.mjs freeze first");
+  if (freezeBlock === undefined) throw new Error("no Upgraded event dates the freeze: without its block no tick can be shown to come after it");
   if (lastClockBlock === undefined || lastClockBlock <= freezeBlock) throw new Error(`the old application has applied no tick asked after the freeze (block ${freezeBlock}): wait for one, or send it a sync`);
   [...credits].sort((x, y) => (x.index < y.index ? -1 : 1)).forEach((c, i) => {
     if (c.index !== BigInt(i + 1)) throw new Error(`the old application's credit records skip or repeat index ${i + 1}`);
@@ -91,11 +92,12 @@ export function chooseDepositsFrom({ fork, given, proven }) {
   return proven;
 }
 
-/** The `event` deploy parameter: the Keccak-256 of the exact rules text (the question hash) and the owner's times. */
+/** The `event` deploy parameter: the Keccak-256 of the exact rules text (the question hash) and the owner's times, with the guest's
+ * key names in its key order (EventTerms), since the guest refuses constructor parameters that do not re-encode byte for byte. */
 export function eventSpec(rules, start) {
   if (!rules?.length) throw new Error("the event's rules text is empty");
   if (!Number.isSafeInteger(start) || start <= 0 || start >= EVENT.cutoff) throw new Error(`the event must start before its cutoff ${EVENT.cutoff}`);
-  return { questionHash: keccak256(rules), start, cutoff: EVENT.cutoff, end: EVENT.end, voidableAfter: EVENT.voidableAfter };
+  return { question: keccak256(rules), start, cutoff: EVENT.cutoff, end: EVENT.end, voidableAfter: EVENT.voidableAfter };
 }
 
 /** Why `resolver` cannot be the event's resolver, or null. Owner decision: a new dedicated wallet, so a lowercase address (the
@@ -112,6 +114,23 @@ export function resolverProblem(resolver, roles, nonce) {
  * At most one application may ever credit them (runbook, Rollback), so a thaw needs this empty. */
 export function othersCrediting(triggers, self) {
   return triggers.filter((t) => lower(t.trigger) !== lower(self) && lower(t.inbox) === lower(INBOX) && !t.withdrawOnly).map((t) => `application ${t.app} (trigger ${t.trigger})`);
+}
+
+/** Why thawing `self` could credit a deposit twice, or []. Beyond othersCrediting: the thawed application credits again from the
+ * index after its own last, so every other application on the inbox must never have credited a deposit (runbook, Rollback rule 3),
+ * and must have applied a tick asked after its freeze, or a payload with deposits could still reach it. */
+export function thawProblems(triggers, self) {
+  const others = triggers.filter((t) => lower(t.trigger) !== lower(self) && lower(t.inbox) === lower(INBOX));
+  return [...othersCrediting(triggers, self).map((x) => `${x} credits deposits: freeze it first`),
+    ...others.filter((t) => t.credits > 0).map((t) => `application ${t.app} has credited ${t.credits} deposits: forward-fix only, never thaw`),
+    ...others.filter((t) => t.withdrawOnly && !(t.lastClockBlock > t.freezeBlock)).map((t) => `application ${t.app} has applied no tick asked after its freeze: send it a sync`)];
+}
+
+/** What a trigger implementation runs, from whether its code is this source's BookClockTrigger and its WithdrawOnlyBookClockTrigger.
+ * Both at once means the two were built to one code (a stale or edited build), and then a crediting trigger would read as frozen. */
+export function codeName(book, frozen) {
+  if (book && frozen) throw new Error("BookClockTrigger and WithdrawOnlyBookClockTrigger build to the same code: rebuild them (forge build in adapters/vela/stack/contracts)");
+  return book ? "BookClockTrigger" : frozen ? "WithdrawOnlyBookClockTrigger" : "unknown";
 }
 
 /** The manager's copy of the guest, read over `railway ssh` with the owner's CLI: true only if sha256sum prints the guest's SHA-256
@@ -167,9 +186,10 @@ export async function answer(c, trigger) {
 /** What the old trigger runs, and since which block it is withdraw-only. */
 export async function triggerState(c, trigger, head) {
   const implementation = await implementationOf(c, trigger);
-  const [book, frozen] = await Promise.all([codeIs(c, implementation, artifact("BookClockTrigger")), codeIs(c, implementation, artifact("WithdrawOnlyBookClockTrigger"))]);
+  const code = codeName(...await Promise.all([codeIs(c, implementation, artifact("BookClockTrigger")), codeIs(c, implementation, artifact("WithdrawOnlyBookClockTrigger"))]));
+  const frozen = code === "WithdrawOnlyBookClockTrigger";
   const upgraded = frozen ? await newest(c, { address: trigger, event: ABI[1], args: { implementation }, from: OLD.deployBlock, to: head }) : null;
-  return { implementation, code: book ? "BookClockTrigger" : frozen ? "WithdrawOnlyBookClockTrigger" : "unknown", frozen, freezeBlock: upgraded?.blockNumber };
+  return { implementation, code, frozen, freezeBlock: upgraded?.blockNumber };
 }
 
 /** An application's public deposit and payout records, and its newest clock record (block word = the block that asked the tick). */
@@ -261,16 +281,19 @@ async function facts(a) {
 // ---------------------------------------------------------------- freeze
 
 /** Every application's trigger that a deploy request on the endpoint ever registered (deployed or still pending; a failed deploy
- * clears its own), with the inbox it reads and whether it is withdraw-only. */
-async function triggersOnTheEndpoint(c, head) {
-  const W = artifact("WithdrawOnlyBookClockTrigger");
+ * clears its own), with the inbox it reads, whether it is withdraw-only, and the block its deploy request was submitted in. */
+export async function triggersOnTheEndpoint(c, head) {
+  const W = artifact("WithdrawOnlyBookClockTrigger"), B = artifact("BookClockTrigger");
   const submitted = await scan(c, { address: ENDPOINT, event: parseAbi(["event DeployRequestSubmitted(uint64 indexed applicationId, bytes32 requestId, address indexed sender)"])[0], from: OLD.deployBlock, to: head });
+  const from = new Map(submitted.map((l) => [l.args.applicationId, l.blockNumber]));
   const apps = [...new Set([...(await read(c, ENDPOINT, "getDeployedAppIds")), ...submitted.map((l) => l.args.applicationId)])];
   return Promise.all(apps.map(async (app) => {
     const trigger = lower(await read(c, ENDPOINT, "triggerContracts", [app]));
     if (/^0x0{40}$/.test(trigger)) return { app, trigger, inbox: null, withdrawOnly: false };
     const inbox = await read(c, trigger, "inbox").then(lower, () => null);
-    return { app, trigger, inbox, withdrawOnly: inbox !== null && await codeIs(c, await implementationOf(c, trigger), W) };
+    const implementation = await implementationOf(c, trigger);
+    const withdrawOnly = inbox !== null && codeName(await codeIs(c, implementation, B), await codeIs(c, implementation, W)) === "WithdrawOnlyBookClockTrigger";
+    return { app, trigger, inbox, withdrawOnly, from: from.get(app) ?? OLD.deployBlock };
   }));
 }
 
@@ -293,8 +316,13 @@ async function upgrade(a, thawing) {
   if (thawing && state.code === "BookClockTrigger") { console.log("already BookClockTrigger: nothing to send"); return; }
   if (state.code !== (thawing ? "WithdrawOnlyBookClockTrigger" : "BookClockTrigger")) throw new Error(`the proxy does not run ${thawing ? "WithdrawOnlyBookClockTrigger" : "BookClockTrigger"}: refusing`);
   if (thawing) {
-    const crediting = othersCrediting(await triggersOnTheEndpoint(c, head), trigger);
-    if (crediting.length) throw new Error(`a thaw would let two applications credit deposits; freeze these first: ${crediting.join(", ")}`);
+    const triggers = await triggersOnTheEndpoint(c, head);
+    await Promise.all(triggers.filter((t) => t.trigger !== trigger && t.inbox === lower(INBOX)).map(async (t) => {
+      const [s, r] = await Promise.all([triggerState(c, t.trigger, head), appRecords(c, t.app, t.from, head)]);
+      Object.assign(t, { freezeBlock: s.freezeBlock, credits: r.credits.length, lastClockBlock: r.clock?.block });
+    }));
+    const problems = thawProblems(triggers, trigger);
+    if (problems.length) throw new Error(`a thaw could credit a deposit twice: ${problems.join("; ")}`);
   }
   if (before[0] !== DEPLOYER || BigInt(before[1]) !== 0n) throw new Error("the trigger's owner is not the deployer, or a handover is pending");
   const [nonce, pendingNonce] = await Promise.all([c.getTransactionCount({ address: DEPLOYER, blockTag: "latest" }), c.getTransactionCount({ address: DEPLOYER, blockTag: "pending" })]);

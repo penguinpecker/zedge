@@ -27,7 +27,8 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { padHex, parseAbi, toHex } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
-import { ABI, KEEPER_VELA, MANAGER, OLD, RAILWAY, RELAYER, SUB, artifact, blobInPlace, chooseDepositsFrom, client as reader, codeIs, eventSpec, provenDepositsFrom, resolverProblem, words } from "./cutover.mjs";
+import { ABI, KEEPER_VELA, MANAGER, OLD, RAILWAY, RELAYER, SUB, artifact, blobInPlace, chooseDepositsFrom, client as reader, codeIs, eventSpec, newest, othersCrediting, provenDepositsFrom,
+  resolverProblem, triggersOnTheEndpoint, words } from "./cutover.mjs";
 import { engineConfigJson } from "../../../scripts/write-orderbook-manifest.mjs";
 import { connectVela } from "../../../services/keeper/vela.mjs";
 
@@ -97,8 +98,7 @@ console.log(`${fork ? `FORK ${fork} (Anvil, deployer impersonated)` : `Horizen m
 const ep = new ethers.Contract(ENDPOINT, ["function teeAuthenticator() view returns (address)", "function minFeePerRequest() view returns (uint256)",
   "function availableDeploySlots() view returns (uint256)", "function applicationStateRoots(uint64) view returns (bytes32)",
   "function submitDeployRequestWithTrigger(uint8 protocolVersion, bytes payload, address trigger) payable returns (bytes32)",
-  "event DeployRequestSubmitted(uint64 indexed applicationId, bytes32 requestId, address indexed sender)",
-  "event DeployRequestCompleted(uint64 indexed applicationId, bytes32 indexed requestId, uint256 applicationFees, uint8 status, uint8 errorCode, string errorMessage)"], provider);
+  "event DeployRequestSubmitted(uint64 indexed applicationId, bytes32 requestId, address indexed sender)"], provider);
 const AUTH = lower(await ep.teeAuthenticator());
 check("the endpoint is ours: minimum fee 1 gwei, a deploy slot free", (await ep.minFeePerRequest()) === MIN_FEE && (await ep.availableDeploySlots()) > 0n);
 // On mainnet the inbox is deployed first (contracts/, by its own script). A fork has only the plan: the inbox is
@@ -149,7 +149,7 @@ const predicted = (i) => lower(ethers.getCreateAddress({ from: DEPLOYER, nonce: 
 STEPS.forEach((label, i) => console.log(`  nonce ${ck.nonce0 + i}  ${label}${i < CREATES ? ` -> ${predicted(i)}` : ""}`));
 if (ck.forkInbox && predicted(1) !== INBOX) die(`the plan puts the inbox at ${INBOX}, but the deployer's nonce ${ck.nonce0 + 1} creates ${predicted(1)}`);
 if (!ck.forkInbox && [predicted(0), predicted(1)].some((x) => x === INBOX || x === VAULT)) die("the trigger would take a custody contract's planned address");
-console.log(`  event: question ${EVENT.questionHash} (${RULES.length} bytes of rules), start ${EVENT.start}, cutoff ${EVENT.cutoff}, end ${EVENT.end}, voidable after ${EVENT.voidableAfter}; resolver ${RESOLVER}`);
+console.log(`  event: question ${EVENT.question} (${RULES.length} bytes of rules), start ${EVENT.start}, cutoff ${EVENT.cutoff}, end ${EVENT.end}, voidable after ${EVENT.voidableAfter}; resolver ${RESOLVER}`);
 
 let account;
 const q = ethers.toQuantity;
@@ -228,8 +228,15 @@ const params = { engine: { domain: { chainId: CHAIN_ID, endpoint: ENDPOINT, appl
     observationWindow: Number(cfg.observationWindow), openingGrace: Number(cfg.openingGrace), voidGrace: Number(cfg.voidGrace), cutoffBuffer: Number(cfg.cutoffBuffer) } },
   applicationFingerprint: WASM_SHA256, origin: ORIGIN, epoch: "1", markets: [MARKET],
   stakeLimits: { account: STAKE.account, boundary: STAKE.boundary, house: HOUSE, houseTotal: STAKE.houseTotal },
-  chainlink: CHAINLINK, custody: { chainId: 8453, vault: VAULT, inbox: INBOX, usdc: USDC }, event: EVENT, resolver: RESOLVER, depositsFrom: Number(N) };
+  chainlink: CHAINLINK, custody: { chainId: 8453, vault: VAULT, inbox: INBOX, usdc: USDC }, event: EVENT, resolver: RESOLVER,
+  ...(N > 0n && { depositsFrom: Number(N) }) }; // the guest encodes depositsFrom 0 by leaving it out, and refuses parameters it would encode otherwise
 writeFileSync(join(EVID, "deploy-params.json"), JSON.stringify(params, null, 2) + "\n");
+// Two applications crediting from N + 1 would both pay those deposits: refuse while another one on the inbox, deployed or pending
+// (an earlier run whose checkpoint was moved aside), is not withdraw-only.
+if (!ck.steps[k]?.gasUsed) {
+  const others = othersCrediting(await triggersOnTheEndpoint(pub, await pub.getBlockNumber()), TRIGGER);
+  if (others.length) die(`another application credits this inbox's deposits: ${others.join(", ")}; freeze it (cutover.mjs freeze --trigger) or forward-fix it`);
+}
 const s = await step(k, () => ({ to: ENDPOINT, value: MIN_FEE,
   data: ep.interface.encodeFunctionData("submitDeployRequestWithTrigger", [0, new sdk.VelaClient(provider, false, AUTH, ENDPOINT).buildDeployPayload(ethers.getBytes(`0x${WASM_SHA256}`), params), TRIGGER]) }));
 if (!s.requestId) {
@@ -241,11 +248,13 @@ if (!s.requestId) {
 }
 console.log(`  deploy request ${s.requestId}: application ${s.applicationId} (tx ${s.hash})`);
 if (!fork || a.wait) {
+  // Searched back from the head in the public gateway's 1,000-block windows, so a rerun hours later still finds it.
+  const COMPLETED = parseAbi(["event DeployRequestCompleted(uint64 indexed applicationId, bytes32 indexed requestId, uint256 applicationFees, uint8 status, uint8 errorCode, string errorMessage)"])[0];
   for (const t0 = Date.now(); !s.completed; await sleep(1000)) {
-    const [e] = await ep.queryFilter(ep.filters.DeployRequestCompleted(BigInt(s.applicationId), s.requestId), s.block);
+    const e = await newest(pub, { address: ENDPOINT, event: COMPLETED, args: { applicationId: BigInt(s.applicationId), requestId: s.requestId }, from: BigInt(s.block), to: await pub.getBlockNumber() });
     if (e) {
       if (Number(e.args.status) !== 0) die(`the guest refused the deployment: ${e.args.errorMessage} (code ${e.args.errorCode})`);
-      s.completed = { tx: e.transactionHash, block: e.blockNumber };
+      s.completed = { tx: e.transactionHash, block: Number(e.blockNumber) };
       save();
     } else if (Date.now() - t0 > 600_000) die("the deploy request is not completed after 10 min; run again to keep waiting");
   }
@@ -278,14 +287,17 @@ async function firstSyncs() {
     }
   };
   const appEvent = (kind, fromBlock, requestId) => pub.getLogs({ address: ENDPOINT, event: ABI[0], args: { applicationId: app, eventSubType: SUB[kind], ...(requestId && { requestId }) }, fromBlock: BigInt(fromBlock) });
+  const clockOf = (l) => { const w = words(l.args.data); return { tick: w[0], block: w[1], timestamp: Number(w[2]) }; };
   const clockSince = async (fromBlock) => {
     for (const t0 = Date.now(); ; await sleep(2000)) {
       const logs = await appEvent("clock", fromBlock);
-      if (logs.length) { const w = words(logs.at(-1).args.data); return { tick: w[0], block: w[1], timestamp: Number(w[2]) }; }
+      if (logs.length) return clockOf(logs.at(-1));
       if (Date.now() - t0 > 300_000) die("no clock record 5 min after the sync; run again");
     }
   };
-  let clock = (await appEvent("clock", s.block)).length ? await clockSince(s.block) : null;
+  // A rerun: the newest clock record since the deploy, searched back from the head in 1,000-block windows.
+  const last = await newest(pub, { address: ENDPOINT, event: ABI[0], args: { applicationId: app, eventSubType: SUB.clock }, from: BigInt(s.block), to: await pub.getBlockNumber() });
+  let clock = last && clockOf(last);
   if (!clock) {
     let sent = await vela.send("sync"), c = await completed(sent, "the first sync");
     if (c.errorCode === 9) { // PUB_KEY_NOT_REGISTERED: a new application knows no key yet
