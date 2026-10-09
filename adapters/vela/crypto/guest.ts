@@ -234,8 +234,8 @@ export interface EventTerms {
  * Down is No. */
 export function eventRound(engineConfigJson: string, event: EventTerms): { id: string; spec: EngineRound } {
   const { question, start, cutoff, end, voidableAfter } = event;
-  if (!/^0x[0-9a-f]{64}$/.test(question) || /^0x0{64}$/.test(question) || ![start, cutoff, end, voidableAfter].every(Number.isSafeInteger) ||
-    !(0 < start && start < cutoff && cutoff <= end && end < voidableAfter && voidableAfter <= 0xffff_ffff)) {
+  // A fraction or an unsafe integer is refused by the ABI encoder below.
+  if (!/^0x[0-9a-f]{64}$/.test(question) || /^0x0{64}$/.test(question) || !(0 < start && start < cutoff && cutoff <= end && end < voidableAfter && voidableAfter <= 0xffff_ffff)) {
     throw new Error("Invalid event terms.");
   }
   const o = (JSON.parse(engineConfigJson) as { oracle: { chainId: number; registry: string; rulesHash: string } }).oracle;

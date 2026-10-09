@@ -94,6 +94,13 @@ func TestEventRound(t *testing.T) {
 	withObservation := result(Down)
 	withObservation.Observation = testObservation("1", uint32(evEnd))
 	h.refuse(withObservation, auth, evEnd, "invalid event result")
+	// A price round's resolution, its observation naming the event's own feed
+	// as the guest's settle writes it: on the price path it would read the
+	// opening the event never has.
+	priceShaped := result("")
+	priceShaped.Observation = testObservation("1", uint32(evEnd))
+	priceShaped.Observation.FeedID = question
+	h.refuse(priceShaped, auth, evEnd, "invalid event result")
 	for _, o := range []Outcome{"", Void, "yes"} {
 		h.refuse(result(o), auth, evEnd, "invalid event result")
 	}

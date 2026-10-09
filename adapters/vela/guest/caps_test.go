@@ -312,6 +312,7 @@ func TestStateAtEveryCapFitsTheBound(t *testing.T) {
 	live := cappedState(t)
 	spend(live, 0)
 	withEvent(t, live)
+	live.DepositsFrom, live.DepositsSeen = 1, live.DepositsSeen+1
 	for name, s := range map[string]*State{"archived": archived, "live": live} {
 		b, err := s.encode()
 		if err != nil {
