@@ -32,7 +32,7 @@ Only the relevant fields below may be present/nonzero. Commands reject additiona
 | --- | --- | --- | --- |
 | `register` | User | `account` | Register the principal with zero funds. |
 | `deposit` | Verified authority | `account, amount, evidence` | Credit a verified unique external deposit. |
-| `create_round` | Verified authority | `round` | Create immutable market terms before start. Receipt returns engine round ID. |
+| `create_round` | Verified authority | `round` | Create immutable market terms before start (an `EVENT` round: before its cutoff, created open). Receipt returns engine round ID. |
 | `open_round` | Verified authority | `roundId, evidence, registryTime, observation` | Fix opening from validated Streams boundary observation recorded by the registry inside the opening window. |
 | `checkpoint` | Verified authority | None | Advance authenticated time and release expired orders. |
 | `mint` | User | `account, roundId, quantity` | Lock collateral and create equal Up/Down shares. |
@@ -40,7 +40,7 @@ Only the relevant fields below may be present/nonzero. Commands reject additiona
 | `place_order` | User | `account, roundId, outcome, side, price, quantity, tif, expiry, maxFee` | Reserve/match, then rest (`gtc`) or cancel remainder (`ioc`). |
 | `cancel_order` | User | `account, orderId` | Cancel owned active remainder. |
 | `cancel_all` | User | `account`, optional `roundId` | Cancel owned active orders in scope. |
-| `resolve_round` | Verified authority | `roundId, evidence, registryTime, observation` | Fix Up if exact close >= exact open, otherwise Down. Any registry time at or after end; no deadline. |
+| `resolve_round` | Verified authority | `roundId, evidence, registryTime`, and `observation` (price round) or `outcome` (`EVENT` round) | Price round: fix Up if exact close >= exact open, otherwise Down; any registry time at or after end, no deadline. `EVENT` round: fix the posted `outcome`, `up` (Yes) or `down` (No), for `end <= registryTime <= voidableAfter`. |
 | `void_round` | Verified authority | `roundId, evidence, registryTime` | Void strictly after the opening deadline (never opened) or strictly after `voidableAfter` (opened). |
 | `archive_round` | Verified authority | `roundId` | Commit/archive a terminal round only after all supplies, collateral and holdings are zero. |
 | `redeem` | User | `account, roundId` | Burn all owned settled shares and credit payout. |
@@ -56,6 +56,8 @@ Only the relevant fields below may be present/nonzero. Commands reject additiona
 ## Round and custody binding
 
 `Config.Oracle` field order is `chainId, registry, oracle, rulesHash, btcFeedId, ethFeedId, decimals, observationWindow, openingGrace, voidGrace, cutoffBuffer`. The feed IDs must differ and use schema 3; precision is fixed at 18. The registry oracle and collateral addresses, feeds, precision and timing parameters reproduce Solidity's exact `rulesHash` with the registry's rules version string. An adapter must authenticate those values against the actual contract and its upstream dependencies before creating engine state.
+
+**Event rounds.** Asset `EVENT` is an operator-resolved Yes/No round (`engine.NewEventSpec`): `feed` is the `0x` Keccak-256 of the event's exact rules text, `registryRoundId` is `keccak256(abi.encode(registryChainId, registryAddress, rulesHash, uint8 2, question, start, cutoff, end, voidableAfter))` (asset 2 is never a registry asset), `observationWindow` is 0 and `openingDeadline` is `start`, with `0 < start < cutoff <= end < voidableAfter <= 2^32 - 1` and no grid. It is created open while the authenticated time is before `cutoff`, never opened, resolved only by an `outcome` (no observation) between `end` and `voidableAfter` inclusive, and voided strictly after `voidableAfter`. The adapter authenticates who posted the outcome; the engine only requires the authority. The rest of this section is about price rounds.
 
 Round duration is 300 or 900 seconds; asset is `BTC` or `ETH`. Start aligns to its UTC epoch duration; creation is strictly before start. `NewRoundSpec` derives `end=start+duration`, `cutoff=end-cutoffBuffer`, `openingDeadline=start+window+openingGrace` and `voidableAfter=end+window+voidGrace`. Window is at most 60; opening grace is positive; void grace is 120–1,814,400 seconds (2 minutes to 21 days, the registry `initialize` bound; the planned mainnet profile uses 300, so `voidableAfter` is end + 360 s there); window+openingGrace is strictly less than 300-cutoffBuffer. End+window must fit `uint32`. Supplied round fields must exactly match this derivation. `create_round` is the one registry-related command judged on the engine's own authenticated time: processed at or after `start` it rejects for good, and that round then never exists in the engine. Terms and IDs are deterministic, so an adapter creates each engine round well ahead of its start, together with its registry round, instead of waiting to mirror a `RoundCreated` event that may be mined in the last second. An engine round whose registry round was never created cannot be opened, voided from a recorded event or archived, and keeps one of the 128 round slots.
 

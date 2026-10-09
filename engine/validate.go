@@ -138,16 +138,20 @@ func Validate(s *State) error {
 		if u != m.UpSupply || d != m.DownSupply {
 			return fail("outcome supply mismatch")
 		}
-		switch m.Status {
-		case "scheduled":
+		switch {
+		case m.Spec.Asset == EventAsset:
+			if e = validateEvent(m, u, d, s.Time); e != nil {
+				return e
+			}
+		case m.Status == "scheduled":
 			if m.Opening != nil || m.Closing != nil || m.Outcome != "" || m.Locked != 0 || u != 0 || d != 0 || m.OpenEvidence != "" || m.CloseEvidence != "" {
 				return fail("invalid scheduled round")
 			}
-		case "open":
+		case m.Status == "open":
 			if validateObservation(m.Opening, m.Spec.Feed, m.Spec.Start, m.Spec.ObservationWindow, s.Time) != nil || !isHex(m.OpenEvidence, 64) || m.Closing != nil || m.CloseEvidence != "" || m.Outcome != "" || m.Locked != u || u != d {
 				return fail("unbacked open round")
 			}
-		case "resolved":
+		case m.Status == "resolved":
 			if !isHex(m.OpenEvidence, 64) || !isHex(m.CloseEvidence, 64) || s.Time < m.Spec.End || validateObservation(m.Opening, m.Spec.Feed, m.Spec.Start, m.Spec.ObservationWindow, s.Time) != nil || validateObservation(m.Closing, m.Spec.Feed, m.Spec.End, m.Spec.ObservationWindow, s.Time) != nil {
 				return fail("invalid resolution")
 			}
@@ -159,7 +163,7 @@ func Validate(s *State) error {
 			if m.Outcome != out || out == Up && m.Locked != u || out == Down && m.Locked != d {
 				return fail("settlement collateral mismatch")
 			}
-		case "void":
+		case m.Status == "void":
 			if m.Outcome != Void || !isHex(m.CloseEvidence, 64) || s.Time <= m.Spec.VoidableAfter && m.Opening != nil || s.Time <= m.Spec.OpeningDeadline && m.Opening == nil || m.Locked != u/2+d/2 || m.Closing != nil {
 				return fail("void collateral mismatch")
 			}
@@ -256,4 +260,26 @@ func Validate(s *State) error {
 		}
 	}
 	return nil
+}
+
+// validateEvent checks an operator-resolved event round: created open, it never
+// holds an observation or an opening; resolved, it pays the posted outcome and
+// carries its evidence; voided, only after voidableAfter, half a share each.
+func validateEvent(m *Round, u, d, now uint64) error {
+	bare := m.Opening == nil && m.Closing == nil && m.OpenEvidence == ""
+	switch m.Status {
+	case "open":
+		if bare && m.CloseEvidence == "" && m.Outcome == "" && m.Locked == u && u == d {
+			return nil
+		}
+	case "resolved":
+		if bare && isHex(m.CloseEvidence, 64) && now >= m.Spec.End && (m.Outcome == Up && m.Locked == u || m.Outcome == Down && m.Locked == d) {
+			return nil
+		}
+	case "void":
+		if bare && isHex(m.CloseEvidence, 64) && now > m.Spec.VoidableAfter && m.Outcome == Void && m.Locked == u/2+d/2 {
+			return nil
+		}
+	}
+	return fail("invalid event round")
 }
