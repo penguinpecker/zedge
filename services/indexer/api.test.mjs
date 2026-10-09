@@ -3,8 +3,9 @@ import { strict as assert } from "node:assert";
 import { readFileSync } from "node:fs";
 import { Readable } from "node:stream";
 import { test } from "node:test";
+import { eventRound } from "../../adapters/vela/crypto/guest.ts";
 import { engineRound, parseOrderbookManifest } from "../../src/chain/orderbook-manifest.ts";
-import { handler, parseHouse } from "./api.mjs";
+import { eventOf, handler, parseEventHouse, parseHouse } from "./api.mjs";
 
 const book = parseOrderbookManifest(JSON.parse(readFileSync(new URL("../../public/deployments/26514-orderbook.json", import.meta.url), "utf8")));
 const origin = book.application.origin, now = 1_791_400_000, start = Math.floor(now / 900) * 900, minute = Math.floor(now / 60) * 60;
@@ -127,4 +128,85 @@ test("GET /v1/status: lag per chain, public balances, and an alert per low balan
   assert.deepEqual(r.body.solana, { minute: minute - 60, ageSeconds: now - minute + 60 });
   assert.deepEqual(r.body.balances.operator, { address: book.endpoint.operator, wei: "4780000000000000", low: true });
   assert.deepEqual(r.body.alerts, ["operator balance low"]);
+});
+
+// The House event as the manifest writer records it (owner decisions: cutoff 3 Nov 2026 22:00 UTC, End +1 s, void after 31 Jan 2027).
+const terms = { questionHash: `0x${"5e".repeat(32)}`, start: start - 900, cutoff: 1_793_743_200, end: 1_793_743_201, voidableAfter: 1_801_439_999 };
+const manifest = { schemaVersion: 1, kind: "zedge-events", chainId: 26514, release: "orderbook-mainnet-2026-10-10", application: book.application.id, deployTx: tx,
+  resolver: `0x${"77".repeat(20)}`, depositsFrom: 8, event: { rules: "/events/us-house-2026.txt", ...terms } };
+const event = eventOf(manifest, book);
+// The guest's own settle record of the resolver's No (vectors.json), moved onto this event's registry round id; and the timeout void.
+const vectors = JSON.parse(readFileSync(new URL("../../adapters/vela/guest/testdata/vectors.json", import.meta.url), "utf8"));
+const resolved = `0x${event.registryRoundId.slice(2)}${vectors.records.find((r) => r.name.startsWith("events:")).data.slice(66)}`;
+const voided = words(event.registryRoundId, 3, 3, 0, 0, 0, 3);
+
+test("the events manifest names this application's event: its engine and registry round ids and its cutoff; another one is refused", () => {
+  const { id, spec } = eventRound(book.application.engineConfigJson, { question: terms.questionHash, start: terms.start, cutoff: terms.cutoff, end: terms.end, voidableAfter: terms.voidableAfter });
+  assert.deepEqual(event, { round: `0x${id}`, registryRoundId: spec.registryRoundId, cutoff: 1_793_743_200 });
+  assert.equal(eventOf(null, book), null, "no events manifest: no event");
+  for (const bad of [{ ...manifest, application: "7225536188967924955" }, { ...manifest, kind: "zedge-orderbook" }, { ...manifest, chainId: 2651420 }, { ...manifest, event: null },
+    { ...manifest, event: { ...manifest.event, start: String(terms.start) } }, { ...manifest, event: { ...manifest.event, questionHash: terms.questionHash.toUpperCase() } }, []]) {
+    assert.throws(() => eventOf(bad, book), JSON.stringify(bad));
+  }
+});
+
+test("the event house's /quotes answer: checked field by field like the house's, with the event's engine round id", () => {
+  const quotes = { at: now * 1_000 - 4_000, round: event.round, up: { ask: { cents: 41, shares: 10 }, bid: { cents: 37, shares: 10 } }, down: { ask: { cents: 63, shares: 10 }, bid: null } };
+  assert.deepEqual(parseEventHouse(quotes), quotes);
+  assert.equal(Object.keys(parseEventHouse(quotes)).join(), "round,at,up,down");
+  assert.equal(parseEventHouse(null), null);
+  const bad = [[], "x", { ...quotes, extra: 1 }, { ...quotes, round: undefined }, { ...quotes, round: event.round.toUpperCase().replace("0X", "0x") }, { ...quotes, round: event.round.slice(2) },
+    { ...quotes, round: `${event.round}00` }, { ...quotes, round: 1 }, { ...quotes, start }, { ...quotes, at: 0 }, { ...quotes, at: 1.5 }, { ...quotes, down: null },
+    { ...quotes, up: { ask: { cents: 100, shares: 1 }, bid: null } }, { ...quotes, up: { ask: { cents: 41, shares: 0 }, bid: null } }, { ...quotes, up: { ask: null } }];
+  for (const v of bad) assert.throws(() => parseEventHouse(v), /INDEXER_EVENT_HOUSE_SHAPE/, JSON.stringify(v));
+});
+
+test("GET /v1/live: the event house's quotes from a copy fetched at most 60 s ago, for this application's event, until its cutoff", async () => {
+  const quotes = parseEventHouse({ at: now * 1_000 - 4_000, round: event.round, up: { ask: { cents: 41, shares: 10 }, bid: null }, down: { ask: { cents: 63, shares: 10 }, bid: null } });
+  const live = async ({ copy = quotes, fetchedAgo = 0, at = now, deps = {} } = {}) => {
+    const r = await call(handler({ db, book, origin, now: () => at * 1_000, chain, log: () => {}, event, eventHouse: () => ({ copy, at: at * 1_000 - fetchedAgo }), ...deps }), { url: "/v1/live" });
+    assert.equal(r.headers["cache-control"], "public, max-age=0, s-maxage=1, stale-while-revalidate=4");
+    return r.body.event;
+  };
+  assert.deepEqual(await live({ fetchedAgo: 60_000 }), quotes);
+  assert.equal(await live({ fetchedAgo: 60_001 }), null, "stale");
+  assert.equal(await live({ copy: null }), null, "the event house has none yet");
+  assert.equal(await live({ copy: { ...quotes, round: `0x${"ab".repeat(32)}` } }), null, "another round");
+  assert.deepEqual(await live({ at: terms.cutoff - 1 }), quotes);
+  assert.equal(await live({ at: terms.cutoff }), null, "trading closed");
+  assert.equal(await live({ deps: { eventHouse: undefined } }), null, "INDEXER_EVENT_HOUSE_URL not set");
+  assert.equal(await live({ deps: { event: null } }), null, "no events manifest");
+  assert.equal((await call(fresh(), { url: "/v1/live" })).body.event, null);
+});
+
+test("GET /v1/event: the event's settle record by its registry round id: the resolver's result (kind 2, source 4) or the timeout void", async () => {
+  const get = async (records) => {
+    const asked = [];
+    const r = await call(handler({ db: { ...db, settles: async (ids) => { asked.push(ids); return records; } }, book, origin, now: () => now * 1_000, chain, log: () => {}, event }), { url: "/v1/event" });
+    assert.deepEqual(asked, [[event.registryRoundId]]);
+    return r;
+  };
+  const open = await get([]);
+  assert.equal(open.status, 200);
+  assert.equal(open.headers["cache-control"], "public, max-age=0, s-maxage=5");
+  assert.deepEqual(open.body, { head: { block: 28_012_345, time: now - 2 }, round: event.round, registryRoundId: event.registryRoundId, settle: null });
+  const zero = `0x${"0".repeat(64)}`;
+  const opened = { block: 29_000_000, logIndex: 4, txHash: tx, roundId: event.registryRoundId, data: words(event.registryRoundId, 1, 0, 0, 0, 0, 1) }; // not a result
+  assert.deepEqual((await get([{ block: 29_000_000, logIndex: 3, txHash: tx, roundId: event.registryRoundId, data: resolved }, opened])).body.settle,
+    { kind: 2, outcome: 2, price: "0", observationsTimestamp: 0, reportHash: zero, source: 4, block: 29_000_000, txHash: tx, logIndex: 3 });
+  assert.deepEqual((await get([{ block: 29_000_001, logIndex: 0, txHash: tx, roundId: event.registryRoundId, data: voided }, { block: 29_000_002, logIndex: 0, txHash: tx, roundId: event.registryRoundId, data: "0x00" }])).body.settle,
+    { kind: 3, outcome: 3, price: "0", observationsTimestamp: 0, reportHash: zero, source: 3, block: 29_000_001, txHash: tx, logIndex: 0 });
+  const none = await call(fresh(), { url: "/v1/event" });
+  assert.deepEqual([none.status, none.headers["cache-control"], none.body], [404, "no-store", { error: "Not found." }], "no events manifest");
+  assert.equal((await call(handler({ db, book, origin, now: () => now * 1_000, chain, log: () => {}, event }), { url: "/v1/event?x=1" })).status, 400);
+});
+
+test("GET /v1/rounds and /v1/live: the event's settle record never joins the BTC rounds", async () => {
+  const withEvent = { ...db, settles: async (ids) => [...await db.settles(ids), { block: 29_000_000, logIndex: 3, txHash: tx, roundId: event.registryRoundId, data: resolved }] };
+  const h = handler({ db: withEvent, book, origin, now: () => now * 1_000, chain, log: () => {}, event });
+  for (const url of ["/v1/rounds", "/v1/live"]) {
+    const { body } = await call(h, { url });
+    assert.ok(body.rounds.every((r) => r.start % 900 === 0 && r.registryRoundId !== event.registryRoundId && r.settle?.source !== 4), url);
+    assert.equal(body.rounds.find((r) => r.start === start).open.kind, 1, url);
+  }
 });

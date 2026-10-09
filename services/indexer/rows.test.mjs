@@ -1,9 +1,10 @@
 // rows.mjs: endpoint logs built with viem's encoders (as eth_getLogs returns them) map to this application's rows only.
 import { strict as assert } from "node:assert";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { encodeAbiParameters, encodeEventTopics, getAbiItem } from "viem";
 import { endpointAbi } from "../../src/chain/orderbook-manifest.ts";
-import { SUBTYPES } from "../../src/chain/vault.ts";
+import { SUBTYPES, decodeSettle } from "../../src/chain/vault.ts";
 import { hex, rows } from "./rows.mjs";
 
 const endpoint = "0x0a2703d21b27757fdf27ab807eae9820788010f3", app = 7408397676477227659n;
@@ -35,4 +36,13 @@ test("each endpoint event of this application becomes its row; other application
   assert.deepEqual(out.receipts.map((r) => [hex(r.request_id), hex(r.data), r.log_index]), [[id, "0x0102", 2]]);
   assert.deepEqual(out.records.map((r) => [r.kind, r.round_id && hex(r.round_id), hex(r.data)]), [
     ["settle", round, settle], ["clock", null, words(1, 2, 3, 0, 0, 0, 4)], [`0x${"44".repeat(32)}`, null, "0x"]]);
+});
+
+test("the event's settle records, the resolver's result (kind 2, source 4) and the timeout void (kind 3, source 3), keep its registry round id", () => {
+  const { records } = JSON.parse(readFileSync(new URL("../../adapters/vela/guest/testdata/vectors.json", import.meta.url), "utf8"));
+  const result = records.find((r) => r.name.startsWith("events:")).data, eventId = result.slice(0, 66), voided = words(eventId, 3, 3, 0, 0, 0, 3);
+  const out = rows([result, voided].map((data) => endpointLog("AppEvent", { applicationId: app, requestId: id, eventSubType: SUBTYPES.settle, data })), endpoint, app);
+  assert.deepEqual(out.records.map((r) => [r.kind, hex(r.round_id), hex(r.data)]), [["settle", eventId, result], ["settle", eventId, voided]]);
+  assert.deepEqual(out.records.map((r) => decodeSettle(hex(r.data))).map(({ kind, outcome, price, observationsTimestamp, reportHash, source }) => [kind, outcome, price, observationsTimestamp, BigInt(reportHash), source]),
+    [[2, 2, 0n, 0, 0n, 4], [3, 3, 0n, 0, 0n, 3]]);
 });

@@ -216,7 +216,7 @@ OWNER ACCOUNT. Use one `git archive` export of that commit and redeploy each wit
 | --- | --- | --- |
 | a | **New** payout-signer service (step 7 of the preparation) | Log shows the new application ID. Today's payout signer keeps running untouched. |
 | b | keeper (not within 30 s before to 60 s after a boundary) | Order-book lane `running … application <new>`; registry lane unchanged. |
-| c | indexer | Per the indexer lane: either a new database, or its cursor reset and application tables truncated. |
+| c | indexer | Same database. It serves at once and logs `waiting` until the reset in `services/indexer/README.md` (Switch-over): once the old indexer deployment is removed, run that SQL; then `indexing` from the new deploy block − 1, prices and the old rows kept. |
 | d | house-bot | Still `--dry-run`. |
 | e | event house | Dry run (event house lane). |
 | f | Vercel: site and relayer from the same export | The served `index-<hash>.js` equals a local build of the export. `/deployments/26514-orderbook.json` names the new application. A private-trading tab verifies again. |

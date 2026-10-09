@@ -41,6 +41,8 @@ indexer)
   put indexer.env "$(printf 'DATABASE_URL=%s\nINDEXER_HORIZEN_RPC_URL=%s\nINDEXER_SOLANA_RPC_URL=%s\n' "${DATABASE_URL:-}" "${ZEDGE_HORIZEN_RPC:-}" "${ZEDGE_SOLANA_RPC:-}")"
   # Optional and not a secret: the house bot's quotes, e.g. http://house-bot.railway.internal:8080/quotes
   [ -z "${ZEDGE_HOUSE_QUOTES_URL:-}" ] || printf '\nINDEXER_HOUSE_URL=%s\n' "$ZEDGE_HOUSE_QUOTES_URL" >> "$d/indexer.env"
+  # Optional and not a secret: the event house's quotes, on its own private port
+  [ -z "${ZEDGE_EVENT_HOUSE_QUOTES_URL:-}" ] || printf '\nINDEXER_EVENT_HOUSE_URL=%s\n' "$ZEDGE_EVENT_HOUSE_QUOTES_URL" >> "$d/indexer.env"
   unset DATABASE_URL ZEDGE_HORIZEN_RPC ZEDGE_SOLANA_RPC
   set -- node --experimental-strip-types services/indexer/main.mjs --settings "$d/indexer.env" ;;
 *) echo "start: set ZEDGE_SERVICE to house-bot, payout-signer, keeper or indexer" >&2; exit 64 ;;
