@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/decred/dcrd/dcrec/secp256k1/v4/ecdsa"
 	"github.com/penguinpecker/zedge/engine"
 	"golang.org/x/crypto/sha3"
 )
@@ -96,7 +97,9 @@ func exitReserved(e *engine.State) bool {
 // application ID comes from the host argument, never from the parameters.
 // salt is 32 bytes of host randomness, drawn by the wasm layer: it is the only
 // secret in the state, and it keeps the state root Vela publishes from being
-// matched against guesses at a private command.
+// matched against guesses at a private command. Base deposits are read from
+// depositsFrom + 1 on. An event is created by the first tick, never here: the
+// engine refuses any command at time 0.
 func Deploy(appID uint64, params, salt []byte) []byte {
 	if appID == 0 {
 		return failure(ErrApplication)
@@ -114,7 +117,8 @@ func Deploy(appID uint64, params, salt []byte) []byte {
 		return failure(ErrInternal)
 	}
 	s := &State{Version: StateVersion, ApplicationFingerprint: p.ApplicationFingerprint, Origin: p.Origin, Epoch: p.Epoch, Markets: p.Markets, StakeLimits: p.StakeLimits,
-		Chainlink: p.Chainlink, Custody: p.Custody, Salt: hex.EncodeToString(salt), Staged: []Staged{}, Outcomes: []Outcome{}, Unconfirmed: []Unconfirmed{}, Engine: e}
+		Chainlink: p.Chainlink, Custody: p.Custody, Event: p.Event, Resolver: p.Resolver, DepositsFrom: p.DepositsFrom, Salt: hex.EncodeToString(salt), DepositsSeen: p.DepositsFrom,
+		Staged: []Staged{}, Outcomes: []Outcome{}, Unconfirmed: []Unconfirmed{}, Engine: e}
 	b, err := s.encode()
 	if err != nil {
 		return failure(ErrConfig)
@@ -131,8 +135,8 @@ func LoadModule(uint64) []byte { return Result{}.bytes() }
 func Deposit(uint64, []byte, []byte, []byte, []byte) []byte { return failure(ErrToken) }
 
 // ProcessRequest handles the decrypted plaintext of a PROCESS request: the
-// envelope session.ts produced, carrying an engine command, a sync request or
-// a Chainlink report.
+// envelope session.ts produced, carrying an engine command, a sync request, a
+// Chainlink report or the resolver's signed event result.
 func ProcessRequest(appID uint64, sender []byte, requestType int32, payload, state []byte) []byte {
 	if requestType != requestTypeProcess {
 		return failure(ErrRequestType)
@@ -156,6 +160,9 @@ func ProcessRequest(appID uint64, sender []byte, requestType int32, payload, sta
 		return failure(ErrMismatch)
 	}
 	s.take(who)
+	if env.Body.Type != "resolve" && (env.Body.Outcome != 0 || env.Body.Signature != "") {
+		return failure(ErrEnvelope)
+	}
 	switch env.Body.Type {
 	case "sync":
 		if env.Body.Command != "" || env.Body.Report != "" || env.RequestID != who+":sync" {
@@ -168,6 +175,13 @@ func ProcessRequest(appID uint64, sender []byte, requestType int32, payload, sta
 			return failure(ErrEnvelope)
 		}
 		return s.report(who, env.RequestID, full)
+	case "resolve":
+		sig, err := hex.DecodeString(strings.TrimPrefix(env.Body.Signature, "0x"))
+		if env.Body.Command != "" || env.Body.Report != "" || env.RequestID != who+":resolve" || env.Body.Outcome != 1 && env.Body.Outcome != 2 ||
+			err != nil || len(sig) != 65 || "0x"+hex.EncodeToString(sig) != env.Body.Signature || sig[64] != 27 && sig[64] != 28 {
+			return failure(ErrEnvelope)
+		}
+		return s.resolve(who, env.RequestID, env.Body.Outcome, sig)
 	case "command":
 		if env.Body.Report != "" {
 			return failure(ErrEnvelope)
@@ -221,6 +235,9 @@ func (s *State) ask() (AppEvent, bool) {
 	var scheduled, open, confirm []byte
 	held := map[string]bool{}
 	for _, m := range s.rounds() {
+		if m.Spec.Asset == engine.EventAsset {
+			continue // the registry holds no such round (section 13)
+		}
 		id, _ := hex.DecodeString(m.Spec.RegistryRoundID[2:])
 		switch m.Status {
 		case "scheduled":
@@ -375,6 +392,7 @@ const (
 	payoutWithdrawal, payoutRefund                = 1, 2
 	settleOpen, settleResolve, settleVoid         = 1, 2, 3
 	sourceReport, sourceRegistry, sourceOwnVoid   = 1, 2, 3
+	sourceResolver                                = 4
 	confirmDisagree, confirmAgree, confirmDropped = 0, 1, 2
 	creditCredited, creditRefunded                = 1, 2
 )
@@ -424,9 +442,11 @@ func (s *State) report(who, requestID string, full []byte) []byte {
 	opens := func(m engine.Round) bool {
 		return m.Spec.Start == b && m.Status == "scheduled" && max(s.Clock, b) <= m.Spec.OpeningDeadline
 	}
-	due := slices.ContainsFunc(s.Engine.Rounds, func(m engine.Round) bool {
-		return m.Spec.End == b && m.Status == "open" || opens(m)
-	})
+	// The event is never scheduled, and only its resolver settles it (section 13).
+	closes := func(m engine.Round) bool {
+		return m.Spec.End == b && m.Status == "open" && m.Spec.Asset != engine.EventAsset
+	}
+	due := slices.ContainsFunc(s.Engine.Rounds, func(m engine.Round) bool { return closes(m) || opens(m) })
 	if reason == "" && !due {
 		reason = "report: nothing to apply"
 		for _, m := range s.Engine.Rounds {
@@ -445,8 +465,8 @@ func (s *State) report(who, requestID string, full []byte) []byte {
 	}
 	var events []AppEvent
 	for _, m := range s.rounds() {
-		if m.Spec.End == b && m.Status == "open" {
-			if e, ok := s.settle(m, engine.ResolveRound, &o, b, sourceReport); ok {
+		if closes(m) {
+			if e, ok := s.settle(m, engine.ResolveRound, &o, b, sourceReport, ""); ok {
 				events = append(append(events, e), s.unconfirm(m.Spec.RegistryRoundID)...)
 				n := -1
 				s.redeemRound(m.ID, &n)
@@ -455,7 +475,7 @@ func (s *State) report(who, requestID string, full []byte) []byte {
 	}
 	for _, m := range s.rounds() {
 		if opens(m) {
-			if e, ok := s.settle(m, engine.OpenRound, &o, b, sourceReport); ok {
+			if e, ok := s.settle(m, engine.OpenRound, &o, b, sourceReport, ""); ok {
 				events = append(append(events, e), s.unconfirm(m.Spec.RegistryRoundID)...)
 			}
 		}
@@ -471,6 +491,74 @@ func (s *State) report(who, requestID string, full []byte) []byte {
 	return answer("applied", "", events)
 }
 
+// resolve applies the resolver's signed result for the event (README section
+// 13) at the clock: it resolves the event round to the signed outcome, redeems
+// every holder of it, archives and creates rounds, all in this one transition.
+// The sender gets one receipt and the chain the settle record; no tick is
+// asked for. Anyone may send it: only the resolver's signature counts. Unlike
+// a report it leaves nothing to confirm: the registry never holds the event.
+func (s *State) resolve(who, requestID string, outcome uint64, sig []byte) []byte {
+	if s.Clock == 0 {
+		return failure(ErrClock)
+	}
+	if s.Event == nil {
+		return failure(ErrMismatch) // no resolver: nobody's signature can count
+	}
+	spec, _ := s.Event.spec(s.Engine.Config)
+	id := engine.RoundID(s.Engine.Config, spec)
+	if s.resultSigner(id, outcome, sig) != s.Resolver {
+		return failure(ErrMismatch)
+	}
+	answer := func(status, reason string, events []AppEvent) []byte {
+		return s.commit([]Event{s.receipt(who, requestID, receiptBody{Type: "resolve", Status: status, Reason: reason})}, events)
+	}
+	i := slices.IndexFunc(s.Engine.Rounds, func(m engine.Round) bool { return m.ID == id })
+	if i < 0 {
+		return answer("rejected", "resolve: nothing to apply", nil)
+	}
+	e, ok := s.settle(s.Engine.Rounds[i], engine.ResolveRound, nil, s.Clock, sourceResolver, map[uint64]engine.Outcome{1: engine.Up, 2: engine.Down}[outcome])
+	if !ok {
+		// Before end (the clock may be stale: a sync moves it), after
+		// voidableAfter, or settled already.
+		return answer("rejected", "resolve: refused by the engine", nil)
+	}
+	n := -1
+	s.redeemRound(id, &n)
+	events := append([]AppEvent{e}, s.archive()...)
+	return answer("applied", "", append(events, s.upkeep()...))
+}
+
+// resultDigest is the EIP-712 digest the resolver signs for outcome of engine
+// round id, as ethers' and viem's signTypedData compute it: domain {name
+// "ZEDGE Event", version "1", chainId, verifyingContract the endpoint}, type
+// EventResult(uint64 applicationId,bytes32 roundId,uint8 outcome).
+func (s *State) resultDigest(id string, outcome uint64) []byte {
+	k := func(parts ...[]byte) []byte {
+		h := sha3.NewLegacyKeccak256()
+		for _, p := range parts {
+			h.Write(p)
+		}
+		return h.Sum(nil)
+	}
+	d := s.Engine.Config.Domain
+	app, _ := strconv.ParseUint(d.ApplicationID, 10, 64)
+	round, _ := hex.DecodeString(id)
+	domain := k(k([]byte("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)")), k([]byte("ZEDGE Event")), k([]byte("1")), words(d.ChainID), addressWord(d.Endpoint))
+	return k([]byte{0x19, 0x01}, domain, k(k([]byte("EventResult(uint64 applicationId,bytes32 roundId,uint8 outcome)")), words(app), round, words(outcome)))
+}
+
+// resultSigner is the address that made sig (r, s, then v of 27 or 28) over
+// resultDigest, or empty if none can be recovered.
+func (s *State) resultSigner(id string, outcome uint64, sig []byte) string {
+	pub, _, err := ecdsa.RecoverCompact(append([]byte{sig[64]}, sig[:64]...), s.resultDigest(id, outcome))
+	if err != nil {
+		return ""
+	}
+	k := sha3.NewLegacyKeccak256()
+	k.Write(pub.SerializeUncompressed()[1:])
+	return "0x" + hex.EncodeToString(k.Sum(nil)[12:])
+}
+
 // checkpoint applies the engine's checkpoint at the clock, which releases
 // expired orders.
 func (s *State) checkpoint() bool {
@@ -482,9 +570,10 @@ func (s *State) checkpoint() bool {
 }
 
 // settle opens, resolves or voids round m as the authority and returns its
-// public settle record. A resolution's outcome is the engine's own.
-func (s *State) settle(m engine.Round, op engine.Operation, o *engine.StreamsObservation, registryTime, source uint64) (AppEvent, bool) {
-	c := engine.Command{Op: op, RoundID: m.ID, RegistryTime: registryTime}
+// public settle record. A price round's outcome is the engine's own; the
+// event's is the resolver's, given as outcome.
+func (s *State) settle(m engine.Round, op engine.Operation, o *engine.StreamsObservation, registryTime, source uint64, outcome engine.Outcome) (AppEvent, bool) {
+	c := engine.Command{Op: op, RoundID: m.ID, RegistryTime: registryTime, Outcome: outcome}
 	if o != nil {
 		x := *o
 		x.FeedID = m.Spec.Feed
@@ -498,11 +587,11 @@ func (s *State) settle(m engine.Round, op engine.Operation, o *engine.StreamsObs
 	}
 	s.Engine = next
 	kind := map[engine.Operation]uint64{engine.OpenRound: settleOpen, engine.ResolveRound: settleResolve, engine.VoidRound: settleVoid}[op]
-	var outcome uint64
+	var settled uint64
 	price, at, hash := make([]byte, 32), uint64(0), make([]byte, 32)
 	for _, n := range next.Rounds {
 		if n.ID == m.ID {
-			outcome = outcomeNumber(n.Outcome)
+			settled = outcomeNumber(n.Outcome)
 		}
 	}
 	if o != nil {
@@ -512,7 +601,7 @@ func (s *State) settle(m engine.Round, op engine.Operation, o *engine.StreamsObs
 		hex.Decode(hash, []byte(o.ReportHash[2:]))
 	}
 	id, _ := hex.DecodeString(m.Spec.RegistryRoundID[2:])
-	data := append(append(append(append(id, words(kind, outcome)...), price...), words(at)...), hash...)
+	data := append(append(append(append(id, words(kind, settled)...), price...), words(at)...), hash...)
 	return AppEvent{EventSubType: SettleSubType, Data: append(data, words(source)...)}, true
 }
 
@@ -562,13 +651,14 @@ func confirmation(u Unconfirmed, agree, registryOutcome uint64, registryClosing 
 }
 
 // upkeep voids the scheduled rounds that never opened, once nobody could
-// open them any more, and creates the rounds of the next two slots of every
-// market after the clock (README section 10).
+// open them any more, and the event if it is still open after voidableAfter;
+// creates the rounds of the next two slots of every market after the clock
+// (README section 10), and the event until its cutoff (section 13).
 func (s *State) upkeep() (events []AppEvent) {
 	grace := s.Engine.Config.Oracle.VoidGrace
 	for _, m := range s.rounds() {
-		if m.Status == "scheduled" && s.Clock > m.Spec.OpeningDeadline+grace {
-			if e, ok := s.settle(m, engine.VoidRound, nil, s.Clock, sourceOwnVoid); ok {
+		if m.Status == "scheduled" && s.Clock > m.Spec.OpeningDeadline+grace || m.Spec.Asset == engine.EventAsset && m.Status == "open" && s.Clock > m.Spec.VoidableAfter {
+			if e, ok := s.settle(m, engine.VoidRound, nil, s.Clock, sourceOwnVoid, ""); ok {
 				events = append(events, e)
 			}
 		}
@@ -580,6 +670,16 @@ func (s *State) upkeep() (events []AppEvent) {
 			if err != nil || len(s.Engine.Rounds) >= MaxSliceRounds || slices.ContainsFunc(s.Engine.Rounds, func(m engine.Round) bool { return m.Spec.RegistryRoundID == spec.RegistryRoundID }) {
 				continue
 			}
+			if next, _, err := s.system(s.Engine, engine.Command{Op: engine.CreateRound, Round: &spec}); err == nil {
+				s.Engine = next
+			}
+		}
+	}
+	// Simplification: past its cutoff the engine would refuse the event anyway;
+	// the clock check only spares that engine call on every later tick.
+	if v := s.Event; v != nil && s.Clock < v.Cutoff && len(s.Engine.Rounds) < MaxSliceRounds {
+		spec, err := v.spec(s.Engine.Config)
+		if err == nil && !slices.ContainsFunc(s.Engine.Rounds, func(m engine.Round) bool { return m.Spec.RegistryRoundID == spec.RegistryRoundID }) {
 			if next, _, err := s.system(s.Engine, engine.Command{Op: engine.CreateRound, Round: &spec}); err == nil {
 				s.Engine = next
 			}
@@ -873,13 +973,16 @@ func (s *State) mirrorStep(r record) ([]AppEvent, bool) {
 		}
 		s.Engine = next
 		return nil, true
+	case m.Spec.Asset == engine.EventAsset:
+		// The registry never holds the event: a record that names it is forged,
+		// and only the resolver or the timeout settles the event (section 13).
 	case m.Status == "scheduled" && r.openedAt != 0:
-		x, ok := s.settle(*m, engine.OpenRound, &r.opening, r.openedAt, sourceRegistry)
+		x, ok := s.settle(*m, engine.OpenRound, &r.opening, r.openedAt, sourceRegistry, "")
 		return []AppEvent{x}, ok
 	case m.Status == "open" && (r.outcome == 1 || r.outcome == 2):
 		// The engine decides the outcome itself; it must be the registry's.
 		before := s.Engine
-		x, ok := s.settle(*m, engine.ResolveRound, &r.closing, r.resolvedAt, sourceRegistry)
+		x, ok := s.settle(*m, engine.ResolveRound, &r.closing, r.resolvedAt, sourceRegistry, "")
 		for _, n := range s.Engine.Rounds {
 			if ok && n.ID == m.ID && outcomeNumber(n.Outcome) != r.outcome {
 				s.Engine, ok = before, false
@@ -887,7 +990,7 @@ func (s *State) mirrorStep(r record) ([]AppEvent, bool) {
 		}
 		return []AppEvent{x}, ok
 	case (m.Status == "scheduled" || m.Status == "open") && r.outcome == 3:
-		x, ok := s.settle(*m, engine.VoidRound, nil, r.resolvedAt, sourceRegistry)
+		x, ok := s.settle(*m, engine.VoidRound, nil, r.resolvedAt, sourceRegistry, "")
 		return []AppEvent{x}, ok
 	}
 	return nil, false

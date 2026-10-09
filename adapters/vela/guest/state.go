@@ -75,6 +75,23 @@ type DeployParams struct {
 	StakeLimits            StakeLimits   `json:"stakeLimits"`
 	Chainlink              Chainlink     `json:"chainlink"`
 	Custody                Custody       `json:"custody"`
+	Event                  *EventTerms   `json:"event,omitempty"`        // the operator-resolved event, if any (section 13)
+	Resolver               string        `json:"resolver,omitempty"`     // the address whose signature alone settles it
+	DepositsFrom           uint64        `json:"depositsFrom,omitempty"` // the last Base deposit index this deployment never reads (section 6)
+}
+
+// EventTerms is the one operator-resolved Yes/No market of a deployment (README
+// section 13): the Keccak-256 of its exact rules text and its four times.
+type EventTerms struct {
+	Question      string `json:"question"`      // 0x-prefixed Keccak-256 of the rules text
+	Start         uint64 `json:"start"`         // trading opens
+	Cutoff        uint64 `json:"cutoff"`        // trading closes
+	End           uint64 `json:"end"`           // the earliest result
+	VoidableAfter uint64 `json:"voidableAfter"` // still open after this, it is voided: half a share each
+}
+
+func (v *EventTerms) spec(c engine.Config) (engine.RoundSpec, error) {
+	return engine.NewEventSpec(c, v.Question, v.Start, v.Cutoff, v.End, v.VoidableAfter)
 }
 
 // Custody names where the money is: Base USDC in the vault, whose deposit
@@ -144,6 +161,9 @@ type State struct {
 	StakeLimits            StakeLimits   `json:"stakeLimits"`
 	Chainlink              Chainlink     `json:"chainlink"`
 	Custody                Custody       `json:"custody"`
+	Event                  *EventTerms   `json:"event,omitempty"`
+	Resolver               string        `json:"resolver,omitempty"`
+	DepositsFrom           uint64        `json:"depositsFrom,omitempty"`
 	Salt                   string        `json:"salt"`         // 32 random bytes drawn at deploy; keeps the public state root unguessable
 	Clock                  uint64        `json:"clock"`        // block.timestamp of the last accepted tick, 0 before the first
 	Block                  uint64        `json:"block"`        // block.number that tick reported; recorded, never compared
@@ -152,7 +172,7 @@ type State struct {
 	Staged                 []Staged      `json:"staged"`       // ascending tick, at most one per account
 	Outcomes               []Outcome     `json:"outcomes"`     // sorted by account, at most one per account
 	Deposits               uint64        `json:"deposits"`     // Base deposits credited to the engine (one evidence ID each)
-	DepositsSeen           uint64        `json:"depositsSeen"` // the last Base deposit index processed, credited or refunded
+	DepositsSeen           uint64        `json:"depositsSeen"` // the last Base deposit index processed, credited or refunded; depositsFrom at deploy
 	Withdrawals            uint64        `json:"withdrawals"`  // withdrawals the engine exported (two evidence IDs each)
 	Payouts                uint64        `json:"payouts"`      // the last payout ordinal: withdrawals and refunds
 	Unconfirmed            []Unconfirmed `json:"unconfirmed"`  // oldest first
@@ -391,6 +411,17 @@ func (s *State) validate() error {
 	if !s.StakeLimits.valid(e.Config) || !s.Chainlink.valid(e.Config) || !s.Custody.valid(e.Config) || !s.reportsFit() {
 		return errors.New("invalid adapter identity")
 	}
+	// The event and its resolver come together or not at all. The resolver
+	// is a signing key, never one of the deployment's own addresses (section 13).
+	if s.Event != nil {
+		if _, err := s.Event.spec(e.Config); err != nil {
+			return errors.New("invalid event")
+		}
+	}
+	if (s.Event == nil) != (s.Resolver == "") || s.Resolver != "" && (!isAddress(s.Resolver) || s.Resolver == s.StakeLimits.House ||
+		s.Resolver == e.Config.Authority || s.Resolver == e.Config.Domain.Endpoint || s.Resolver == s.Custody.Vault) {
+		return errors.New("invalid event")
+	}
 	// The trigger reads the registry in the block whose timestamp it reports,
 	// so the registry must be on the endpoint's own chain. A public chain's
 	// clock runs on real time, so its cutoff buffer has a floor. On mainnet
@@ -436,11 +467,11 @@ func (s *State) validate() error {
 	}
 	// Every evidence ID in the engine is one this adapter derived: one per
 	// credited deposit, two per withdrawal. No withdrawal outlives its
-	// transition. Every Base deposit index seen was either credited or
-	// refunded, and every payout is a withdrawal or a refund.
+	// transition. Every Base deposit index seen after depositsFrom was either
+	// credited or refunded, and every payout is a withdrawal or a refund.
 	if s.Deposits > maxEvidence || s.Withdrawals > maxEvidence || uint64(len(e.ExternalEvidence)) != s.Deposits+2*s.Withdrawals ||
-		e.Claimable != 0 || len(e.Withdrawals) != 0 || s.DepositsSeen > engine.MaxAtoms || s.Deposits > s.DepositsSeen ||
-		s.Payouts > engine.MaxAtoms || s.Payouts != s.Withdrawals+s.DepositsSeen-s.Deposits {
+		e.Claimable != 0 || len(e.Withdrawals) != 0 || s.DepositsSeen > engine.MaxAtoms || s.DepositsSeen < s.DepositsFrom || s.Deposits > s.DepositsSeen-s.DepositsFrom ||
+		s.Payouts > engine.MaxAtoms || s.Payouts != s.Withdrawals+s.DepositsSeen-s.DepositsFrom-s.Deposits {
 		return errors.New("custody bookkeeping mismatch")
 	}
 	if s.Unconfirmed == nil || len(s.Unconfirmed) > MaxUnconfirmed {

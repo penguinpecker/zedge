@@ -39,9 +39,11 @@ type requestVector struct {
 
 // bareBody and bareEnvelope are a request before ../crypto/pad.ts pads it.
 type bareBody struct {
-	Type    string `json:"type"`
-	Command string `json:"command,omitempty"`
-	Report  string `json:"report,omitempty"`
+	Type      string `json:"type"`
+	Command   string `json:"command,omitempty"`
+	Report    string `json:"report,omitempty"`
+	Outcome   uint64 `json:"outcome,omitempty"`
+	Signature string `json:"signature,omitempty"`
 }
 type bareEnvelope struct {
 	Version   uint32         `json:"version"`
@@ -67,6 +69,20 @@ type recordVector struct {
 	SubType string `json:"subType"`
 	Data    string `json:"data"`
 }
+
+// eventVector is the event of the script's third deployment (README section
+// 13): what guest.ts must derive from the engine configuration and the event's
+// terms, the EIP-712 digest its resolver signs, and that signature.
+type eventVector struct {
+	EngineConfig string           `json:"engineConfig"` // canonical JSON of the deployed engine configuration
+	Event        EventTerms       `json:"event"`
+	Spec         engine.RoundSpec `json:"spec"`
+	RoundID      string           `json:"roundId"`
+	Resolver     string           `json:"resolver"`
+	Outcome      uint64           `json:"outcome"`
+	Digest       string           `json:"digest"`
+	Signature    string           `json:"signature"`
+}
 type vectors struct {
 	Note     string            `json:"note"`
 	Domain   envelopeDomain    `json:"domain"`
@@ -76,6 +92,7 @@ type vectors struct {
 	Requests []requestVector   `json:"requests"`
 	Receipts []receiptVector   `json:"receipts"`
 	Records  []recordVector    `json:"records"`
+	Event    eventVector       `json:"event"`
 }
 
 func TestVectors(t *testing.T) {
@@ -86,6 +103,7 @@ func TestVectors(t *testing.T) {
 		t.Fatal(err)
 	}
 	round := engine.RoundID(deployed(), spec)
+	event, eventRound := mustEventSpec(), eventID(testEvent())
 	observation := &engine.StreamsObservation{FeedID: engine.BTCStreamsFeed, Price: "97000000000000000000000", ValidFromTimestamp: 1_800_000_800, ObservationsTimestamp: 1_800_000_901, ExpiresAt: 1_800_086_400, ReportHash: "0x" + strings.Repeat("5e", 32), Decimals: 18}
 	for _, c := range []struct {
 		name    string
@@ -106,6 +124,8 @@ func TestVectors(t *testing.T) {
 		{"create_round", trigger, 1, engine.Command{Op: engine.CreateRound, Round: &spec}},
 		{"open_round", trigger, 2, engine.Command{Op: engine.OpenRound, RoundID: round, Evidence: strings.Repeat("5e", 32), RegistryTime: 1_800_000_905, Observation: observation}},
 		{"void_round", trigger, 3, engine.Command{Op: engine.VoidRound, RoundID: round, Evidence: round, RegistryTime: 1_801_000_000}},
+		{"create_round of the event", trigger, 4, engine.Command{Op: engine.CreateRound, Round: &event}},
+		{"resolve_round of the event", trigger, 5, engine.Command{Op: engine.ResolveRound, RoundID: eventRound, Outcome: engine.Down, Evidence: event.RegistryRoundID[2:], RegistryTime: testEvent().End}},
 	} {
 		cmd := c.command
 		cmd.Domain, cmd.Nonce, cmd.ID = deployed().Domain, c.nonce, engine.CommandID(c.account, c.nonce)
@@ -139,18 +159,20 @@ func TestVectors(t *testing.T) {
 
 	steps := run(t, script())
 	for name, title := range map[string]string{"register": "explicit register after a deposit is a retry", "withdraw": "alice withdraws", "sync": "sync asks for tick 10",
-		"report": "reports: alice's report for b1 resolves round 0, pays the winners and opens round 1"} {
+		"report": "reports: alice's report for b1 resolves round 0, pays the winners and opens round 1", "resolve": "events: alice carries the resolver's No, which pays every holder and archives the event"} {
 		s := find(t, steps, title)
 		var e requestEnvelope
 		if s.Error != "" || !canonical(s.Payload, &e) || len(s.Payload) != RequestBytes {
 			t.Fatalf("%s: the script's own request is not canonical", title)
 		}
-		b := bareBody{e.Body.Type, e.Body.Command, e.Body.Report}
+		b := bareBody{e.Body.Type, e.Body.Command, e.Body.Report, e.Body.Outcome, e.Body.Signature}
 		v.Requests = append(v.Requests, requestVector{name, e.Account, e.RequestID, b, string(marshal(bareEnvelope{e.Version, e.Domain, e.Account, e.Epoch, e.RequestID, e.Kind, b})), string(s.Payload)})
 	}
 	for _, title := range []string{"explicit register after a deposit is a retry", "bob registers", "alice withdraws", "overdraft is rejected in private", "sync asks for tick 10",
 		"order for an unknown round is staged", "alice collects her order's outcome and stages a cancel", "bob collects his fill",
-		"reports: alice's report for b1 resolves round 0, pays the winners and opens round 1", "reports: the other copy of that report is already applied"} {
+		"reports: alice's report for b1 resolves round 0, pays the winners and opens round 1", "reports: the other copy of that report is already applied",
+		"events: the resolver's No before the end is refused in private", "events: alice carries the resolver's No, which pays every holder and archives the event",
+		"events: the same result again has nothing to apply"} {
 		for _, e := range find(t, steps, title).Events {
 			r := body(t, e)
 			v.Receipts = append(v.Receipts, receiptVector{title, r.Account, r.RequestID, r.Body.Type, r.Body.Status, string(e.Data)})
@@ -169,9 +191,15 @@ func TestVectors(t *testing.T) {
 		{"reports: alice's report for b1 resolves round 0, pays the winners and opens round 1", 0},
 		{"reports: alice's report for b1 resolves round 0, pays the winners and opens round 1", 1},
 		{"reports: tick 8 skips a repeated deposit, credits two and confirms round 0", 3},
+		{"events: alice carries the resolver's No, which pays every holder and archives the event", 0},
 	} {
 		e := find(t, steps, r.title).AppEvents[r.index]
 		v.Records = append(v.Records, recordVector{r.title, "0x" + hex.EncodeToString(e.EventSubType[:]), "0x" + hex.EncodeToString(e.Data)})
+	}
+	digest := (&State{Engine: &engine.State{Config: deployed()}}).resultDigest(eventRound, 2)
+	v.Event = eventVector{string(marshal(deployed())), *testEvent(), event, eventRound, resolver, 2, "0x" + hex.EncodeToString(digest), signResult(resolverKey, deployed(), eventRound, 2)}
+	if signer := (&State{Engine: &engine.State{Config: deployed()}}).resultSigner(eventRound, 2, raw(v.Event.Signature)); signer != resolver {
+		t.Fatalf("the vector's signature recovers to %s", signer)
 	}
 	// Map iteration order is random; the file must not be.
 	for i := range v.Requests {
@@ -196,4 +224,12 @@ func TestVectors(t *testing.T) {
 	if err != nil || !bytes.Equal(got, want) {
 		t.Fatalf("testdata/vectors.json is stale or missing (%v): run go test -run TestVectors -update . and rerun the TypeScript tests", err)
 	}
+}
+
+func mustEventSpec() engine.RoundSpec {
+	spec, err := testEvent().spec(deployed())
+	if err != nil {
+		panic(err)
+	}
+	return spec
 }

@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { Wallet, keccak256, toUtf8Bytes } from "ethers";
+import { TypedDataEncoder, Wallet, keccak256, toUtf8Bytes, verifyTypedData } from "ethers";
 import { decrypt, encrypt, exportPublicKeyToHex, generateKeyPair, importPublicKeyFromHex } from "@horizen/vela-common-ts";
 import { EvaluationSession } from "./session.ts";
 import type { EvaluationDomain } from "./session.ts";
-import { RECEIPT_BYTES, SUBTYPES, commandBody, commandId, decodeClock, decodeConfirm, decodeCredit, decodePayout, decodeSettle, encodeCommand,
-  reportBody, reportRequestId, syncBody, syncRequestId } from "./guest.ts";
-import type { EngineCommand, ReceiptBody } from "./guest.ts";
+import { EVENT_RESULT_TYPES, RECEIPT_BYTES, SUBTYPES, commandBody, commandId, decodeClock, decodeConfirm, decodeCredit, decodePayout, decodeSettle, encodeCommand,
+  eventResultTypedData, eventRound, reportBody, reportRequestId, resolveBody, resolveRequestId, syncBody, syncRequestId } from "./guest.ts";
+import type { EngineCommand, EngineDomain, EngineRound, EventTerms, ReceiptBody } from "./guest.ts";
 
 // Written by the Go adapter's own tests (go test -run TestVectors -update . in
 // ../guest), which also require every string in it to be what the engine and
@@ -17,9 +17,10 @@ interface Vectors {
   epoch: string;
   accounts: Record<string, string>;
   commands: { name: string; command: EngineCommand; canonical: string }[];
-  requests: { name: string; account: string; requestId: string; body: { type: string; command?: string; report?: string }; plaintext: string }[];
+  requests: { name: string; account: string; requestId: string; body: { type: string; command?: string; report?: string; outcome?: 1 | 2; signature?: string }; plaintext: string }[];
   receipts: { name: string; account: string; requestId: string; type: string; status: string; plaintext: string }[];
   records: { name: string; subType: string; data: string }[];
+  event: { engineConfig: string; event: EventTerms; spec: EngineRound; roundId: string; resolver: string; outcome: 1 | 2; digest: string; signature: string };
 }
 const vectors: Vectors = JSON.parse(readFileSync(new URL("../guest/testdata/vectors.json", import.meta.url), "utf8"));
 // The recorded Chainlink reports the guest's own tests verify, as 0x hex.
@@ -43,6 +44,7 @@ async function open(name: string) {
 
 test("vector accounts are the derived test wallets", () => {
   for (const name of ["alice", "bob"]) assert.equal(wallet(name).address.toLowerCase(), vectors.accounts[name]);
+  assert.equal(wallet("resolver").address.toLowerCase(), vectors.event.resolver);
 });
 
 test("encoder output is the engine's canonical command, byte for byte", () => {
@@ -74,7 +76,7 @@ test("encoder refuses what the engine would read differently", () => {
 
 test("session.ts produces exactly the plaintext the guest accepts", async () => {
   const { enclave, session, userPublicKey } = await open("alice");
-  assert.equal(vectors.requests.length, 4);
+  assert.equal(vectors.requests.length, 5);
   for (const vector of vectors.requests) {
     assert.equal(vector.account, session.account);
     let body: unknown = syncBody();
@@ -91,6 +93,10 @@ test("session.ts produces exactly the plaintext the guest accepts", async () => 
       const source = reports.find(r => r.feedId.startsWith("0x00039d9e") && r.observationsTimestamp === at)!;
       body = reportBody(source.report);
       requestId = reportRequestId(session.account, at);
+    }
+    if (vector.body.type === "resolve") {
+      body = resolveBody(vector.body.outcome!, vector.body.signature!);
+      requestId = resolveRequestId(session.account);
     }
     assert.deepEqual(body, vector.body, vector.name);
     assert.equal(requestId, vector.requestId, vector.name);
@@ -119,7 +125,7 @@ test("guest receipts pass the session's context checks", async () => {
     assert.equal(encoder.encode(vector.plaintext).length, RECEIPT_BYTES, vector.name);
     assert.match(body.pad, /^0+$/, vector.name);
     assert.ok(body.at.tick >= 1 && body.at.timestamp >= 1_790_000_000, vector.name);
-    assert.equal(typeof body.tick === "number", body.type !== "report", vector.name);
+    assert.equal(typeof body.tick === "number", body.type !== "report" && body.type !== "resolve", vector.name);
     // The same receipt under any other expectation is refused, never shown as empty.
     assert.equal((await owner.session.decryptReceipt(await owner.seal(vector.plaintext), `${vector.requestId}0`)).status, "context-mismatch");
     assert.equal((await other.session.decryptReceipt(await other.seal(vector.plaintext), vector.requestId)).status, "context-mismatch");
@@ -172,9 +178,42 @@ test("public records decode as the guest wrote them", () => {
   assert.deepEqual([refund.status, refund.payout, refund.amount], [2, 3n, 1n]);
   assert.deepEqual(decodePayout(record("tick 15 ", SUBTYPES.payout)).kind, 2);
   const settled = vectors.records.filter(r => r.subType === SUBTYPES.settle).map(r => decodeSettle(r.data));
-  assert.deepEqual(settled.map(s => [s.kind, s.outcome, s.source, s.observationsTimestamp]), [[2, 1, 1, 1_791_270_900], [1, 0, 1, 1_791_270_900]]);
+  assert.deepEqual(settled.map(s => [s.kind, s.outcome, s.source, s.observationsTimestamp]), [[2, 1, 1, 1_791_270_900], [1, 0, 1, 1_791_270_900], [2, 2, 4, 0]]);
+  assert.equal(settled[2]!.roundId, vectors.event.spec.registryRoundId);
   assert.equal(settled[0]!.reportHash, settled[1]!.reportHash);
   const confirm = decodeConfirm(record("reports: tick 8", SUBTYPES.confirm));
   assert.deepEqual([confirm.agree, confirm.engineOutcome, confirm.registryOutcome, confirm.engineClosing], [1, 1, 1, settled[0]!.reportHash]);
   assert.throws(() => decodeCredit(record("tick 1 ", SUBTYPES.clock)));
+});
+
+test("the event's round and the resolver's signed result are the guest's", async () => {
+  const v = vectors.event;
+  assert.deepEqual(eventRound(v.engineConfig, v.event), { id: v.roundId, spec: v.spec });
+  // The guest's own create_round of it is the one the encoder writes.
+  const create = vectors.commands.find(c => c.name === "create_round of the event")!;
+  assert.deepEqual(create.command.round, v.spec);
+  const domain = (JSON.parse(v.engineConfig) as { domain: EngineDomain }).domain;
+  const typed = eventResultTypedData(domain, v.roundId, v.outcome);
+  const types = { EventResult: [...EVENT_RESULT_TYPES.EventResult] };
+  assert.equal(TypedDataEncoder.hash(typed.domain, types, typed.message), v.digest);
+  assert.equal(verifyTypedData(typed.domain, types, typed.message, v.signature).toLowerCase(), v.resolver);
+  assert.equal(await wallet("resolver").signTypedData(typed.domain, types, typed.message), v.signature);
+  // The other outcome, another round or another deployment is another digest.
+  for (const other of [eventResultTypedData(domain, v.roundId, 1), eventResultTypedData(domain, "ab".repeat(32), 2),
+    eventResultTypedData({ ...domain, applicationId: "8" }, v.roundId, 2)]) {
+    assert.notEqual(TypedDataEncoder.hash(other.domain, types, other.message), v.digest);
+  }
+  for (const bad of [{ ...v.event, question: "0x" + "0".repeat(64) }, { ...v.event, question: v.event.question.toUpperCase() }, { ...v.event, start: 0 },
+    { ...v.event, cutoff: v.event.start }, { ...v.event, end: v.event.cutoff - 1 }, { ...v.event, voidableAfter: v.event.end }, { ...v.event, voidableAfter: 2 ** 32 },
+    { ...v.event, end: v.event.end + 0.5 }]) {
+    assert.throws(() => eventRound(v.engineConfig, bad), JSON.stringify(bad));
+  }
+  assert.equal(eventRound(v.engineConfig, { ...v.event, end: v.event.cutoff }).spec.end, v.event.cutoff);
+  assert.throws(() => eventResultTypedData(domain, v.roundId, 3 as 1));
+  assert.throws(() => eventResultTypedData(domain, `0x${v.roundId}`, 1));
+  for (const [outcome, signature] of [[3, v.signature], [0, v.signature], [2, v.signature.toUpperCase()], [2, v.signature.slice(0, -2) + "1d"],
+    [2, v.signature.slice(0, -2)], [2, v.signature.slice(2)]] as const) {
+    assert.throws(() => resolveBody(outcome as 1, signature), `${outcome} ${signature}`);
+  }
+  assert.equal(resolveRequestId(vectors.accounts.alice!), `${vectors.accounts.alice}:resolve`);
 });

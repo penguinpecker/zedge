@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/decred/dcrd/dcrec/secp256k1/v4"
+	"github.com/decred/dcrd/dcrec/secp256k1/v4/ecdsa"
 	"github.com/penguinpecker/zedge/engine"
 	"golang.org/x/crypto/sha3"
 )
@@ -37,6 +39,10 @@ const (
 	bob    = "0x327437aced75d158d4624e85aa00e1906f44cde7"
 	keeper = "0xeee7f8d404ca1acae6548f2bf3a530e4e6de08cd"
 	house  = "0x4040404040404040404040404040404040404040" // the market maker of the stake limits
+	// The event's resolver and a stranger, keys from the same kind of public
+	// label (resolverKey, malloryKey). Test-only.
+	resolver = "0x140fbbb0641022bdaefd6f6ef5d2a06a8c54a292"
+	mallory  = "0xef2650c195abe3c08a22c619f2e10ddbb6699585"
 
 	t0, block0 = uint64(1_800_000_000), uint64(100)
 	t1, block1 = t0 + 60, uint64(105)
@@ -173,9 +179,13 @@ type rec struct {
 	asset, duration                      uint64 // 0 BTC, 1 ETH; 0 means 900
 	start, openedAt, resolvedAt, outcome uint64
 	opening, closing                     *engine.StreamsObservation
+	forged                               string // a round ID to name in place of the schedule's own
 }
 
 func (r rec) id() string {
+	if r.forged != "" {
+		return r.forged
+	}
 	asset, duration := "BTC", r.duration
 	if r.asset == 1 {
 		asset = "ETH"
@@ -320,7 +330,7 @@ func script() []step {
 		steps = append(steps, step{Name: "keeper syncs for deposits", Call: "process", Sender: keeper, Payload: syncPayload(keeper)},
 			step{Name: name, Call: "trusted", Payload: tick3(k, block1+k, t1+k, nil, deps(first, first, n, 1))})
 	}
-	return append(append(steps, round(15)...), reports()...)
+	return append(append(append(steps, round(15)...), reports()...), events()...)
 }
 
 // The first BTC 900-second round after t0, and the price it opens at.
@@ -438,6 +448,72 @@ func reports() []step {
 		{Name: "reports: tick 7 waits at a gap in the deposit indexes", Call: "trusted", Payload: tick3(7, 204, b1+10, nil, []dep{{5, alice, 1_000_000}})},
 		{Name: "reports: keeper syncs for the registry's record", Call: "process", Sender: keeper, Payload: syncPayload(keeper)},
 		{Name: "reports: tick 8 skips a repeated deposit, credits two and confirms round 0", Call: "trusted", Payload: tick3(8, 205, b1+40, []rec{confirmed}, []dep{{3, house, 1_000_000_000}, {4, alice, 5_000_000}, {5, alice, 1_000_000}})},
+	}
+}
+
+// The test event (README section 13): trading from before the first tick
+// until t0 + 3000, a result from one second later, voided if still open a day
+// after that; none of its times on the 900-second grid.
+func testEvent() *EventTerms {
+	return &EventTerms{Question: "0x" + hex.EncodeToString(keccak([]byte("zedge test event rules"))), Start: t0 - 1000, Cutoff: t0 + 3000, End: t0 + 3001, VoidableAfter: t0 + 3001 + 86400}
+}
+
+// eventParams deploys the test event with its resolver, reading Base deposits
+// from index 3 on.
+func eventParams() DeployParams {
+	p := testParams()
+	p.Event, p.Resolver, p.DepositsFrom = testEvent(), resolver, 2
+	return p
+}
+
+var resolverKey, malloryKey = secp256k1.PrivKeyFromBytes(keccak([]byte("zedge-vela-guest-vector:resolver"))), secp256k1.PrivKeyFromBytes(keccak([]byte("zedge-vela-guest-vector:mallory")))
+
+// eventID is the engine round ID of event e in the test deployment.
+func eventID(e *EventTerms) string {
+	spec, err := e.spec(deployed())
+	if err != nil {
+		panic(err)
+	}
+	return engine.RoundID(deployed(), spec)
+}
+
+// signResult is key's EIP-712 signature of outcome for engine round id under
+// configuration c, as 0x hex: r, s, v.
+func signResult(key *secp256k1.PrivateKey, c engine.Config, id string, outcome uint64) string {
+	sig := ecdsa.SignCompact(key, (&State{Engine: &engine.State{Config: c}}).resultDigest(id, outcome), false)
+	return "0x" + hex.EncodeToString(append(sig[1:], sig[0]))
+}
+
+// resolvePayload is account's request carrying a signed event result.
+func resolvePayload(account string, outcome uint64, sig string) []byte {
+	return envelope(account, account+":resolve", requestBody{Type: "resolve", Outcome: outcome, Signature: sig})
+}
+
+// events is a third deployment with the event (README section 13): deposits
+// read from index 3 on, the event created by the first tick, a trade in it, a
+// result refused before the end and two that fail, then the resolver's No,
+// carried by alice, paying every holder and archiving the event at once.
+func events() []step {
+	id, no := eventID(testEvent()), signResult(resolverKey, deployed(), eventID(testEvent()), 2)
+	cutoff := testEvent().Cutoff
+	return []step{
+		{Name: "events: restart, so that the host deploys afresh", Call: "restart"},
+		{Name: "events: deploy with the event, its resolver and Base deposits read from index 3 on", Call: "deploy", Payload: marshal(eventParams())},
+		{Name: "events: keeper syncs", Call: "process", Sender: keeper, Payload: syncPayload(keeper)},
+		{Name: "events: tick 1 creates the next two rounds and the event, skips indexes 1 and 2 and credits alice and bob", Call: "trusted",
+			Payload: tick3(1, 300, t0, nil, []dep{{1, carol, 7}, {2, carol, 7}, {3, alice, 100_000_000}, {4, bob, 100_000_000}})},
+		{Name: "events: alice mints ten shares of the event", Call: "process", Sender: alice, Payload: commandPayload(alice, 2, engine.Command{Op: engine.Mint, RoundID: id, Quantity: 10_000_000})},
+		{Name: "events: alice stages a sell of six Yes at 70", Call: "process", Sender: alice, Payload: commandPayload(alice, 3, engine.Command{Op: engine.PlaceOrder, RoundID: id, Outcome: engine.Up, Side: engine.Sell, Price: 70, Quantity: 6_000_000, TIF: engine.GTC, Expiry: cutoff, MaxFee: 100_000})},
+		{Name: "events: tick 3 rests alice's sell", Call: "trusted", Payload: tickPayload(3, 301, t0+10)},
+		{Name: "events: bob stages a buy of four Yes", Call: "process", Sender: bob, Payload: commandPayload(bob, 2, engine.Command{Op: engine.PlaceOrder, RoundID: id, Outcome: engine.Up, Side: engine.Buy, Price: 70, Quantity: 4_000_000, TIF: engine.IOC, Expiry: cutoff, MaxFee: 100_000})},
+		{Name: "events: tick 4 fills bob against alice", Call: "trusted", Payload: tickPayload(4, 302, t0+20)},
+		{Name: "events: the resolver's No before the end is refused in private", Call: "process", Sender: alice, Payload: resolvePayload(alice, 2, no)},
+		{Name: "events: a result signed by someone else fails", Call: "process", Sender: alice, Payload: resolvePayload(alice, 2, signResult(malloryKey, deployed(), id, 2))},
+		{Name: "events: a result whose outcome is not the one signed fails", Call: "process", Sender: alice, Payload: resolvePayload(alice, 1, no)},
+		{Name: "events: keeper syncs after the end", Call: "process", Sender: keeper, Payload: syncPayload(keeper)},
+		{Name: "events: tick 5 passes the cutoff and the end, releasing alice's sell", Call: "trusted", Payload: tickPayload(5, 303, testEvent().End)},
+		{Name: "events: alice carries the resolver's No, which pays every holder and archives the event", Call: "process", Sender: alice, Payload: resolvePayload(alice, 2, no)},
+		{Name: "events: the same result again has nothing to apply", Call: "process", Sender: alice, Payload: resolvePayload(alice, 2, no)},
 	}
 }
 

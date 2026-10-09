@@ -31,7 +31,13 @@ type harness struct {
 // five shares in it.
 func newHarness(t *testing.T, accounts ...string) *harness {
 	t.Helper()
-	h := &harness{t: t, st: result(t, Deploy(testApp, marshal(testParams()), testSalt)).State, block: 1000}
+	return newHarnessWith(t, testParams(), accounts...)
+}
+
+// newHarnessWith is newHarness for a deployment with these parameters.
+func newHarnessWith(t *testing.T, p DeployParams, accounts ...string) *harness {
+	t.Helper()
+	h := &harness{t: t, st: result(t, Deploy(testApp, marshal(p), testSalt)).State, block: 1000}
 	h.sync(keeper)
 	h.ok(h.tick(t0))
 	for _, who := range accounts {
