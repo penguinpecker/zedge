@@ -112,7 +112,7 @@ Constructor parameters are canonical JSON, at most 16 KiB:
 13. The wasm layer draws 32 bytes from the host's `random_get` and the state keeps them as `salt`. If the host's random source fails or gives only zeros, deploy fails with `zedge: internal error`. The salt is the only secret in the state: without it the public state root would confirm guesses at private commands (§11). It is never sent to anyone.
 
 14. `event` and `resolver` (both optional, and given together or not at all; §13): `event` is `{"question","start","cutoff","end","voidableAfter"}`, the `0x` Keccak-256 of the event's exact rules text and its times, which `engine.NewEventSpec` must accept (`0 < start < cutoff ≤ end < voidableAfter ≤ 4,294,967,295`); `resolver` is the lowercase address whose EIP-712 signature alone settles it, and may not be the house, the authority, the endpoint or the vault. They are fixed for the life of the deployment.
-15. `depositsFrom` (optional, default 0): the last Base deposit index this deployment never reads. `depositsSeen` starts there, so the first tick asks the inbox for `depositsFrom + 1` (§6). A replacement application on the same vault and inbox sets it to the index of the old application's last deposit (after the old one stops reading the inbox), so that no past deposit is credited twice. At most 10^15.
+15. `depositsFrom` (optional, default 0): the last Base deposit index this deployment never reads. `depositsSeen` starts there, so the first tick asks the inbox for `depositsFrom + 1` (§6). A replacement application on the same vault and inbox sets it to the old application's final `depositsSeen` (the index in its last `credit` record), read only once the old one has stopped reading the inbox and has applied every tick its trigger answered before that, so that no past deposit is credited twice. Not the inbox's highest index: deposits the old application never reached would then be credited nowhere. At most 10^15.
 
 In the canonical JSON they follow `custody`, in the order `event`, `resolver`, `depositsFrom`, and `event`'s keys in the order above. With 14 and 15 left out, the parameters and the state are byte for byte those of a deployment without them.
 
@@ -254,7 +254,7 @@ The money is native USDC on Base in the `BaseCustodyVault` (`custody.vault`, §2
 
 So every Base index ends in exactly one of the two, once. A deposit is credited whether or not the account has a book command staged: it touches no user nonce. No receipt is sent; the account sees its balance in its next receipt's view, and the public `credit` record tells it when.
 
-Reconciliation, at any accepted state root: Σ credited = engine `deposited`; Σ vault `Deposited` = Σ credited + Σ refunded + deposits still in flight; the vault's USDC = Σ `Deposited` − Σ vault `Paid`.
+Reconciliation, at any accepted state root: Σ credited = engine `deposited`; Σ vault `Deposited` with an index above `depositsFrom` = Σ credited + Σ refunded + deposits still in flight; the vault's USDC = Σ `Deposited` − Σ vault `Paid` (every application on the vault together).
 
 A Vela deposit (`assetAmount > 0` on any request) always fails with `zedge: unsupported token`, and the endpoint refunds it as a claim.
 
