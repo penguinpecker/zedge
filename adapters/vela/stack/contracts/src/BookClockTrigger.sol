@@ -204,7 +204,12 @@ contract BookClockTrigger is Initializable, UUPSUpgradeable, Ownable2StepUpgrade
 
     /// @dev Up to MAX_DEPOSITS inbox records from index `next`, copied word for word at word `at` of the answer. The
     /// answer must be exactly an ABI-encoded uint256[] of whole records, else none is passed on.
-    function _deposits(address inbox_, bytes memory out, uint256 at, uint256 next) private view returns (uint256 d) {
+    function _deposits(address inbox_, bytes memory out, uint256 at, uint256 next)
+        internal
+        view
+        virtual
+        returns (uint256 d)
+    {
         // casting to 'uint64' is safe because _answer passes only a next index within uint64
         // forge-lint: disable-next-line(unsafe-typecast)
         bytes memory call_ = abi.encodeWithSelector(RECORDS_FROM, uint64(next), MAX_DEPOSITS);

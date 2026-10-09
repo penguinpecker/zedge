@@ -41,6 +41,7 @@ jobs:
         env:
           TEST_DATABASE_URL: postgres://postgres@localhost:5432/postgres
       - run: node --test contracts/scripts/*.test.mjs
+      - run: node --test scripts/*.test.mjs adapters/vela/stack/*.test.mjs
       # The Vela SDK in the private-trading chunk retains elliptic/GHSA-848j-6mx2-7j84 (low, no fix exists),
       # as in the sdk-crypto-evaluation job. See security/README.md. A passing job is not a clean audit claim.
       - run: npm audit --audit-level=moderate

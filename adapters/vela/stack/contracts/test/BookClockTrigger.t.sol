@@ -5,6 +5,7 @@ import {Test, Vm, console} from "forge-std/Test.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import {BookClockTrigger} from "../src/BookClockTrigger.sol";
+import {WithdrawOnlyBookClockTrigger} from "../src/WithdrawOnlyBookClockTrigger.sol";
 import {EvaluationToken} from "../src/EvaluationToken.sol";
 import {StreamsRoundRegistry} from "zedge-contracts/src/StreamsRoundRegistry.sol";
 import {HorizenDepositInbox} from "zedge-contracts/src/HorizenDepositInbox.sol";
@@ -454,6 +455,48 @@ contract BookClockTriggerTest is Test {
             assertLe(used, WORST_GAS);
             vm.revertToState(snapshot);
         }
+    }
+
+    /// Retiring an application: once the owner upgrades its trigger to WithdrawOnlyBookClockTrigger, the answer in the
+    /// same state is the same clock words and registry records byte for byte with d = 0, whatever the inbox holds,
+    /// and the proxy's state reads as before. The owner can still upgrade it back.
+    function test_WithdrawOnlyUpgrade() public {
+        for (uint64 i = 1; i <= 10; ++i) {
+            deposit(i, address(uint160(0xD000 + i)), 1_000_000 * i);
+        }
+        askFor(1, 1, noIds(), noIds(), noIds());
+        bytes32 r1 = slot(S1);
+        vm.warp(S1 + 2);
+        registry.recordOpening(r1, abi.encode(observed(S1, 97_000e18)));
+        uint256 snapshot = vm.snapshotState();
+        bytes memory full = askFor(2, 3, ids(r1), noIds(), noIds());
+        (uint256 n, uint256 d) = header(full, 2);
+        assertEq(n, 3); // r1 opened, and the two next slots
+        assertEq(d, 8);
+        vm.revertToState(snapshot);
+
+        address frozen = address(new WithdrawOnlyBookClockTrigger());
+        vm.prank(OWNER);
+        trigger.upgradeToAndCall(frozen, "");
+        bytes memory p = askFor(2, 3, ids(r1), noIds(), noIds());
+        assertEq(deposits(p, 2), 0);
+        assembly ("memory-safe") {
+            mstore(add(full, 256), 0) // word 7, d
+            mstore(full, add(256, mul(608, n))) // without the deposit records
+        }
+        assertEq(p, full);
+        assertEq(address(uint160(uint256(vm.load(address(trigger), IMPLEMENTATION_SLOT)))), frozen);
+        assertEq(trigger.owner(), OWNER);
+        assertEq(trigger.processorEndpoint(), ENDPOINT);
+        assertEq(trigger.registry(), address(registry));
+        assertEq(trigger.inbox(), address(inbox));
+        assertEq(trigger.asset(), 0);
+        assertEq(trigger.duration(), D);
+
+        address book = address(new BookClockTrigger());
+        vm.prank(OWNER);
+        trigger.upgradeToAndCall(book, "");
+        assertEq(deposits(askFor(3, 3, noIds(), noIds(), noIds()), 3), 8);
     }
 
     /// With a tick request present the trigger never reverts, whatever follows the tick word and whatever the
