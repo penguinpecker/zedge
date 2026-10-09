@@ -466,7 +466,7 @@ async function main(argv) {
     if (r?.start !== start) {
       const blocked = await deploymentProblem(); // before the round is taken on, so a failed read is read again
       if (r) log("round done", { start: r.start, requests: r.requests, refusals: r.refusals, rpcCalls: rpcCalls - r.calls0, ethBefore: r.eth0, ethAfter: r.eth, cycle: +cycle.toFixed(1) });
-      r = { ...roundAt(start), blocked, requests: 0, refusals: 0, calls0: rpcCalls, open: null, sigma: null, crossChecked: !cross, crossChecks: 0, crossAt: 0 };
+      r = { ...roundAt(start), blocked, requests: 0, refusals: 0, calls0: rpcCalls, open: null, sigma: null, crossChecked: !cross, crossChecks: 0, crossAt: 0, syncs: 0, syncAt: 0 };
     }
     decided = { now, at: Date.now() };
     if (stopping) { // cancel what rests in the open round, then exit
@@ -497,6 +497,12 @@ async function main(argv) {
     let c = plan(view, r, now, p, s, { cycle, optional: false }), optional = false;
     if (!c && Date.now() - lastOptional >= 15_000) optional = !!(c = plan(view, r, now, p, s, { cycle }));
     if (Date.now() - beat >= 60_000) { beat = Date.now(); log("market", { secondsLeft: r.end - now, spot: sp.ok ? sp.spot : sp.reason, s0: r.open.s0, sigma: r.sigma, p, quotes: p === null ? null : quotes(p, s.halfSpreadCents), ...summary(view) }); }
+    // Settlement pays an ended round's winning shares into the house's cash, but its view learns that only from a receipt. A house
+    // too short of cash to quote would send none all round: so a sync, at most 3 a round and 30 s apart, while it still holds them.
+    if (!c && !dry && r.syncs < 3 && Date.now() - r.syncAt >= 30_000 && view.holdings.some((h) => h.roundId !== r.id)) {
+      if (await clear({ op: "sync" })) { r.syncs++; r.syncAt = Date.now(); r.requests++; await send({ op: "sync" }); } else await nap();
+      return false;
+    }
     const held = !c ? (p === null && !sp.ok ? sp.reason : null)
       : pulls(c.op, optional) ? null
       : r.refusals >= MAX_REFUSALS ? `${r.refusals} refusals this round; no new quotes until the next`
