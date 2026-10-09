@@ -105,7 +105,9 @@ to a schema of their own and are kept, like every receipt.
 2. Wait until Railway shows the old indexer deployment as removed. Its process holds the old application's lock until it exits.
 3. Run this once against the indexer's Postgres. Use `railway connect Postgres` (it needs a local `psql`, for example
    `brew install libpq`), or paste it into the Postgres service's query tab. The id is the application being left: 7408397676477227659
-   at the 2026 switch-over. For a later switch-over, replace every 7408397676477227659 in it with the id being left.
+   at the 2026 switch-over. For a later switch-over, replace every 7408397676477227659 in it with the id being left; inside
+   `pg_try_advisory_xact_lock`, an id of 9223372036854775808 (2^63) or more becomes that id − 18446744073709551616 (2^64), the
+   indexer's lock key (`lockKey` in store.mjs).
 
    ```sql
    DO $$
@@ -127,6 +129,8 @@ to a schema of their own and are kept, like every receipt.
 4. Within 5 s the new indexer recreates the four tables and the `horizen` cursor at its deploy block − 1, and logs
    `{"status":"indexing",…}`. It reads from the deploy block in 1,000-block ranges; `/v1/status` `behindBlocks` falls back to about 3.
    In those few seconds `/v1/live`, `/v1/rounds`, `/v1/event` and `/v1/account` answer 503; `/v1/status` keeps answering.
+   From then on the rounds carry only the new application's records: for 24 h the site's results strip shows no result for the
+   rounds before the switch-over.
 
 Check:
 
@@ -138,7 +142,8 @@ SELECT count(*), max(minute) FROM btc_minutes;          -- unchanged, then risin
 
 Afterwards, never redeploy an indexer image from before the switch-over: it does not wait, and it would write the old application's
 rows into the new tables. The wait in step 1 only sees rows older than the followed application's deployment. So an indexer pointed
-back at an older application (a rollback) needs this reset first, with the newer application's id.
+back at an older application (a rollback) needs this reset first, with the newer application's id, in this order: remove the newer
+indexer's deployment (while it runs, its lock makes the reset refuse), run the reset, then deploy the older image.
 
 ## Run and test
 

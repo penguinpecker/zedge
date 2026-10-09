@@ -144,8 +144,9 @@ test("the events manifest names this application's event: its engine and registr
   const { id, spec } = eventRound(book.application.engineConfigJson, { question: terms.questionHash, start: terms.start, cutoff: terms.cutoff, end: terms.end, voidableAfter: terms.voidableAfter });
   assert.deepEqual(event, { round: `0x${id}`, registryRoundId: spec.registryRoundId, cutoff: 1_793_743_200 });
   assert.equal(eventOf(null, book), null, "no events manifest: no event");
-  for (const bad of [{ ...manifest, application: "7225536188967924955" }, { ...manifest, kind: "zedge-orderbook" }, { ...manifest, chainId: 2651420 }, { ...manifest, event: null },
-    { ...manifest, event: { ...manifest.event, start: String(terms.start) } }, { ...manifest, event: { ...manifest.event, questionHash: terms.questionHash.toUpperCase() } }, []]) {
+  for (const bad of [{ ...manifest, application: "7225536188967924955" }, { ...manifest, kind: "zedge-orderbook" }, { ...manifest, schemaVersion: 2 }, { ...manifest, chainId: 2651420 },
+    { ...manifest, event: null }, ...["start", "cutoff", "end", "voidableAfter"].map((k) => ({ ...manifest, event: { ...manifest.event, [k]: String(terms[k]) } })),
+    { ...manifest, event: { ...manifest.event, questionHash: terms.questionHash.toUpperCase() } }, []]) {
     assert.throws(() => eventOf(bad, book), JSON.stringify(bad));
   }
 });

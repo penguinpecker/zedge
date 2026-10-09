@@ -17,7 +17,7 @@ import { eventOf, handler, parseEventHouse, parseHouse } from "./api.mjs";
 import { RANGE, step } from "./follow.mjs";
 import { pricesStep } from "./prices.mjs";
 import { rows } from "./rows.mjs";
-import { prepare, reads, writes } from "./store.mjs";
+import { lockKey, prepare, reads, writes } from "./store.mjs";
 
 const POLL_MS = 1_000; // Horizen makes a block about every second
 const DEPTH = 3, REWIND = 600; // confirmation depth, and how far a reorg rewinds (~10 min: the reorg ceiling)
@@ -129,16 +129,16 @@ async function main(argv) {
   log({ status: "serving", application: book.application.id, event: event?.round ?? null });
 
   // Railway's deploy overlap: the old container holds the lock until it stops.
-  const locked = () => writer`select pg_try_advisory_lock(${book.application.id}::bigint) as ok`.then(([r]) => r.ok, (e) => { log({ status: "database", error: codeOf(e) }); return false; });
+  const locked = () => writer`select pg_try_advisory_lock(${lockKey(book.application.id)}::bigint) as ok`.then(([r]) => r.ok, (e) => { log({ status: "database", error: codeOf(e) }); return false; });
   while (!state.stopping && !(await locked())) await sleep(5_000);
   if (state.stopping) return;
   state.held = true;
   const store = writes(writer);
   // Rows of another application (a database not yet reset after a switch-over, README) are never written over: wait for the reset.
-  for (let waiting = false; ; waiting = true) {
-    const foreign = await prepare(writer, start).then(() => store.foreign(start)).catch((e) => { log({ status: "database", error: codeOf(e) }); return true; });
-    if (!foreign) break;
-    if (!waiting) log({ status: "waiting", reason: "rows of another application: reset the database (README)" });
+  for (let waiting = false; ;) {
+    const foreign = await prepare(writer, start).then(() => store.foreign(start)).catch((e) => { log({ status: "database", error: codeOf(e) }); return null; });
+    if (foreign === false) break;
+    if (foreign && !waiting) { waiting = true; log({ status: "waiting", reason: "rows of another application: reset the database (README)" }); }
     await sleep(5_000);
     if (state.stopping) return;
   }
