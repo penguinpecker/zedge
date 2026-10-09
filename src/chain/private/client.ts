@@ -87,7 +87,9 @@ type Step = (phase: Phase, text: string, tx?: Hex, chain?: 8453 | 26514, stage?:
 /** A request the chain shows submitted: its line, where it went, and the context it was signed with. */
 type Submitted = { step: Step; submission: Submission; ctx: AuthContext };
 export type HistoryEntry = { requestId: Hex; block: bigint; txHash: Hex; text: string; readable: boolean };
-export type Order = { roundStart: number; outcome: "up" | "down"; side: "buy" | "sell"; price: number; quantity: number; tif: "ioc" | "gtc"; expiry: number };
+/** A BTC round by its start, or the event by its engine round ID and cutoff (events-manifest.ts): its Up is Yes and its Down is No. */
+export type RoundRef = number | { id: string; cutoff: number };
+export type Order = { round: RoundRef; outcome: "up" | "down"; side: "buy" | "sell"; price: number; quantity: number; tif: "ioc" | "gtc"; expiry: number };
 /** How long (s) a one-click order waits for the house's price: the house re-quotes by cancelling and placing again, which leaves a
  * side empty for several seconds. */
 const ORDER_WAIT = 20;
@@ -241,6 +243,8 @@ export class PrivateAccount {
   #autoBusy = false; #autoRead: { balance: bigint; atoms: bigint } | null = null; #autoAfter = 0; #autoWait = 0;
   /** Book commands waiting for their result, by command ID: it comes back once, with whichever request of this account is next. */
   readonly #awaiting = new Map<string, (outcome: Outcome) => void>();
+  /** The book's trigger is withdraw-only (orderbook-manifest.ts): it credits no deposit any more, so none is sent. */
+  #withdrawOnly = false;
   readonly #book: Book; readonly #signer: Signer; readonly #chain: Chain; readonly #relay: Relay;
   readonly #hints: HintStore | null; readonly #onChange: (s: Snapshot) => void; readonly #now: () => number; readonly #sleep: (ms: number) => Promise<void>;
 
@@ -256,6 +260,7 @@ export class PrivateAccount {
   }
 
   get snapshot(): Snapshot { return this.#state; }
+  withdrawOnly(on: boolean) { this.#withdrawOnly = on; }
   #set(patch: Partial<Snapshot>) { this.#state = { ...this.#state, ...patch }; if (!this.#closed) this.#onChange(this.#state); }
   #action(action: string): Step {
     const id = ++this.#actionId, startedAt = this.#now();
@@ -352,10 +357,11 @@ export class PrivateAccount {
   sync(): Promise<ReceiptBody> { return this.#serial(() => this.#sync("Sync")); }
 
   /** The Portfolio's refresh on opening. Every sync is a public request, so one is sent only when something could have changed
-   * without this account (a resting order filled, an ended round swept) and no receipt was read in the last minute. */
-  async refresh(): Promise<void> {
+   * without this account (a resting order filled, an ended round swept) and no receipt was read in the last minute. A holding of a
+   * round in `skip` (the event, which settles once, weeks away) is no such thing: held alone it would cost a sync each opening. */
+  async refresh(skip: readonly string[] = []): Promise<void> {
     const v = this.#state.view;
-    if (!v || (!v.orders.length && !v.holdings.length) || this.#now() - this.#readAt < 60_000) return;
+    if (!v || (!v.orders.length && !v.holdings.some((h) => !skip.includes(h.roundId))) || this.#now() - this.#readAt < 60_000) return;
     await this.sync();
   }
 
@@ -606,24 +612,29 @@ export class PrivateAccount {
     return this.#run("Register account", { op: "register" }, false);
   }
 
+  #round(r: RoundRef) {
+    if (typeof r !== "number") return r;
+    const round = engineRound(this.#book, r);
+    return { id: round.id, cutoff: round.spec.cutoff };
+  }
   placeOrder(o: Order, wait?: Wait) {
-    const round = engineRound(this.#book, o.roundStart);
-    if (o.expiry > round.spec.cutoff) throw new PublicError("Orders can rest only until the round's cutoff.");
-    return this.#run(`${o.side === "buy" ? "Buy" : "Sell"} ${o.outcome === "up" ? "Up" : "Down"}`, { op: "place_order", roundId: round.id, outcome: o.outcome, side: o.side, price: o.price, quantity: o.quantity, tif: o.tif, expiry: o.expiry }, true, o.quantity, wait);
+    const round = this.#round(o.round), [up, down] = typeof o.round === "number" ? ["Up", "Down"] : ["Yes", "No"];
+    if (o.expiry > round.cutoff) throw new PublicError("Orders can rest only until the round's cutoff.");
+    return this.#run(`${o.side === "buy" ? "Buy" : "Sell"} ${o.outcome === "up" ? up : down}`, { op: "place_order", roundId: round.id, outcome: o.outcome, side: o.side, price: o.price, quantity: o.quantity, tif: o.tif, expiry: o.expiry }, true, o.quantity, wait);
   }
   /** One-click buy: a GTC at exactly `price` (the ask shown) that rests up to ORDER_WAIT s from chain time `now`, never past the
    * cutoff, so it still fills when the house puts its price back during a re-quote. It fills at that price or better. */
-  buy(roundStart: number, outcome: "up" | "down", price: number, quantity: number, now: number) { return this.#oneClick({ roundStart, outcome, side: "buy", price, quantity }, now); }
+  buy(round: RoundRef, outcome: "up" | "down", price: number, quantity: number, now: number) { return this.#oneClick({ round, outcome, side: "buy", price, quantity }, now); }
   #oneClick(o: Omit<Order, "tif" | "expiry">, now: number) {
     const rest = waitingOrder(this.#state.view, now);
     if (rest) throw new PublicError(`Your order at ${rest.price}¢ is still waiting.`);
-    const expiry = Math.min(Math.floor(now) + ORDER_WAIT, engineRound(this.#book, o.roundStart).spec.cutoff);
+    const expiry = Math.min(Math.floor(now) + ORDER_WAIT, this.#round(o.round).cutoff);
     return this.placeOrder({ ...o, tif: "gtc", expiry }, { until: this.#now() + (expiry - now) * 1000, seconds: expiry - Math.floor(now) });
   }
   cancelOrder(orderId: string) { return this.#run("Cancel order", { op: "cancel_order", orderId }, true); }
   cancelAll(roundStart: number) { return this.#run("Cancel all", { op: "cancel_all", roundId: engineRound(this.#book, roundStart).id }, true); }
   mint(roundStart: number, quantity: number) { return this.#run("Mint", { op: "mint", roundId: engineRound(this.#book, roundStart).id, quantity }, false); }
-  merge(roundStart: number, quantity: number) { return this.#run("Merge", { op: "merge", roundId: engineRound(this.#book, roundStart).id, quantity }, false); }
+  merge(round: RoundRef, quantity: number) { return this.#run("Merge", { op: "merge", roundId: this.#round(round).id, quantity }, false); }
   redeem(roundStart: number) { return this.#run("Redeem", { op: "redeem", roundId: engineRound(this.#book, roundStart).id }, false); }
 
   /** Polls a chain read every `every` ms until it answers, or null once `until` (this clock) passes. A failed read is waited out;
@@ -646,6 +657,7 @@ export class PrivateAccount {
     // account on its first credit), so a stuck unlock or a Horizen halt cannot hold it.
     return (async () => {
       const c = this.#book.custody, min = BigInt(c.vault.limits.minDeposit), max = BigInt(c.vault.limits.maxDeposit);
+      if (this.#withdrawOnly) throw new PublicError("Deposits are off while this order book closes. Nothing was sent.");
       if (amount < min || amount > max) throw new PublicError(`Deposits are ${usd(min)} to ${usd(max)}.`);
       const step = this.#action("Deposit");
       try {
@@ -719,7 +731,7 @@ export class PrivateAccount {
   async autoDeposit(): Promise<void> {
     const balance = this.#state.wallet, read = this.#chain.transfers;
     const moving = () => this.#closed || this.#state.actions.some((a) => !a.final && MONEY_ACTIONS.includes(a.action));
-    if (!read || balance === null || this.#autoBusy || moving()) return;
+    if (!read || balance === null || this.#autoBusy || moving() || this.#withdrawOnly) return;
     // Read again when the balance moved, and before each try: a deposit acts only on a history read just now.
     if (this.#autoRead?.balance === balance && (!this.#autoRead.atoms || this.#now() < this.#autoAfter)) return;
     this.#autoBusy = true;
@@ -825,11 +837,11 @@ export class PrivateAccount {
   }
 
   /** One-click close: as buy, a sell of all this account's free shares of one side in one round at exactly `price` (the bid shown). */
-  close(roundStart: number, outcome: "up" | "down", price: number, now: number) {
-    const id = engineRound(this.#book, roundStart).id, h = this.#state.view?.holdings.find((x) => x.roundId === id);
+  close(round: RoundRef, outcome: "up" | "down", price: number, now: number) {
+    const id = this.#round(round).id, h = this.#state.view?.holdings.find((x) => x.roundId === id);
     const quantity = Math.floor((outcome === "up" ? h?.up ?? 0 : h?.down ?? 0) / LOT) * LOT;
     if (!quantity) throw new PublicError("Nothing to close in this round.");
-    return this.#oneClick({ roundStart, outcome, side: "sell", price, quantity }, now);
+    return this.#oneClick({ round, outcome, side: "sell", price, quantity }, now);
   }
 
   /** History in pages of HISTORY_PAGE blocks, newest first, never below `floor`: the first open reads the latest page, a reopen only

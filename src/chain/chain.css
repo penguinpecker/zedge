@@ -279,3 +279,24 @@
 .chain-app .button:disabled { cursor: not-allowed; opacity: .45; }
 .chain-app .button.primary:disabled { opacity: 1; background: #343c2c; border-color: #343c2c; color: #8f9a86; }
 .chain-details summary { padding-block: 4px; }
+
+/* Crypto | Politics, above the markets. */
+.chain-categories { display: flex; margin-top: 18px; }
+.chain-categories .chain-segment { width: min(260px, 100%); }
+.chain-categories .chain-segment button { font-size: 12px; }
+/* The Politics page (EventMarket.tsx): the BTC page's panels, with the event's times, result and rules in place of the chart. */
+.event-times { margin: 4px 24px 18px; }
+.event-times dd { max-width: 62%; }
+.event-result, .event-operator { margin: 0 24px 16px; }
+.event-result a { display: inline-flex; align-items: center; gap: 4px; }
+.event-operator code { overflow-wrap: anywhere; }
+.event-rules-text { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; line-height: 1.8; padding: 0 24px 8px; }
+.event-rules > .chain-copy, .event-rules > .chain-error { margin: 0 24px 20px; }
+.event-rules-note code { overflow-wrap: anywhere; }
+.event-rules .chain-pill { text-decoration: none; }
+/* On one column the market and its ticket come first, the rules after them (as the BTC page's order book). */
+@media (max-width: 850px) { .event-rules { order: 3; } }
+@media (max-width: 500px) {
+  .event-times, .event-result, .event-operator, .event-rules > .chain-copy, .event-rules > .chain-error { margin-inline: 17px; }
+  .event-rules-text { padding-inline: 17px; }
+}

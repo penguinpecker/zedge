@@ -145,6 +145,8 @@ export default function AccountDrawer({ view, onClose, network, wallet, orderboo
   const [sending, setSending] = useState(false);
   const [sendOpen, setSendOpen] = useState(false);
   const snap = priv.snapshot, unlocked = Boolean(snap?.unlocked), cash = snap?.view?.cash ?? 0, live = Boolean(orderbook);
+  // A book frozen for its replacement credits no deposit: only its withdrawals are offered.
+  const frozen = Boolean(orderbook?.withdrawOnly);
   const limits = orderbook?.manifest.custody.vault.limits, vault = orderbook?.manifest.custody.vault.address;
   const address = wallet.session?.address;
   // One click: the default deposit is all of the wallet's USDC up to the largest deposit; a typed amount replaces it.
@@ -199,10 +201,10 @@ export default function AccountDrawer({ view, onClose, network, wallet, orderboo
             <dl className="chain-account-values"><div><dt>On Base</dt><dd>{snap?.wallet == null ? "Checking…" : usdc(snap.wallet)}</dd></div><div><dt>Trading</dt><dd>{unlocked ? usdc(cash) : settingUp ? "Setting up…" : failed ? "—" : <><LockKey size={12} /> Locked</>}</dd></div></dl>
             {settingUp && <SetupProgress actions={snap?.actions ?? []} />}
             {locked && <button className="button chain-full" disabled={!snap || priv.busy} onClick={unlock}><LockKeyOpen /> Unlock</button>}
-            {address && <div className="chain-deposit-address"><div><h3>Send USDC on Base to</h3><code>{address}</code>
+            {address && !frozen && <div className="chain-deposit-address"><div><h3>Send USDC on Base to</h3><code>{address}</code>
               <button className="chain-text-button" onClick={copy}><Copy size={13} /> {copied ? "Copied" : "Copy"}</button></div><AddressQr address={address} /></div>}
             {limits && deposit && <>
-              {BASE_ALCHEMY ? <>
+              {frozen ? <p className="chain-copy">Deposits are off while this order book closes. Withdraw your trading balance to Base.</p> : BASE_ALCHEMY ? <>
                 <p className="chain-copy">USDC sent here is added to your trading balance automatically while ZEDGE is open. Deposits start at {usdc(BigInt(limits.minDeposit))}.</p>
                 <DepositSteps snapshot={snap} idle />
                 {held > 0n && <div className="chain-held">
@@ -227,7 +229,7 @@ export default function AccountDrawer({ view, onClose, network, wallet, orderboo
               {withdrawAtoms > 0 && <button className="button chain-full" disabled={!unlocked || priv.busy} onClick={() => void priv.run((a) => a.withdraw())}>Withdraw {usdc(withdrawAtoms)}</button>}
               <ActionLine snapshot={snap} names={["Withdraw", "Payout"]} />
               {/* Other USDC on Base: a payout not yet read as held, dust below the smallest deposit, or any balance without automatic deposits. */}
-              {!held && Boolean(snap?.wallet) && !sendOpen && <button className="chain-text-button" onClick={() => setSendOpen(true)}>Send to another wallet</button>}
+              {(!held || frozen) && Boolean(snap?.wallet) && !sendOpen && <button className="chain-text-button" onClick={() => setSendOpen(true)}>Send to another wallet</button>}
               {sendOpen && address && vault && <SendForm priv={priv} own={address} vault={vault} balance={snap?.wallet ?? null} onDone={() => setSendOpen(false)} />}
               <ActionLine snapshot={snap} names={["Send"]} />
             </>}

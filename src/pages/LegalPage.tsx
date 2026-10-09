@@ -41,7 +41,7 @@ export default function LegalPage({ page, mode }: { page: LegalPageId; mode: "ch
           <p className="legal-summary">{document.summary}</p>
           <div className="legal-meta">
             {document.draft && <span className="legal-draft">Draft</span>}
-            <span>Updated <time dateTime="2026-10-07">7 October 2026</time></span>
+            <span>Updated <time dateTime="2026-10-09">9 October 2026</time></span>
           </div>
         </div>
 

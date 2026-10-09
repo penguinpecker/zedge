@@ -26,6 +26,9 @@ export function usePrivate(wallet: ChainWallet, orderbook: VerifiedOrderbook | n
   // The newest wallet functions, read at call time: a re-render must not recreate the account and drop its key.
   const latest = useRef(wallet);
   useEffect(() => { latest.current = wallet; });
+  // A book frozen for its replacement credits no deposit (orderbook-manifest.ts withdrawOnly): the client refuses every deposit.
+  const frozen = Boolean(orderbook?.withdrawOnly);
+  useEffect(() => { account.current?.withdrawOnly(frozen); });
   const manifest = orderbook?.manifest ?? null, address = wallet.signer?.address ?? null;
   const key = manifest && address ? `${manifest.release}:${manifest.relayer.facilitator}:${address}:${generation}` : "";
   const keyHint = manifest && address ? hints.get(`zedge:key:${manifest.application.id}:${address}`) : null;
@@ -66,6 +69,7 @@ export function usePrivate(wallet: ChainWallet, orderbook: VerifiedOrderbook | n
       created = new m.PrivateAccount(manifest, signer, chain,
         m.fetchRelay(manifest.relayer.path, () => latest.current.authHeaders()), { hints, onChange: (s) => { if (live) setSnapshot(s); } });
       account.current = created;
+      created.withdrawOnly(frozen);
       setSnapshot(created.snapshot);
       void created.refreshFunds().catch(() => undefined);
       // One click less: the first account after sign-in unlocks itself (one silent signature, then a sync). After Lock it waits for a click.

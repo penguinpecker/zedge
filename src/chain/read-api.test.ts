@@ -66,6 +66,31 @@ test("the house's quotes are checked field by field; a malformed one costs only 
   }
 });
 
+test("the event house's quotes are read on their own: a malformed copy is null and the rest of the live read stands; /v1/event names its settle record", async () => {
+  const q = (cents: number, shares: unknown = 5) => ({ cents, shares });
+  const good = { round: `0x${"AB".repeat(32)}`, at: (START + 700) * 1000, up: { ask: q(93), bid: q(88) }, down: { ask: q(12), bid: null } };
+  assert.deepEqual((await answering(liveBody({ event: good })).live())?.event,
+    { round: `0x${"ab".repeat(32)}`, at: good.at, up: { ask: { cents: 93, shares: 5_000_000 }, bid: { cents: 88, shares: 5_000_000 } }, down: { ask: { cents: 12, shares: 5_000_000 }, bid: null } });
+  assert.equal((await answering(liveBody()).live())?.event, null, "an indexer without the field");
+  assert.equal((await answering(liveBody({ event: null })).live())?.event, null);
+  const broken = [
+    { ...good, round: "0x1234" }, { ...good, round: "ab".repeat(32) }, { ...good, at: 0 }, { ...good, at: 1.5 }, { ...good, start: START }, { round: good.round, at: good.at, up: good.up },
+    { ...good, up: { ask: q(100), bid: null } }, { ...good, up: { ask: q(88), bid: q(93) } }, { ...good, down: { ask: q(12, 0.0001), bid: null } }, [good],
+  ];
+  for (const event of broken) {
+    const live = await answering(liveBody({ event })).live();
+    assert.deepEqual([live?.event, live?.rounds.length, live?.price?.p], [null, 3, 83_492.71], JSON.stringify(event));
+  }
+  const seen: { url: string; init: RequestInit }[] = [], settle = ref({ kind: 2, outcome: 1, source: 4, price: "0", observationsTimestamp: 0, reportHash: `0x${"0".repeat(64)}` });
+  const event = await answering({ head: { block: 9, time: 1 }, round: good.round, registryRoundId: H(3), settle }, true, seen).event();
+  assert.deepEqual([seen[0].url, event?.round, event?.settle?.kind, event?.settle?.source, event?.settle?.price], ["/v1/event", `0x${"ab".repeat(32)}`, 2, 4, 0n]);
+  assert.equal((await answering({ head: { block: 9, time: 1 }, round: good.round, registryRoundId: H(3), settle: null }).event())?.settle, null, "no result yet");
+  for (const bad of [{ head: { block: 9, time: 1 }, round: "0x12", registryRoundId: H(3), settle: null }, { head: { block: 9, time: 1 }, round: good.round, registryRoundId: H(3), settle: ref({ kind: 4 }) }]) {
+    assert.equal(await answering(bad).event(), null);
+  }
+  assert.equal(await answering({}, false).event(), null, "404: the indexer has no event");
+});
+
 test("the page's live read is shared: one request per 1.5 s, however many parts of the page ask", async () => {
   let reads = 0, t = 0;
   const live = sharedLive(async () => { reads++; return null; }, () => t);
