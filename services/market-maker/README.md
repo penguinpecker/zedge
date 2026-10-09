@@ -213,7 +213,7 @@ The operator posts the result as a signature from a dedicated resolver wallet, p
    - It prints the result, and with `--out` also writes it, never over an existing file.
    - The result is final once applied, so check the answer against the rules' sources first.
 4. **Send it,** after the event's end: `node scripts/sign-event-result.mjs submit result.json --mainnet --event`. This is `main.mjs resolve result.json --mainnet --event`.
-   - **Before any request**, it refuses the file unless it is exactly a result of this deployment's event, signed by the pinned resolver.
+   - **Before any request**, it refuses the file unless it is exactly a result of this deployment's event, signed by the pinned resolver, and the chain has reached the event's end.
    - **Then** it sends one sync, so the exchange clock passes the end, and then the result.
    - **The sender:** `--event` sends from the event house, whose service sends nothing after the cutoff. Without it the BTC house sends, and then its Railway bot must be in dry run first, or the two race on one nonce.
    - **What a refusal means:** `resolve: refused by the engine` judged at a time before the end means the clock was stale; send it again. `resolve: nothing to apply` means the event does not exist (it was never created, or it is already archived).
