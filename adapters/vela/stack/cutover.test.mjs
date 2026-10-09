@@ -2,7 +2,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import { keccak256, stringToBytes } from "viem";
-import { EVENT, INBOX, RAILWAY, blobInPlace, chooseDepositsFrom, codeName, depositsFromProblem, eventSpec, othersCrediting, proveDepositsFrom, resolverProblem, runtimeOf, thawProblems } from "./cutover.mjs";
+import { EVENT, INBOX, OLD, RAILWAY, blobInPlace, chooseDepositsFrom, codeName, depositsFromProblem, eventSpec, oldOf, othersCrediting, proveDepositsFrom, resolverProblem, runtimeOf, thawProblems } from "./cutover.mjs";
 
 test("runtimeOf fills every immutable slot with the contract's own address", () => {
   const art = { deployedBytecode: { object: `0x60${"00".repeat(32)}61${"00".repeat(32)}5b`, immutableReferences: { 7: [{ start: 1, length: 32 }, { start: 34, length: 32 }] } } };
@@ -113,4 +113,13 @@ test("a trigger reads as withdraw-only only if its code is WithdrawOnlyBookClock
   assert.equal(codeName(false, true), "WithdrawOnlyBookClockTrigger");
   assert.equal(codeName(false, false), "unknown");
   assert.throws(() => codeName(true, true), /build to the same code: rebuild/, "a stale build would prove a freeze that never happened");
+});
+
+test("the application being retired is the live one; only a fork rehearsal may name a stand-in", () => {
+  assert.equal(oldOf({}), OLD);
+  assert.equal(oldOf({ fork: "http://127.0.0.1:38945" }), OLD);
+  assert.deepEqual(oldOf({ fork: "http://127.0.0.1:38945", old: "2261950499236545176:0x243CD8D89755F73EBFBE0C6C32ADD4188FE0D293:28172684" }),
+    { ...OLD, app: 2261950499236545176n, trigger: "0x243cd8d89755f73ebfbe0c6c32add4188fe0d293", deployBlock: 28172684n });
+  assert.throws(() => oldOf({ old: "1:0x243cd8d89755f73ebfbe0c6c32add4188fe0d293:1" }), /--old is for --fork only/);
+  assert.throws(() => oldOf({ fork: "http://127.0.0.1:1", old: "1:0x243cd8:1" }), /APP_ID:TRIGGER:DEPLOY_BLOCK/);
 });

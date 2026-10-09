@@ -3,6 +3,7 @@
 // starts after N, the last inbox index the old one processed. Original code.
 //
 //   node adapters/vela/stack/cutover.mjs facts [--new APP_ID:DEPLOY_BLOCK] [--base-rpc URL]   read-only: every number the runbook checks
+//     (a rehearsal: --fork http://127.0.0.1:PORT reads a Horizen fork, and --old APP_ID:TRIGGER:DEPLOY_BLOCK names its stand-in old application)
 //   node adapters/vela/stack/cutover.mjs freeze [--trigger 0x…] [--implementation 0x…]         dry run: prints the transactions, sends nothing
 //   node adapters/vela/stack/cutover.mjs freeze --fork http://127.0.0.1:PORT                   Anvil fork of Horizen mainnet, deployer impersonated
 //   node adapters/vela/stack/cutover.mjs freeze --broadcast-mainnet                            ONLY the owner, after the go
@@ -24,6 +25,15 @@ export const HOUSE = "0xac8dfcbfbb5907634fe2bcea58e59e4c55441ab5", MANAGER = "0x
 export const KEEPER_VELA = "0xa867fa48f8ec915c87e98507833d700dd97557d3", RELAYER = "0x9336887b575f11da697f53614d0f2a262dded024";
 /** The application being retired, as public/deployments/26514-orderbook.json names it at b38ea4b. */
 export const OLD = { app: 7408397676477227659n, trigger: "0x9ca46470b05350384c31c8b236af4df638cbb30d", implementation: "0x6f8500186ccb07e3c14ff7bbf1c9b5c05b8ca9a8", deployBlock: 27958309n };
+/** The application being retired: OLD, or on a fork only --old APP_ID:TRIGGER:DEPLOY_BLOCK, a rehearsal's stand-in (the live one's
+ * private state is in the Railway manager's database, so no local manager can serve it). */
+export function oldOf({ fork, old }) {
+  if (old === undefined) return OLD;
+  if (!fork) throw new Error(`--old is for --fork only: mainnet retires application ${OLD.app}`);
+  const m = /^([0-9]{1,20}):(0x[0-9a-fA-F]{40}):([0-9]{1,12})$/.exec(old);
+  if (!m) throw new Error("--old takes APP_ID:TRIGGER:DEPLOY_BLOCK");
+  return { ...OLD, app: BigInt(m[1]), trigger: m[2].toLowerCase(), deployBlock: BigInt(m[3]) };
+}
 const custody = JSON.parse(readFileSync(new URL("../../../contracts/deployment/custody.json", import.meta.url), "utf8"));
 export const VAULT = custody.base.vault.proxy, INBOX = custody.horizen.inbox.proxy, USDC = custody.base.usdc, VAULT_FROM = BigInt(custody.plannedFrom.base.block);
 export const FEES = { maxFeePerGas: 2_000_504n, maxPriorityFeePerGas: 1_000_000n }; // deploy-book.mjs's Horizen caps
@@ -214,16 +224,17 @@ export async function appRecords(c, app, from, head) {
 }
 
 /** N from the chain, or the reason it cannot be proven yet (deploy-book.mjs). */
-export async function provenDepositsFrom(c) {
+export async function provenDepositsFrom(c, old = OLD) {
   const head = await c.getBlockNumber();
-  const [t, r, highest] = await Promise.all([triggerState(c, OLD.trigger, head), appRecords(c, OLD.app, OLD.deployBlock, head), read(c, INBOX, "highest")]);
+  const [t, r, highest] = await Promise.all([triggerState(c, old.trigger, head), appRecords(c, old.app, old.deployBlock, head), read(c, INBOX, "highest")]);
   return proveDepositsFrom({ frozen: t.frozen, freezeBlock: t.freezeBlock, lastClockBlock: r.clock?.block, credits: r.credits, highest });
 }
 
 // ---------------------------------------------------------------- facts
 
 async function facts(a) {
-  const hz = client(HORIZEN_RPC), base = client(a["base-rpc"] ?? BASE_RPC, false);
+  const OLD = oldOf(a), hz = client(a.fork ? forkUrl(a.fork) : HORIZEN_RPC), base = client(a["base-rpc"] ?? BASE_RPC, false);
+  if (a.fork && !/anvil/i.test(await hz.request({ method: "web3_clientVersion" }))) throw new Error("--fork needs a local Anvil");
   const [hzHead, baseHead] = await Promise.all([hz.getBlockNumber(), base.getBlockNumber()]);
   if (await hz.getChainId() !== 26514 || await base.getChainId() !== 8453) throw new Error("wrong chains");
   const failed = [];
@@ -311,10 +322,12 @@ export async function triggersOnTheEndpoint(c, head) {
 async function freeze(a) { return upgrade(a, false); }
 async function thaw(a) { return upgrade(a, true); }
 
+/** A fork's URL, refused unless it is a loopback address. */
+const forkUrl = (url) => { if (!["127.0.0.1", "localhost", "[::1]"].includes(new URL(url).hostname)) throw new Error("--fork takes a loopback URL"); return url; };
+
 async function upgrade(a, thawing) {
   if (a.fork && a["broadcast-mainnet"]) throw new Error("--fork or --broadcast-mainnet, not both");
-  if (a.fork && !["127.0.0.1", "localhost", "[::1]"].includes(new URL(a.fork).hostname)) throw new Error("--fork takes a loopback URL");
-  const c = client(a.fork ?? HORIZEN_RPC);
+  const c = client(a.fork ? forkUrl(a.fork) : HORIZEN_RPC);
   if (await c.getChainId() !== 26514) throw new Error("the node is not Horizen mainnet 26514");
   if (a.fork && !/anvil/i.test(await c.request({ method: "web3_clientVersion" }))) throw new Error("--fork needs a local Anvil");
   const mode = a.fork ? `FORK ${a.fork} (Anvil, deployer impersonated)` : a["broadcast-mainnet"] ? "Horizen mainnet: BROADCAST" : "Horizen mainnet: DRY RUN, nothing is sent";
@@ -387,7 +400,7 @@ async function upgrade(a, thawing) {
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   const { values: a, positionals: [command] } = parseArgs({ allowPositionals: true, options: { fork: { type: "string" }, "broadcast-mainnet": { type: "boolean" },
-    trigger: { type: "string" }, implementation: { type: "string" }, new: { type: "string" }, "base-rpc": { type: "string" } } });
+    trigger: { type: "string" }, implementation: { type: "string" }, new: { type: "string" }, "base-rpc": { type: "string" }, old: { type: "string" } } });
   const run = { facts, freeze, thaw }[command];
   if (!run) { console.error("usage: cutover.mjs facts | freeze | thaw (see the header)"); process.exit(2); }
   await run(a).catch((e) => { console.error(`cutover: ${e.shortMessage ?? e.message}`); process.exit(1); });

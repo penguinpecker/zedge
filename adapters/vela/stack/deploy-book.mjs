@@ -7,7 +7,8 @@
 //
 //   node adapters/vela/stack/deploy-book.mjs --fork http://127.0.0.1:PORT --resolver 0x… [--deposits-from N] [--wait]
 //     a fork with its own Vela contracts and house key adds --endpoint 0x… --house 0x… --evidence DIR (fork only);
-//     --wait only if a manager serves the fork: the completion and the first syncs then run as on mainnet
+//     --wait only if a manager serves the fork: the completion and the first syncs then run as on mainnet;
+//     --old APP:TRIGGER:BLOCK names the fork's stand-in for the old application (cutover.mjs), --railway-project runs the artifact check
 //   node adapters/vela/stack/deploy-book.mjs --broadcast-mainnet --resolver 0x… --deposits-from N --railway-project ID
 //     (ONLY after the owner's go)
 //
@@ -28,7 +29,7 @@ import { parseArgs } from "node:util";
 import { padHex, parseAbi, toHex } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { ABI, KEEPER_VELA, MANAGER, OLD, RAILWAY, RELAYER, SUB, appRecords, artifact, blobInPlace, chooseDepositsFrom, client as reader, codeIs, depositsFromProblem, eventSpec, newest,
-  othersCrediting, provenDepositsFrom, resolverProblem, triggersOnTheEndpoint, words } from "./cutover.mjs";
+  oldOf, othersCrediting, provenDepositsFrom, resolverProblem, triggersOnTheEndpoint, words } from "./cutover.mjs";
 import { engineConfigJson } from "../../../scripts/write-orderbook-manifest.mjs";
 import { connectVela } from "../../../services/keeper/vela.mjs";
 
@@ -61,11 +62,11 @@ const CHAINLINK = { feedId: "0x00039d9e45394f473ab1f050a1b963e6b05351e52d71e5075
 
 const { values: a } = parseArgs({ options: { fork: { type: "string" }, "broadcast-mainnet": { type: "boolean" }, endpoint: { type: "string" }, house: { type: "string" },
   evidence: { type: "string" }, resolver: { type: "string" }, "deposits-from": { type: "string" }, rules: { type: "string" }, "event-start": { type: "string" },
-  wait: { type: "boolean" }, blobs: { type: "string" }, "railway-project": { type: "string" } } });
+  wait: { type: "boolean" }, blobs: { type: "string" }, "railway-project": { type: "string" }, old: { type: "string" } } });
 function die(m) { console.error(`deploy-book: ${m}`); process.exit(1); }
 const lower = (x) => String(x).toLowerCase();
 // A fork rehearsal may run its own Vela contracts and house key (the live endpoint's manager is not ours): fork only.
-if (!a.fork && (a.endpoint || a.house || a.evidence)) die("--endpoint, --house and --evidence are for --fork only");
+if (!a.fork && (a.endpoint || a.house || a.evidence || a.old)) die("--endpoint, --house, --evidence and --old are for --fork only");
 const ENDPOINT = lower(a.endpoint ?? "0x0a2703d21b27757fdf27ab807eae9820788010f3");
 const HOUSE = lower(a.house ?? "0xac8dfcbfbb5907634fe2bcea58e59e4c55441ab5");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -113,7 +114,7 @@ check(`the trigger implementation ${impl} is this source's BookClockTrigger`, aw
 passOrDie();
 
 // ---- depositsFrom = N: no inbox index at or below it is ever credited here (cutover.mjs; the old application keeps those)
-const proven = await provenDepositsFrom(pub).catch((e) => e);
+const proven = await provenDepositsFrom(pub, oldOf(a)).catch((e) => e);
 if (proven instanceof Error) console.log(`  depositsFrom is not proven: ${proven.message}`);
 let N;
 try { N = chooseDepositsFrom({ fork: Boolean(fork), given: a["deposits-from"] === undefined ? undefined : BigInt(a["deposits-from"]), proven }); } catch (e) { die(e.message); }
@@ -208,7 +209,8 @@ check("trigger: proxy to the implementation, owner the deployer, our endpoint, t
 passOrDie();
 
 // ---- the guest must already be in the manager's artifact store (runbook step 1): without it the request fails and is wasted
-if (!fork && !ck.steps[k]?.gasUsed) {
+// (a rehearsal passes --railway-project to run the same check against its own manager)
+if ((!fork || a["railway-project"]) && !ck.steps[k]?.gasUsed) {
   check(`guest ${WASM_SHA256} in the Railway manager's artifact store (${a.blobs ?? RAILWAY.blobs})`, blobInPlace(WASM_SHA256, { project: a["railway-project"], blobs: a.blobs }));
   passOrDie();
 } else if (fork) console.log("  (fork: no artifact check; a fork's own manager is given the guest by its own stack)");
