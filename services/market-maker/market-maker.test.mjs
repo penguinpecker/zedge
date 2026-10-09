@@ -135,7 +135,7 @@ test("plan: drift pulls one quote by ID, the one in the trader's favour first, b
   assert.deepEqual(plan(filled, round, 9_000, 0.54, S), { op: "cancel_order", orderId: id(four, "sell", "up") }, "the adverse cancel is the first command");
   assert.deepEqual(run(filled, 9_000, 0.54, S, { optional: false }).sent,
     ["cancel sell up", "cancel buy down", "sell up 57¢ 10 until 9060", "buy up 51¢ 10 until 9030", "buy down 43¢ 10 until 9045"]);
-  // The two quotes drifted the house's way only fail users' one-click orders: optional, and only when nothing is missing.
+  // The two quotes drifted the house's way only overcharge users: optional, after every placeable side is quoted.
   const { v } = run(four, 9_000, 0.54, S, { optional: false });
   assert.equal(plan(v, round, 9_000, 0.54, S, { optional: false }), null);
   assert.deepEqual(plan(v, round, 9_021, 0.54, S), { op: "cancel_order", orderId: id(four, "sell", "down") }, "optional: the Down ask, 4 cents above the fresh ask");
@@ -145,10 +145,11 @@ test("plan: drift pulls one quote by ID, the one in the trader's favour first, b
   assert.equal(plan(high, round, 9_000, 0.97, { ...S, halfSpreadCents: 5 }), null);
 });
 
-test("plan: a missing side the stake cap skips still blocks optional requotes (no second empty side)", () => {
+test("plan: sides the house cannot place (here the stake cap skips both bids) do not block an optional requote", () => {
   const tight = { ...S, maxStakeUsdc: 15 };
   const { v, sent } = run(run(apply(funded(200), mint), 9_000, 0.5, tight).v, 9_000, 0.54, tight);
-  assert.deepEqual(sent, ["cancel sell up", "sell up 57¢ 10 until 9060"], "the Down ask, drifted the house's way, stays: both bids are missing");
+  assert.deepEqual(sent, ["cancel sell up", "sell up 57¢ 10 until 9060", "cancel sell down", "sell down 49¢ 10 until 9075"],
+    "the Down ask, drifted the house's way, is pulled and re-placed at the fresh price although both bids are missing");
   assert.equal(v.orders.length, 2);
 });
 

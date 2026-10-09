@@ -112,8 +112,10 @@ const SIDES = [["up", "sell"], ["down", "sell"], ["up", "buy"], ["down", "buy"]]
  *   ask, a bid above the fresh bid);
  *   the first missing quote of askUp, askDown, bidUp, bidDown (minting sets first for an ask), skipped if the total worst
  *   stake would pass maxStakeUsdc; or a cancel_order of the house's own quote that the new one would cross;
- *   only if optional, no side is missing and no rotation falls due within one cycle: a cancel_order of the quote
- *   drifted furthest the house's way (users pay above the fresh price for it).
+ *   only if optional and no rotation falls due within one cycle: a cancel_order of the quote drifted furthest the house's
+ *   way (users pay above the fresh price for it). Every side still missing here is one the house cannot place now (cash,
+ *   the stake cap, a self-cross about to rotate); with a short-cash house its bids always are, and that must not leave an
+ *   ask cents above the fresh price for a whole quote lifetime.
  * A cancel never targets an order expiring within SOON = max(12, 2 cycles): it would land after the order is gone and be
  * refused, and since a refusal uses no nonce, the next command would be refused too. That order rotates instead.
  */
@@ -150,6 +152,6 @@ export function plan(view, round, now, p, s, { cycle = 6, optional = true } = {}
     if (worstStake(apply(mint ? apply(v, mint) : v, order)) > s.maxStakeUsdc * SHARE) continue; // a mint itself changes no stake
     return mint ?? order;
   }
-  if (!optional || missing.length || mine.some((o) => o.expiry - LEAD <= now + cycle)) return null;
+  if (!optional || mine.some((o) => o.expiry - LEAD <= now + cycle)) return null;
   return pull(-1);
 }
