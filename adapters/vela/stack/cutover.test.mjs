@@ -2,7 +2,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import { keccak256, stringToBytes } from "viem";
-import { EVENT, INBOX, RAILWAY, blobInPlace, chooseDepositsFrom, codeName, eventSpec, othersCrediting, proveDepositsFrom, resolverProblem, runtimeOf, thawProblems } from "./cutover.mjs";
+import { EVENT, INBOX, RAILWAY, blobInPlace, chooseDepositsFrom, codeName, depositsFromProblem, eventSpec, othersCrediting, proveDepositsFrom, resolverProblem, runtimeOf, thawProblems } from "./cutover.mjs";
 
 test("runtimeOf fills every immutable slot with the contract's own address", () => {
   const art = { deployedBytecode: { object: `0x60${"00".repeat(32)}61${"00".repeat(32)}5b`, immutableReferences: { 7: [{ start: 1, length: 32 }, { start: 34, length: 32 }] } } };
@@ -77,6 +77,15 @@ test("the guest is in the manager's artifact store only if sha256sum prints its 
   assert.equal(blobInPlace(sha, { project, run: run(`${sha}  ${path}\n`, 1) }), false, "a failed command");
   assert.equal(blobInPlace(sha, { project, blobs: "/other", run: run(`${sha}  /other/${sha}.wasm\n`) }), true, "a confirmed SHARED_DATA_FOLDER elsewhere");
   assert.throws(() => blobInPlace(sha, { run: run(`${sha}  ${path}\n`) }), /--railway-project/);
+});
+
+test("the new application's first ticks show depositsFrom at work: nothing at or below N credited, the next index after its credits", () => {
+  const c = (...xs) => xs.map((index) => ({ index: BigInt(index) }));
+  assert.equal(depositsFromProblem(8n, 9n, []), null);
+  assert.equal(depositsFromProblem(8n, 11n, c(10, 9)), null, "deposits that reached the inbox after the freeze, credited by the first tick");
+  assert.match(depositsFromProblem(8n, 9n, c(1, 2, 3, 4, 5, 6, 7, 8)), /credited inbox index 1, at or below depositsFrom 8/, "a replay from index 1 still asks for N + 1");
+  assert.match(depositsFromProblem(8n, 10n, []), /no credit record for 9/);
+  assert.match(depositsFromProblem(8n, 1n, []), /asks for deposit 1, not one above depositsFrom 8/);
 });
 
 test("another application on the inbox credits deposits unless its trigger is withdraw-only (deploy-book refuses to add a second)", () => {

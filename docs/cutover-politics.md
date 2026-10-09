@@ -65,6 +65,7 @@ None of these steps sends anything.
    - The lean e2e `up.sh` still calls the old path `build/mainnet-recipe/deploy-book.mjs`. Point it at `adapters/vela/stack/deploy-book.mjs` and add `--resolver` and `--deposits-from`.
 4. **Wallets** (OWNER, in his own Terminal; never printed, never pasted into a chat).
    - The resolver wallet: a new key, file mode 0600, kept offline with a backup. Only its address is used here, and it must never send a transaction (`deploy-book.mjs` refuses an address with any Horizen transaction).
+   - Check the address before step 5: sign a test result with the resolver-signing tool (resolver lane) and check that it recovers to the address you will pass as `--resolver`. A wrong address can never settle the event; it would only void on 31 Jan 2027.
    - The event house wallet (event house lane).
 5. **Gas** (OWNER). Top up to at least a day of runway at today's burn: house about 0.0074 and operator about 0.0064 ETH a day on Horizen, plus keeper-vela and the relayer. The deployer needs about 0.00002 ETH on Horizen for the whole cutover. Measured on a fork:
 
@@ -171,7 +172,7 @@ It refuses to send in any of these cases:
 - the endpoint, the trigger and the registry;
 - `guest … in the Railway manager's artifact store`;
 - `application … deployed: its state root is set`, after `DeployRequestCompleted` with status 0;
-- `the new application asks for deposits from <N + 1>`;
+- `depositsFrom <N> holds: no inbox index at or below it is credited, and the deposit asked for next (…) follows the credits above it`;
 - `BTC rounds T1 and T2 … exist in the new application`.
 
 Write down the application ID, the trigger, the deploy transaction and the block (all printed; also in `evidence/vela-book-politics/checkpoint.json`).

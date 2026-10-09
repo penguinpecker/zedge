@@ -92,6 +92,17 @@ export function chooseDepositsFrom({ fork, given, proven }) {
   return proven;
 }
 
+/** Why the new application's first ticks do not show depositsFrom = n at work, or null. A guest reading the inbox from index 1
+ * would credit indexes at or below n, and at n = 8 (one payload's worth) it would still ask for n + 1 next, so the deposit asked
+ * for next is not enough: no credit record may be at or below n, and the next index must follow the ones above n it credited. */
+export function depositsFromProblem(n, next, credits) {
+  const low = credits.find((c) => c.index <= n);
+  if (low) return `it credited inbox index ${low.index}, at or below depositsFrom ${n}`;
+  const seen = new Set(credits.map((c) => c.index));
+  for (let i = n + 1n; i < next; i++) if (!seen.has(i)) return `it asks for deposit ${next} but has no credit record for ${i}`;
+  return next > n ? null : `it asks for deposit ${next}, not one above depositsFrom ${n}`;
+}
+
 /** The `event` deploy parameter: the Keccak-256 of the exact rules text (the question hash) and the owner's times, with the guest's
  * key names in its key order (EventTerms), since the guest refuses constructor parameters that do not re-encode byte for byte. */
 export function eventSpec(rules, start) {

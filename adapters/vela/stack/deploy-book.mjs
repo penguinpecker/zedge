@@ -27,8 +27,8 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { padHex, parseAbi, toHex } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
-import { ABI, KEEPER_VELA, MANAGER, OLD, RAILWAY, RELAYER, SUB, artifact, blobInPlace, chooseDepositsFrom, client as reader, codeIs, eventSpec, newest, othersCrediting, provenDepositsFrom,
-  resolverProblem, triggersOnTheEndpoint, words } from "./cutover.mjs";
+import { ABI, KEEPER_VELA, MANAGER, OLD, RAILWAY, RELAYER, SUB, appRecords, artifact, blobInPlace, chooseDepositsFrom, client as reader, codeIs, depositsFromProblem, eventSpec, newest,
+  othersCrediting, provenDepositsFrom, resolverProblem, triggersOnTheEndpoint, words } from "./cutover.mjs";
 import { engineConfigJson } from "../../../scripts/write-orderbook-manifest.mjs";
 import { connectVela } from "../../../services/keeper/vela.mjs";
 
@@ -267,7 +267,7 @@ console.log(`  next (runbook step 7): scripts/write-orderbook-manifest.mjs --dep
 
 /** A new application has no clock until a tick is applied, and rounds are only created by ticks (guest README section 8,
  * Bootstrap): the deployer registers its key with it and sends one sync, whose tick starts the clock and creates the next two
- * BTC rounds; a second sync's tick request then shows them, and the deposit index it asks for, N + 1. */
+ * BTC rounds; a second sync's tick request then shows them, and with the credit records, that nothing at or below N was credited. */
 async function firstSyncs() {
   const app = BigInt(s.applicationId);
   let sender = account;
@@ -318,7 +318,9 @@ async function firstSyncs() {
   const w = words(request.args.data), held = w.slice(5, 5 + Number(w[2] + w[3])).map((x) => padHex(toHex(x), { size: 32 }));
   const t1 = (Math.floor(clock.timestamp / 900) + 1) * 900;
   const ids = await Promise.all([t1, t1 + 900].map((t) => pub.readContract({ address: REGISTRY, abi: ABI, functionName: "roundIdFor", args: [0, 900, BigInt(t)] })));
-  check(`the new application asks for deposits from ${N + 1n}`, w[1] === N + 1n);
+  const fromProblem = depositsFromProblem(N, w[1], (await appRecords(pub, app, BigInt(s.block), await pub.getBlockNumber())).credits);
+  if (fromProblem) console.log(`    the new application's deposits: ${fromProblem}`);
+  check(`depositsFrom ${N} holds: no inbox index at or below it is credited, and the deposit asked for next (${w[1]}) follows the credits above it`, !fromProblem);
   check(`BTC rounds ${t1} and ${t1 + 900} (${new Date(t1 * 1000).toISOString()}) exist in the new application`, ids.every((id) => held.includes(id)));
   passOrDie();
   console.log("  the event round is not in the tick request (the guest never asks the trigger about it): confirm it with the event house (runbook step 10e)");
