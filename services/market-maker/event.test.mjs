@@ -8,7 +8,7 @@ import { join } from "node:path";
 import test from "node:test";
 import * as codec from "../../adapters/vela/crypto/guest.ts";
 import { deploymentEvent, eventPlan, eventPrice, kalshiYes, polymarketMid } from "./event.mjs";
-import { checkSender, eventQuotes, main, settingsFrom } from "./main.mjs";
+import { brakes, checkSender, eventQuotes, main, settingsFrom } from "./main.mjs";
 import { SHARE, apply, quotes, worstStake } from "./pricing.mjs";
 
 const book = JSON.parse(readFileSync(new URL("../../public/deployments/26514-orderbook.json", import.meta.url), "utf8"));
@@ -122,6 +122,20 @@ test("settings: the event house's own defaults and key file; its stake cap no hi
     assert.throws(() => settingsFrom(bad, "mainnet", book, true), new RegExp(Object.keys(bad)[0]), JSON.stringify(bad));
   }
   assert.equal(settingsFrom({ pollSeconds: 2 }, "mainnet", book).pollSeconds, 2, "the BTC ranges are unchanged");
+});
+
+test("brakes: a needed cancel passes them, the event house's only until 3 of its cancels are refused in a window", () => {
+  const cancel = { op: "cancel_all", roundId: round.id }, place = { op: "place_order" }, r = (refusals, cancelRefusals) => ({ refusals, cancelRefusals });
+  assert.equal(brakes(cancel, false, r(3, 2), 0, 300, true), null);
+  assert.match(brakes(cancel, false, r(3, 3), 0, 300, true), /3 cancels refused this window/, "a cancel that keeps failing waits for the next window");
+  assert.equal(brakes(cancel, false, r(5, 0), 999, 300, true), null, "place refusals and the RPC budget never hold a needed cancel");
+  assert.equal(brakes(cancel, false, r(3, 3), 999, 300), null, "the BTC house's needed cancels pass as before");
+  assert.match(brakes(cancel, true, r(3, 0), 0, 300, true), /3 refusals/, "an optional requote is no needed cancel");
+  for (const event of [false, true]) {
+    assert.equal(brakes(place, false, r(2, 0), 300, 300, event), null);
+    assert.match(brakes(place, false, r(3, 0), 0, 300, event), /3 refusals this round/);
+    assert.match(brakes(place, false, r(0, 0), 301, 300, event), /RPC budget of 300/);
+  }
 });
 
 test("senders: the BTC house only as itself, the event house never as it, and never the resolver", () => {

@@ -174,6 +174,7 @@ node --experimental-strip-types services/market-maker/main.mjs run --event --mai
 - **The cutoff.** It places nothing from cutoff − 120 (3 Nov 2026 21:58 UTC) and sends a backstop `cancel_all` from cutoff − 90. No quote outlives cutoff − 60. After the cutoff it only waits, and can be stopped. Before the event's `start` it places nothing.
 - **Stake.** The guest does not exempt it: at most 50 USDC of worst stake (the account limit). Its held shares also count toward the 200 USDC limit for all accounts together, with every user's. `maxStakeUsdc` (default 20) cannot be set above 50. With the defaults it sells about 15 shares of one side before that side's asks stop.
 - **Guards as for BTC.** The same queue and ETH guards, the same refusal and RPC brakes, the same lock and stop. The brakes count per 15 minutes instead of per round.
+  - **One difference:** needed cancels pass the brakes only until 3 of them are refused or fail in one 15-minute window. Its quotes rest for hours, so a cancel that keeps failing would otherwise go out back to back, below the ETH floor, until its wallet and the operator's ran dry. It tries again in the next window.
 - **No syncs after startup.** Its one round settles only after the cutoff, when it has nothing to quote, so the BTC house's settlement sync has no use here.
 - **Quotes for the site.** `GET /quotes` on `EVENT_HOUSE_QUOTES_PORT` (`start.sh` sets 8080). The indexer reads it as `INDEXER_EVENT_HOUSE_URL` (`ZEDGE_EVENT_HOUSE_QUOTES_URL` on Railway). The body is `null` until the first decision, then:
 
@@ -248,6 +249,7 @@ The test runs offline in under a second. It checks:
 - **Price rules:** both up, Polymarket down, Kalshi down, both down, 3 cents apart against more, and a 5-cent spread against a wider one.
 - **Quotes:** 88/93 and 7/12 at 0.905 and at Kalshi's 0.9005.
 - **Plan:** nothing before the start; the mint and four 4-hour quotes; the stake cap after repeated fills; a `cancel_all` when the price goes; the cutoff.
+- **Brakes:** a needed cancel passes them, the event house's only until 3 of its cancels are refused in a window.
 - **The `/quotes` body.**
 - **Settings, the wallet guards, and the event against the guest's vectors.**
 

@@ -66,6 +66,14 @@ const pulls = (op, optional) => !optional && (op === "cancel_all" || op === "can
  * refuses at 10): the relayer admits users up to 6 pending, and their requests must not keep stale house quotes alive.
  * An optional requote waits for an empty queue, so user trades are not queued behind it. */
 export function queueFull(queue, op, optional = false) { return queue >= (optional ? 1n : pulls(op) ? 9n : 5n); }
+/** Why the round's brakes hold command c, or null: MAX_REFUSALS refusals, or the RPC budget spent. A needed cancel passes them,
+ * the event house's only until MAX_REFUSALS of its cancels are refused in one 15-minute window: its quotes rest for hours, and
+ * a cancel that keeps failing would go out back to back, below the ETH floor, until its wallet and the operator's ran dry. */
+export function brakes(c, optional, r, rpcSpent, maxRpc, event = false) {
+  if (pulls(c.op, optional)) return event && r.cancelRefusals >= MAX_REFUSALS ? `${r.cancelRefusals} cancels refused this window; trying again in the next` : null;
+  if (r.refusals >= MAX_REFUSALS) return `${r.refusals} refusals this round; no new quotes until the next`;
+  return rpcSpent > maxRpc ? `RPC budget of ${maxRpc} calls spent this round` : null;
+}
 
 /** The /quotes body (README "Quotes for the site"): per outcome, the lowest resting sell (ask) and the highest resting buy (bid) of
  * `view` in round r ({ id, start }) at chain time `now`, as { cents, shares }, or null where none rests; `at` in ms. An order
@@ -521,20 +529,17 @@ export async function main(argv) {
     log("stopped", summary(view));
     return true;
   }
-  /** Sends command c (under --dry-run, applies it to the simulated view) unless the round's brakes hold it; a needed cancel
-   * passes them. `idle` is why there is nothing to send, or null. Returns false: not stopped. */
+  /** Sends command c (under --dry-run, applies it to the simulated view) unless the round's brakes hold it (brakes()).
+   * `idle` is why there is nothing to send, or null. Returns false: not stopped. */
   async function act(c, optional, idle, now, p) {
-    const held = !c ? idle
-      : pulls(c.op, optional) ? null
-      : r.refusals >= MAX_REFUSALS ? `${r.refusals} refusals this round; no new quotes until the next`
-      : rpcCalls - r.calls0 > s.maxRpcPerRound ? `RPC budget of ${s.maxRpcPerRound} calls spent this round` : null;
+    const held = !c ? idle : brakes(c, optional, r, rpcCalls - r.calls0, s.maxRpcPerRound, event);
     if (!c || held) { if (held) note(held); await nap(); return false; }
     if (dry) { log("would send", { ...c, p, optional }); view = apply(expire(view, now), { ...c, id: `dry:${++n}` }); if (optional) lastOptional = Date.now(); await nap(); return false; }
     if (!(await clear(c, optional))) { await nap(); return false; }
     if (optional) lastOptional = Date.now();
     noted = "";
     r.requests++;
-    if (refused(await send(c))) r.refusals++;
+    if (refused(await send(c))) { r.refusals++; if (event && pulls(c.op, optional)) r.cancelRefusals++; }
     return false;
   }
   /** One decision. Returns true once stopped. */
@@ -586,7 +591,7 @@ export async function main(argv) {
     if (r?.window !== window) {
       const blocked = await deploymentProblem();
       if (r) log("window done", { start: r.window, requests: r.requests, refusals: r.refusals, rpcCalls: rpcCalls - r.calls0, ethBefore: r.eth0, ethAfter: r.eth, cycle: +cycle.toFixed(1) });
-      r = { id: ev.id, start: ev.terms.start, cutoff: ev.terms.cutoff, window, blocked, requests: 0, refusals: 0, calls0: rpcCalls };
+      r = { id: ev.id, start: ev.terms.start, cutoff: ev.terms.cutoff, window, blocked, requests: 0, refusals: 0, cancelRefusals: 0, calls0: rpcCalls };
     }
     decided = { now, at: Date.now() };
     if (stopping) return halt(now);
