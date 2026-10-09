@@ -356,7 +356,11 @@ export async function main(argv) {
   let lastCompletionBlock = -1, cycle = 6; // cycle: seconds from submitting a request to its completion, a moving average
   const parse = (l) => { try { return endpoint.interface.parseLog(l); } catch { return null; } };
   async function request(label, type, payload, token = ethers.ZeroAddress, assetAmount = 0n) {
-    const t0 = Date.now(), sent = await client.submitRequestAndWaitForRequestId(0, APP, type, payload, token, assetAmount, fee);
+    // The gas the node estimates plus 20 %, as the keeper and the relayer send: a request that lands in a block after another one
+    // costs more than estimated, and the SDK's exact estimate then runs out of gas (seen on the fork rehearsal, two houses in one block).
+    const args = [0, APP, type, payload, token, assetAmount, fee], value = token === ethers.ZeroAddress ? assetAmount + fee : fee;
+    const gasLimit = (await client.processorEndpoint.submitRequest.estimateGas(...args, { value })) * 6n / 5n;
+    const t0 = Date.now(), sent = await client.waitForRequestId(await client.processorEndpoint.submitRequest(...args, { value, gasLimit }), "RequestSubmitted");
     const from = sent.transactionReceipt.blockNumber;
     log("submitted", { label, tx: sent.transactionReceipt.hash, requestId: sent.requestId });
     for (const end = Date.now() + 15 * 60_000; Date.now() < end;) {
