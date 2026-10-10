@@ -19,6 +19,10 @@ export function clockPhase(phase: number, times: RoundTimes, now: number): numbe
 
 /** Seconds before the registry's cutoff when the ticket stops taking orders (an order needs that long to reach the book). */
 export const ORDER_MARGIN = 15;
+/** Round #1 is the first 15-minute slot after the round registry went live on Horizen (block 27958006, 2026-10-07 06:41:29 UTC),
+ * so a round's number is the same on every application that followed it. Rounds before that have no number. */
+export const ROUND_ONE = 1_791_355_500;
+export const roundNumber = (start: number, duration: number): number | null => start >= ROUND_ONE && Number.isInteger((start - ROUND_ONE) / duration) ? (start - ROUND_ONE) / duration + 1 : null;
 
 /** The countdown cell: the time to the start of a round not begun, else the time to its end, with the close of orders (the cutoff
  * less ORDER_MARGIN, when the ticket stops) called out in the 30 s before it and after it. `progress` runs from 0 to 1 across the round. */

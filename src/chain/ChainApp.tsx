@@ -9,7 +9,7 @@ import { BASE_RPC, DEFAULT_NETWORK, isNetworkId, NETWORKS, parseAtomicAmount, ty
 import { useChainWallet, WalletBoundary, type ChainWallet } from "./privy.tsx";
 import { fairUp, realizedSigma, stakeRoom } from "./fair.ts";
 import { chainClient, checkDeployment, checkOrderbook, loadManifest, loadOrderbook, observationPrice, exactObservationPrice, PHASES, priceCaptions, readChain, readRound, type ChainSnapshot, type RoundRead, type RoundState } from "./gateway.ts";
-import { clockPhase, countdownLine, eventHouseFor, houseFor, ORDER_MARGIN, roundResults, sidePrice, tradable, versus, type RoundResult, type RoundTimes } from "./market-view.ts";
+import { clockPhase, countdownLine, eventHouseFor, houseFor, ORDER_MARGIN, roundResults, sidePrice, tradable, versus, type RoundResult, type RoundTimes, roundNumber } from "./market-view.ts";
 import { confirmSettle, liveNow, readApi, type ApiRound, type House, type Live } from "./read-api.ts";
 import { createPriceFeed } from "./price-feed.ts";
 import { engineRound, LOT, OPERATOR_KEYS_CHANGED, type OrderbookManifest, type VerifiedOrderbook } from "./orderbook-manifest.ts";
@@ -550,7 +550,7 @@ function ChainMarkets() {
         <div className="workspace-label"><div><span>CRYPTO</span><CaretRight size={11} /><span>{market.asset}</span><CaretRight size={11} /><strong>{market.duration / 60} MIN UP / DOWN</strong></div></div>
         <div className="chain-workspace">
           <div className="chain-left-column">
-            <section id="chain-round" tabIndex={-1} className="chain-panel chain-market-detail" aria-label="Market and price chart"><div className="chain-panel-heading"><div><span className="eyebrow">{market.name} · {market.duration / 60} minute round</span><h2>Will {market.name} finish higher?</h2></div><span className="chain-pill">{phase}</span></div>
+            <section id="chain-round" tabIndex={-1} className="chain-panel chain-market-detail" aria-label="Market and price chart"><div className="chain-panel-heading"><div><span className="eyebrow">{market.name} · {market.duration / 60} minute round{roundNumber(times.start, market.duration) !== null && ` · #${roundNumber(times.start, market.duration)}`}</span><h2>Will {market.name} finish higher?</h2></div><span className="chain-pill">{phase}</span></div>
               <div className="chain-round-nav"><button aria-label="Previous round" disabled={!verified || roundOffset <= MIN_OFFSET} onClick={() => setRoundOffset((value) => value - 1)}><CaretLeft /></button><span>{utc(times.start).slice(0, 5)} — {utc(times.end).slice(0, 5)} UTC{offUtc && <small>{viewer(times.start)} — {viewer(times.end, { timeZoneName: "short" })}</small>}</span><button aria-label="Next round" disabled={!verified || roundOffset >= 1} onClick={() => setRoundOffset((value) => value + 1)}><CaretRight /></button></div>
               <div className="chain-strip">
                 <div><span>Price to beat</span><strong title={openingExact ? `$${openingExact}` : undefined}>{openingPrice ?? "—"}</strong><small>{captions.opening}</small></div>

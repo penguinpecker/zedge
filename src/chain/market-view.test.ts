@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { askCents, clockPhase, countdownLine, HOUSE_STALE_MS, houseFor, ORDER_MARGIN, roundResults, sidePrice, tradable, versus } from "./market-view.ts";
+import { askCents, clockPhase, countdownLine, HOUSE_STALE_MS, houseFor, ORDER_MARGIN, roundResults, sidePrice, tradable, versus, ROUND_ONE, roundNumber } from "./market-view.ts";
 import { sharesFor } from "./private/client.ts";
 import type { ApiRound, House, SettleRef } from "./read-api.ts";
 
@@ -97,4 +97,11 @@ test("with the house's quotes for the round the ticket trades at them: the ask i
   assert.equal(houseFor(house, 1800, 1_000_000), null, "another round");
   assert.equal(houseFor(house, null, 1_000_000), null, "no round open");
   assert.equal(houseFor(null, 900, 1_000_000), null);
+});
+
+test("round numbers count 15-minute slots from the registry's first slot; earlier or off-grid starts have none", () => {
+  assert.equal(roundNumber(ROUND_ONE, 900), 1);
+  assert.equal(roundNumber(1_791_652_500, 900), 331); // 2026-10-10 17:15 UTC
+  assert.equal(roundNumber(ROUND_ONE - 900, 900), null);
+  assert.equal(roundNumber(ROUND_ONE + 450, 900), null);
 });
