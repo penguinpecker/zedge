@@ -1169,3 +1169,21 @@ The switch-over day — 2026-10-10
   (2,340 B of calldata, the figure recorded on 10-07), 133 B for a key registration; every `UserEvent` receipt is
   8,220 B of ciphertext (8,288 B as ABI-encoded event data). A regex over raw hex for `{"` flags random ciphertext;
   decode the payload and test whether it parses as text instead.
+
+Source verification of the whole stack — 2026-10-11
+- Horizen's Blockscout takes `forge verify-contract --verifier blockscout --verifier-url https://explorer.horizen.io/api`
+  with no key, from the Foundry project that built the contract (the trigger project's remappings reach OpenZeppelin
+  through `allow_paths`). "Pass - Verified" lands in seconds; its v2 API still classes Foundry builds as partial.
+- A contract compiled by someone else's Hardhat (Vela's deployer, viaIR, runs 0) verifies FULLY through Blockscout's
+  v2 endpoint `/api/v2/smart-contracts/<address>/verification/via/standard-input` with the build-info `input` object
+  as the file and `autodetect_constructor_args=true`. Check the deployed code against every artifact first: the live
+  authenticator is `NoAttestationTeeAuthenticator`, not `TeeAuthenticator` (bytes-exact, 3,697 B vs 11,646 B).
+- Equal length with a different hash is immutables, not a wrong source (UUPS `__self`); a different length is a
+  different contract.
+- Proxy constructor args come from the creation transaction: input minus the artifact's creation bytecode prefix.
+  Base has no keyless creation lookup; `alchemy_getAssetTransfers` from the deployer with `to == null` finds them.
+- Basescan (Etherscan v2) needs an API key for both status and submission; Sourcify does not (`--verifier sourcify`,
+  exact creation and runtime match for the vault). Blockscout imports Sourcify matches; Basescan does not.
+- zsh does not word-split `$pair` in `set -- $pair`: the whole string becomes one argument ("invalid string length").
+- A per-wallet deposits-minus-payouts table over the vault's events decomposes an application's residual balance
+  without decrypting anything; it sums to the residual exactly (0.024290 here) and shows whose money it is.

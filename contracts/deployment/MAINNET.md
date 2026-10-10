@@ -99,6 +99,24 @@ The same flow can be rehearsed against a local fork without any key: start `anvi
 
 The identical address on Base and Horizen is intentional: the same account used the same creation nonce on different chains. The two contracts have different bytecode and roles. Only the Horizen one (the registry) is retired; the Base contract at that address is the live verifier adapter.
 
+### Source verification of the custody, book and Vela contracts (2026-10-11)
+
+Horizen through its Blockscout API without credentials (`forge verify-contract --verifier blockscout`, and the v2 standard-input endpoint for the Vela contracts with the Vela deployer's own compiler input: 0.8.30, viaIR, optimizer runs 0); Base through Sourcify (no key) and then Basescan with the owner's Etherscan API key (`forge verify-contract --verifier etherscan`).
+
+| Contract | Chain | Address / verified source | Creation transaction | Result |
+| --- | --- | --- | --- | --- |
+| HorizenDepositInbox implementation | Horizen 26514 | [0xfb692fb6346f91edfd3f7903e0d36b7be05d7cd7](https://explorer.horizen.io/address/0xfb692fb6346f91edfd3f7903e0d36b7be05d7cd7?tab=contract) | [0xbaaf988c…22eec](https://explorer.horizen.io/tx/0xbaaf988cfce0a6cd96e9d14cc0351100ff523457af70fa9852f4c01708222eec) | Pass - Verified |
+| BookClockTrigger implementation | Horizen 26514 | [0x6f8500186ccb07e3c14ff7bbf1c9b5c05b8ca9a8](https://explorer.horizen.io/address/0x6f8500186ccb07e3c14ff7bbf1c9b5c05b8ca9a8?tab=contract) | [0xb2919007…a979c](https://explorer.horizen.io/tx/0xb291900740edd697bc58b9840632dc31440f6e812917c3f9d9fed660667a979c) | Pass - Verified |
+| WithdrawOnlyBookClockTrigger implementation | Horizen 26514 | [0x2bb67a7177ef9351df8a0ce61b4194d34f06da3d](https://explorer.horizen.io/address/0x2bb67a7177ef9351df8a0ce61b4194d34f06da3d?tab=contract) | [0xb165b1db…c05bb](https://explorer.horizen.io/tx/0xb165b1dbc0ae859e14edffcaa28a04d8b46504ef0eecc1e41ac816653afc05bb) | Pass - Verified |
+| ERC1967Proxy = BookClockTrigger (application 3714533467436544392) | Horizen 26514 | [0xe8122afba04f763d3f0ab43304e8be335efc0e7c](https://explorer.horizen.io/address/0xe8122afba04f763d3f0ab43304e8be335efc0e7c?tab=contract) | [0x9765a460…301dc](https://explorer.horizen.io/tx/0x9765a4604bb74ad9fa3a26db87b1b3a5a535b7bc3a00c8dc8f023990e4f301dc) | verified |
+| ProcessorEndpoint (Vela, self-hosted) | Horizen 26514 | [0x0a2703d21b27757fdf27ab807eae9820788010f3](https://explorer.horizen.io/address/0x0a2703d21b27757fdf27ab807eae9820788010f3?tab=contract) | [0x97cbf496…83a40](https://explorer.horizen.io/tx/0x97cbf496172e235046faeb2471543133704621ac7a45a86ceac4459b78783a40) | fully verified |
+| NoAttestationTeeAuthenticator (Vela, self-hosted) | Horizen 26514 | [0x82a388c040d5b9e557364cc891094470ca090ecc](https://explorer.horizen.io/address/0x82a388c040d5b9e557364cc891094470ca090ecc?tab=contract) | [0xa8f85cb0…6700e](https://explorer.horizen.io/tx/0xa8f85cb01a17078d3d47dffa7279c2f632967b83ee7b2d95aad1708c78c6700e) | fully verified |
+| TokenAllowlist (Vela, self-hosted) | Horizen 26514 | [0xc122da1bbe2a6c45062cda8ee2c5bf16c6cafe73](https://explorer.horizen.io/address/0xc122da1bbe2a6c45062cda8ee2c5bf16c6cafe73?tab=contract) | [0x5cf10552…0fc4f](https://explorer.horizen.io/tx/0x5cf10552d2ed4b4567dbb03c5557be651a203d84d87826afe2ce81d13450fc4f) | fully verified |
+| BaseCustodyVault implementation | Base 8453 | [0xfe5298605390519a9fc0264eefa90c395b9b83a6](https://basescan.org/address/0xfe5298605390519a9fc0264eefa90c395b9b83a6#code) | [0x8cc302ba…62ef1](https://basescan.org/tx/0x8cc302ba75f9c03db5f1c392113675bada90399ed361e169ca43ef2d3df62ef1) | Basescan Pass - Verified; Sourcify exact match |
+| ERC1967Proxy = BaseCustodyVault | Base 8453 | [0xf07b81d96b572007c8ea500db1f8095cf0c73d29](https://basescan.org/address/0xf07b81d96b572007c8ea500db1f8095cf0c73d29#code) | [0x1a5a1b87…0e3c9](https://basescan.org/tx/0x1a5a1b87c0e605b14f1fd6a4c166c34281a9eae5b98b6c561a9d8fdc5bf0e3c9) | Basescan Pass - Verified; Sourcify exact match |
+
+The deployed authenticator is Vela's `NoAttestationTeeAuthenticator` (bytes-identical to the deployer's artifact), not `TeeAuthenticator`: the self-hosted operator is not attested. The inbox proxy `0x7003…441d` and the old trigger proxy `0x9ca4…b30d` were already verified as `ERC1967Proxy`.
+
 All four creation receipts succeeded. The live checker compared creation inputs, sender/nonces, deployed runtime hashes, version markers, immutable getters, route and rules, and current upstream bindings. These checks establish consistency with the reviewed deployment artifacts at the recorded blocks; they are not an independent security audit or a finality guarantee.
 
 Build settings: Solidity `0.8.30`, EVM `paris`, optimizer enabled with `200` runs, metadata bytecode hash `none`.
