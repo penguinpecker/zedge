@@ -1139,3 +1139,33 @@ Adding an event market without stopping BTC — 2026-10-09/10
   there; whether it resolves is only visible at the next deploy (the start script prints each secret's byte count).
   `railway variable set --stdin KEY < file` keeps a secret off the command line. `railway add --service NAME
   --variables K=V` creates an empty service without deploying it. `railway login` refuses non-interactive shells.
+
+The switch-over day — 2026-10-10
+- A public RPC's rate limit is a function of the scan, not the day: ten 1,000-block getLogs windows at a time hit
+  thirdweb's public tier within seconds, and the keyed tier shares one 10 req/s budget with the live keeper, payout
+  signer and site, so using it from a script starves them. One-off operator scripts read through a gateway nobody
+  live depends on (Caldera's public one here), with a file override for the next change.
+- Pass a request's proof of work to the next step, not its rate: `facts` needs a tick asked after the freeze, and the
+  keeper's sync at boundary + 45 s is the one that lands it; polling every 40 s before that only spent RPC budget.
+- `railway ssh -p PROJECT -s SERVICE` still needs a linked directory as cwd. A check that spawns it from the repo
+  root fails with "No linked project found" and reads as "the guest is missing"; run the tool from the linked dir.
+- `railway up --ci` exits 1 with "reqwest error ... operation timed out" after the upload has succeeded: the build
+  log stream timed out, the deployment exists. Read `railway deployment list` before uploading again, or two
+  deployments race (the older is removed, but it costs a build and a container start).
+- A new Railway service builds with railpack until `dockerfilePath` is set on the service instance (API
+  `serviceInstanceUpdate`, the dashboard's Build settings). A `railway.json` in the uploaded directory and a
+  `RAILWAY_DOCKERFILE_PATH` variable were both ignored; the result was a Caddy static site under the service's
+  name, harmless only because the start command never ran. Check the build driver line of the first build.
+- CLI 4.43 has `variable set` but no `variable delete`; removing a variable is the API's `variableDelete`. The CLI's
+  token is `user.accessToken` in `~/.railway/config.json`: read it in-process, never print it.
+- Right after a mined transaction, Alchemy's Base endpoint answered the next send (same account, next nonce) with
+  "replacement transaction underpriced" twice; `mainnet.base.org` with `nonce = getTransactionCount(latest)` took it
+  at once. A send helper that reruns must skip legs already landed: the ETH leg went out twice (0.00006 instead of
+  0.00003) because the script re-sent it before failing on the USDC leg again.
+- Size the house to its cash before it goes live: with 5.01 USDC and 15-share quotes the bot can neither mint a
+  set (15 USDC) nor afford a bid, so it rests nothing and the live feed shows no seller. Four shares let it mint
+  and quote. The test that pins the Railway settings file is there to make this a conscious change.
+- Measure privacy from the chain, not the docs: `submitRequest` payloads are 2,076 B for every PROCESS request
+  (2,340 B of calldata, the figure recorded on 10-07), 133 B for a key registration; every `UserEvent` receipt is
+  8,220 B of ciphertext (8,288 B as ABI-encoded event data). A regex over raw hex for `{"` flags random ciphertext;
+  decode the payload and test whether it parses as text instead.
