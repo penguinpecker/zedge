@@ -14,7 +14,7 @@ import { confirmSettle, liveNow, readApi, type ApiRound, type House, type Live }
 import { createPriceFeed } from "./price-feed.ts";
 import { engineRound, LOT, OPERATOR_KEYS_CHANGED, type OrderbookManifest, type VerifiedOrderbook } from "./orderbook-manifest.ts";
 import { usePrivate, type PrivateState } from "./private/use-private.ts";
-import { ActionLine, DepositSteps, PrivateHistory, PrivateOrders, PrivatePortfolio, shares, usdc } from "./PrivatePanels.tsx";
+import { ActionLine, HouseQuotes, PrivateHistory, PrivateOrders, PrivatePortfolio, shares, usdc } from "./PrivatePanels.tsx";
 import { sharesFor, waitingOrder } from "./private/client.ts";
 import type { DeploymentManifest, VerifiedDeployment } from "./manifest.ts";
 import { STREAMS_MISMATCH_REASON, STREAMS_PLANNED_REASON, StreamsMismatchError } from "./streams-manifest.ts";
@@ -100,7 +100,6 @@ type TicketRound = { start: number; cutoff: number; end: number; opening: string
  * (market-view.ts sidePrice). `slot`: the current round, whose position shows until it ends. */
 function Ticket({ priv, orderbook, wallet, round, slot, now, up, house, outcome, onOutcome, loading, onAccount, onFunds }: { priv: PrivateState; orderbook: VerifiedOrderbook | null; wallet: ChainWallet; round: TicketRound | null; slot: number; now: number; up: number | null; house: House | null; outcome: Side; onOutcome: (side: Side) => void; loading: boolean; onAccount: () => void; onFunds: () => void }) {
   const [stake, setStake] = useState("5");
-  const [depositing, setDepositing] = useState(false);
   const book = orderbook?.manifest, view = priv.snapshot?.view ?? null, unlocked = Boolean(priv.snapshot?.unlocked), cash = view?.cash ?? 0, onBase = priv.snapshot?.wallet ?? null;
   const quote = (side: Side) => sidePrice(house, up, side), chosen = quote(outcome), limit = chosen.buy;
   let pay = 0;
@@ -123,24 +122,21 @@ function Ticket({ priv, orderbook, wallet, round, slot, now, up, house, outcome,
   const name = outcome === "up" ? "Up" : "Down";
   const buy = () => { if (round && limit && quantity) void priv.run((a) => a.buy(round.start, outcome, limit, quantity, now)); };
   const close = (side: Side) => { const p = quote(side).sell; if (round && p !== null) void priv.run((a) => a.close(round.start, side, p, now)); };
-  // Until the buy deposits for itself: the stake, from the wallet's USDC on Base, in one click (within the vault's deposit limits).
-  const limits = book?.custody.vault.limits, least = BigInt(limits?.minDeposit ?? 0), most = limits && onBase !== null ? onBase < BigInt(limits.maxDeposit) ? onBase : BigInt(limits.maxDeposit) : 0n;
-  const want = pay > 0 ? BigInt(pay) : least, offer = limits && most > 0n && most >= least ? want < least ? least : want > most ? most : want : null;
-  // Quiet: a deposit can wait for minutes and reports on its own line (DepositSteps), so it holds neither Close nor Cancel.
-  const deposit = () => { if (!offer) return; setDepositing(true); void priv.run((a) => a.depositFromBase(offer), { quiet: true }).finally(() => setDepositing(false)); };
   // The latest deposit while it is on its way (this page may have stopped waiting): no second stake until it lands.
   const dep = priv.snapshot?.actions.find((a) => a.action === "Deposit"), moving = Boolean(dep && !dep.final);
   const [label, action, enabled] = !wallet.session ? ["Sign in to trade", onAccount, wallet.configured && !wallet.pending]
     : !book ? [loading ? "Loading…" : "Trading is not open yet", onAccount, false]
     : frozen ? ["Withdraw your balance", onFunds, true]
     : !unlocked ? [priv.busy ? "Unlocking your account…" : "Unlock your account", () => void priv.run((a) => a.unlock()), !priv.busy]
-    : cash === 0 ? depositing || moving ? [depositing ? "Depositing…" : "Deposit on its way…", deposit, false]
+    // Low on trading balance: the Deposit window (AccountDrawer) takes the deposit and follows it to Horizen.
+    : cash === 0 ? moving ? ["Deposit on its way…", onFunds, false]
       // Credited, but the sync after it failed: the balance is short, so read it again rather than offer another deposit.
       : priv.snapshot?.behind ? ["Refresh balance", () => void priv.run((a) => a.sync()), !priv.busy]
-      : offer ? [`Deposit ${usdc(offer)} to trade`, deposit, true] : ["Deposit to trade", onFunds, true]
+      : ["Deposit to trade", onFunds, true]
     : !round ? ["Waiting for the next round", buy, false]
     : toCutoff !== null && toCutoff <= ORDER_MARGIN ? ["This round no longer takes orders", buy, false]
     : limit === null ? [house ? "No seller right now" : "Price unavailable", buy, false]
+    : pay > cash ? ["Deposit to trade", onFunds, true]
     : [chosen.est ? `Buy ${name} · up to ${limit}¢` : `Buy ${name} · ${limit}¢`, buy, trading && quantity > 0 && pay <= cash] as const;
   const short = unlocked && cash > 0 && pay > cash;
   const reason = rest ? `Your order at ${rest.price}¢ is still waiting` : pay < 0 ? "Enter an amount like 2.5" : short ? "Not enough balance" : wanted > 0 && room === 0 ? "Round limit reached"
@@ -158,7 +154,6 @@ function Ticket({ priv, orderbook, wallet, round, slot, now, up, house, outcome,
       <div><dt>Shares / pays if right</dt><dd>{quantity ? `${shares(quantity)} / ${usdc(quantity)}` : "—"}</dd></div></dl>
     {quantity > 0 && limit !== null && <p className="chain-copy chain-ticket-cost">{chosen.est ? `Est. cost ${usdc(quantity * (chosen.ask ?? limit) / 100)} · at most ${usdc(quantity * limit / 100)}` : `Cost at most ${usdc(quantity * limit / 100)}`}</p>}
     <button className="button primary chain-full" disabled={!enabled} onClick={action}>{label}</button>
-    {unlocked && cash === 0 && <DepositSteps snapshot={priv.snapshot} />}
     {(total("up") > 0 || total("down") > 0) && <div className="chain-position-block" role="group" aria-label="Your position"><h3>Your position</h3>
       {(["up", "down"] as const).filter((side) => total(side) > 0).map((side) => {
         const q = quote(side), worth = q.est || q.sell === null ? null : Math.floor(total(side) / 100) * q.sell;
@@ -169,13 +164,6 @@ function Ticket({ priv, orderbook, wallet, round, slot, now, up, house, outcome,
     <ActionLine snapshot={priv.snapshot} names={["Buy Up", "Buy Down", "Sell Up", "Sell Down", "Order result", "Round result"]} />
     {priv.error && <p className="chain-error" role="alert">{priv.error}</p>}
     <div className="chain-ticket-account"><button onClick={onAccount}><Wallet size={17} /> Account <CaretRight /></button><button onClick={onFunds}><ArrowsDownUp size={17} /> Deposit or withdraw <CaretRight /></button></div></aside>;
-}
-
-/** The house's quotes for the open round (Ticket's): on each side its lowest sell (ask) and highest buy (bid). Display only. */
-function HouseQuotes({ house }: { house: House | null }) {
-  const rows = house ? (["up", "down"] as const).flatMap((side) => (["ask", "bid"] as const).flatMap((kind) => { const q = house[side][kind]; return q ? [{ side, kind, ...q }] : []; })) : [];
-  if (!rows.length) return <div className="chain-empty chain-book-empty"><ChartLine size={24} /><h3>No quotes right now</h3></div>;
-  return rows.map((r) => <div className="chain-book-row" key={r.side + r.kind}><span><b className={r.side}>{r.side === "up" ? "Up" : "Down"}</b> {r.kind === "ask" ? "Ask" : "Bid"} {r.cents}¢</span><span>{shares(r.shares)}</span><span>{usdc(Math.floor(r.shares / 100) * r.cents)}</span></div>);
 }
 
 /** Whether this tab's session already opened the Deposit window for `account`; marks it so. Storage blocked: it may open again. */

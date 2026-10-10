@@ -1,12 +1,13 @@
 /** The signed-in user's private records: resting orders, positions and history, read from their own decrypted receipts.
  * Nothing here is fetched from ZEDGE; everything comes from the chain and this tab's key. */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowSquareOut, Check } from "@phosphor-icons/react";
+import { ArrowSquareOut, ChartLine, Check } from "@phosphor-icons/react";
 import { formatUnits } from "viem";
 import { transactionExplorerUrl } from "./networks.ts";
 import { holdingKind } from "./market-view.ts";
 import { engineRound, type VerifiedOrderbook } from "./orderbook-manifest.ts";
 import type { Snapshot } from "./private/client.ts";
+import type { House } from "./read-api.ts";
 import type { PrivateState } from "./private/use-private.ts";
 
 type Book = VerifiedOrderbook["manifest"];
@@ -129,4 +130,12 @@ export function PrivateHistory({ priv, fromBlock }: { priv: PrivateState; fromBl
       : entries.length === 0 && <div className="chain-empty chain-book-empty"><h3>{more ? `No records in the last ${hours} hours` : "No records in the last seven days"}</h3></div>}
     {more && status === "done" && <button className="button" onClick={() => load(true)}>Load older</button>}
   </div>;
+}
+
+/** The house's public quotes for one market: on each side its lowest sell (ask) and highest buy (bid). Display only. The event's
+ * quotes have the same shape (read-api.ts EventHouse) and Yes/No names. */
+export function HouseQuotes({ house, names = { up: "Up", down: "Down" } }: { house: Pick<House, "up" | "down"> | null; names?: { up: string; down: string } }) {
+  const rows = house ? (["up", "down"] as const).flatMap((side) => (["ask", "bid"] as const).flatMap((kind) => { const q = house[side][kind]; return q ? [{ side, kind, ...q }] : []; })) : [];
+  if (!rows.length) return <div className="chain-empty chain-book-empty"><ChartLine size={24} /><h3>No quotes right now</h3></div>;
+  return rows.map((r) => <div className="chain-book-row" key={r.side + r.kind}><span><b className={r.side}>{names[r.side]}</b> {r.kind === "ask" ? "Ask" : "Bid"} {r.cents}¢</span><span>{shares(r.shares)}</span><span>{usdc(Math.floor(r.shares / 100) * r.cents)}</span></div>);
 }

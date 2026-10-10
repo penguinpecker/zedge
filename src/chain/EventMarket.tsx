@@ -10,7 +10,7 @@ import { chainClient } from "./gateway.ts";
 import { ORDER_MARGIN, sidePrice } from "./market-view.ts";
 import { parseAtomicAmount, transactionExplorerUrl } from "./networks.ts";
 import { LOT, type ConfiguredOrderbook, type VerifiedOrderbook } from "./orderbook-manifest.ts";
-import { ActionLine, shares, usdc } from "./PrivatePanels.tsx";
+import { ActionLine, HouseQuotes, shares, usdc } from "./PrivatePanels.tsx";
 import { sharesFor, waitingOrder } from "./private/client.ts";
 import type { PrivateState } from "./private/use-private.ts";
 import type { ChainWallet } from "./privy.tsx";
@@ -89,6 +89,7 @@ function EventTicket({ event, priv, orderbook, wallet, quotes, now, outcome, onO
     : cash === 0 ? priv.snapshot?.behind ? ["Refresh balance", () => void priv.run((a) => a.sync()), !priv.busy] : ["Deposit to trade", onFunds, true]
     : !open ? ["Trading has closed", buy, false]
     : limit === null ? ["No seller right now", buy, false]
+    : pay > cash ? ["Deposit to trade", onFunds, true]
     : [`Buy ${name} · ${limit}¢`, buy, trading && quantity > 0 && pay <= cash] as const;
   const short = unlocked && cash > 0 && pay > cash;
   const reason = rest ? `Your order at ${rest.price}¢ is still waiting` : pay < 0 ? "Enter an amount like 2.5" : short ? "Not enough balance" : wanted > 0 && room === 0 ? "Limit reached for this market"
@@ -150,6 +151,7 @@ function Market({ event, book, ...ticket }: TicketProps & { book: ConfiguredOrde
         <p className="chain-copy event-operator">ZEDGE, the operator, posts the result with a signature from its resolver wallet <code>{event.resolver}</code>. It also runs the house that quotes this market, so it may hold the other side of your trade.</p>
         <div className="chain-market-foot"><span>Money in this market is locked until the result or the void.</span><span>Winner 1 · Loser 0 · Void ½ USDC</span></div>
       </section>
+      <section className="chain-panel chain-book" aria-label="Order book"><div className="chain-panel-heading"><h2>Order book</h2><span className="chain-pill">Public quotes</span></div><div className="chain-book-columns"><span>Price</span><span>Shares</span><span>Total</span></div><HouseQuotes house={quotes} names={SIDE_NAME} /></section>
       <Rules event={event} />
     </div>
     <EventTicket event={event} {...ticket} />
