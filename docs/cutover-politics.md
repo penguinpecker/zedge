@@ -66,8 +66,8 @@ None of these steps sends anything.
    - **Done on 2026-10-09/10:** `docs/rehearsal-politics.md` is the full rehearsal with the real manager and executor images, a stand-in old application, the services, the site, the event's result and its timeout void, and the measured gas.
 4. **Wallets** (OWNER, in his own Terminal; never printed, never pasted into a chat).
    - The resolver wallet: a new key, file mode 0600, kept offline with a backup. Only its address is used here, and it must never send a transaction (`deploy-book.mjs` refuses an address with any Horizen transaction).
-   - Check the address before step 5: sign a test result with the resolver-signing tool (resolver lane) and check that it recovers to the address you will pass as `--resolver`. A wrong address can never settle the event; it would only void on 31 Jan 2027.
-   - The event house wallet (event house lane).
+   - Check the address before step 5: `node scripts/sign-event-result.mjs <resolver key file> --check` prints the address it recovers to; it must be the one you will pass as `--resolver`. A wrong address can never settle the event; it would only void on 31 Jan 2027.
+   - The event house wallet: `node scripts/new-key.mjs ~/.config/zedge/event-house.key` (prints only the address).
 5. **Gas** (OWNER). Top up to at least a day of runway at today's burn: house about 0.0074 and operator about 0.0064 ETH a day on Horizen, plus keeper-vela and the relayer. The deployer needs about 0.00002 ETH on Horizen for the whole cutover. Measured on a fork:
 
    | Transaction | Gas | ETH at the 2,000,504 wei cap |
@@ -76,7 +76,7 @@ None of these steps sends anything.
    | Freeze: upgrade | 37,865 | (included above) |
    | New trigger proxy | 242,244 | about 0.0000047, for proxy and request |
    | Deploy request | 2,117,402 (rehearsal) | (included above) |
-   | Key registration | 322,000 (rehearsal: 321,961–322,016) | about 0.0000072, for the key and both syncs |
+   | Key registration | 322,000 (rehearsal: 321,961–322,016) | about 0.0000074, for the key and both syncs |
    | Each of the two syncs | 1,685,000 (rehearsal: 1,684,977–1,685,032) | (included above) |
 
    The operator pays for the completion (497,296 in the rehearsal) and for each request's transitions (about 0.95–1.3 M, plus 170,000–380,000 for its tick). The event's result later costs its sender a sync and the result request (1,685,025 in the rehearsal) and the operator 639,566 for the result's transition, which pays every holder.
@@ -88,6 +88,8 @@ None of these steps sends anything.
 7. **New Railway service for the new payout signer** (OWNER ACCOUNT): same image and `ZEDGE_SERVICE=payout-signer`, its own volume at `/data`, and the same two sealed variables as today's payout signer. Create it, but do not deploy it yet.
    - **Never redeploy today's payout-signer service from the new export.** It keeps serving the old application until every old balance is withdrawn.
    - The two run with one key. Expect an occasional dropped Base transaction, which the signer re-sends. The vault pays each `(application, ordinal)` once.
+   - **The event house** (OWNER ACCOUNT): a new service `event-house`, same image, with the variables in `services/market-maker/README.md` (Event house): `ZEDGE_SERVICE=event-house`, `ZEDGE_EVENT_HOUSE_KEY`, `ZEDGE_THIRDWEB_ID`, `ZEDGE_ALCHEMY_KEY`, and `MM_ARGS='run --event --mainnet --dry-run'` from the start. Create it, but do not deploy it before step 8e: until step 7 commits `public/deployments/26514-events.json` it cannot start.
+   - **The indexer** (OWNER ACCOUNT): set `ZEDGE_EVENT_HOUSE_QUOTES_URL=http://event-house.railway.internal:8080/quotes` now; it takes effect with step 8c. Without it `/v1/live` never carries the event's quotes and the site shows "No seller right now".
 8. **Confirm the manager's artifact folder** (OWNER ACCOUNT, read-only): `railway ssh -p <zedge-vela project ID> -s manager printenv SHARED_DATA_FOLDER`. The tools assume `/vela/shared-data`, so blobs go in `/vela/shared-data/artifacts/blobs`. If the value differs, pass `--blobs <it>/artifacts/blobs` to `deploy-book.mjs`.
 
 **Go/no-go before step 1:**
@@ -111,13 +113,16 @@ From step 3 until step 8f is live, the site's private trading fails closed, beca
 OWNER ACCOUNT. No restart, no `VELA_HOLD`, never `vela-load-*` or `vela-commit`.
 
 ```sh
-F=adapters/vela/guest/build/zedge_guest.wasm; test -s "$F" || echo "STOP: $F is missing"
-SHA=$(shasum -a 256 "$F" | cut -d' ' -f1); B=/vela/shared-data/artifacts/blobs
-base64 < "$F" | railway ssh -p <zedge-vela project ID> -s manager \
-  "sh -c 'mkdir -p $B && base64 -d > $B/$SHA.wasm.tmp && chmod 644 $B/$SHA.wasm.tmp && mv $B/$SHA.wasm.tmp $B/$SHA.wasm && sha256sum $B/$SHA.wasm'"
+F=adapters/vela/guest/build/zedge_guest.wasm; SHA=7ce7ce61d90d7c48864d1d9c4d8811dd2b2e49874357d794464a670ccd51ab27; B=/vela/shared-data/artifacts/blobs
+if [ "$(shasum -a 256 "$F" 2>/dev/null | cut -d' ' -f1)" = "$SHA" ]; then
+  base64 < "$F" | railway ssh -p <zedge-vela project ID> -s manager \
+    "sh -c 'mkdir -p $B && base64 -d > $B/$SHA.wasm.tmp && chmod 644 $B/$SHA.wasm.tmp && mv $B/$SHA.wasm.tmp $B/$SHA.wasm && sha256sum $B/$SHA.wasm'"
+else echo "STOP: $F is not the approved guest $SHA"; fi
 ```
 
-**Check:** the printed hash is `$SHA`, and `$SHA` is the guest's recorded SHA-256 (with a wrong path `$SHA` is empty: the remote side then writes an empty `.wasm` and prints the empty file's hash, `e3b0c442…`, as happened once in the rehearsal). An unused blob is inert, so this can be done any time before step 5. Try the same pipe with a small file first: this stdin path was proven bit-exact at 3 MB on 2026-10-07, through the image's own helpers.
+`SHA` is the approved build (`adapters/vela/guest/README.md`); nothing is sent unless the local file is exactly that build. Without the `if`, a wrong path leaves `$SHA` empty and the pipe still runs: the manager then gets an empty file named `.wasm` and prints the empty file's hash `e3b0c442…` (seen in the rehearsal; a plain `test … || echo STOP` line does not stop it, checked on the fork's manager).
+
+**Check:** the one printed line is `7ce7ce61d90d7c48864d1d9c4d8811dd2b2e49874357d794464a670ccd51ab27  /vela/shared-data/artifacts/blobs/7ce7ce61…wasm`. An unused blob is inert, so this can be done any time before step 5. Try the same pipe with a small file first (set `F` to it and `SHA` to its `shasum -a 256`): this stdin path was proven bit-exact at 3 MB on 2026-10-07, through the image's own helpers.
 
 ### 2. Pause the BTC house
 
@@ -142,7 +147,7 @@ If the deploy transaction landed but the upgrade did not, rerun with `--implemen
 
 read-only.
 
-1. Wait for the old application to apply a tick asked after the freeze. The keeper's sync at boundary + 45 s does it, or any old-application request.
+1. Wait for the old application to apply a tick asked after the freeze. The keeper's sync at boundary + 45 s does it, or any old-application request. The tick lands a few blocks after that request's own receipt: if `facts` (or step 5) says the old application has applied no tick asked after the freeze, wait 30 s and run it again.
 2. Run `node adapters/vela/stack/cutover.mjs facts`.
 
 **Go/no-go** (all must hold, or stop and see Rollback):
@@ -153,7 +158,7 @@ read-only.
   - `old: Σ Deposited(0, N] − Σ Paid = credited − withdrawn + unpaid + not yet credited`;
   - `every inbox record 1…highest is present and equals its Deposited event`.
 - `deliveries in flight from Base` may be above 0: they are indexes above N, and the new application credits them.
-- If `every inbox record 1…highest is present` fails, a Base deposit's delivery to Horizen failed while later ones landed. The guest credits only consecutive indexes, so every deposit after the gap waits too (seen in the rehearsal: one lost delivery held 24 deposits). Replay that deposit's message on Horizen (an OP-stack messenger lets anyone replay a failed message), then run `facts` again.
+- If `every inbox record 1…highest is present` fails, a Base deposit's delivery to Horizen has not landed while later ones did. The guest credits only consecutive indexes, so every deposit after the gap waits too (the rehearsal's simulated bridge dropped one and held 24 deposits behind it). On Horizen a delivery is not dropped: it is either not yet derived (wait) or it failed on Horizen, in which case anyone can replay it with `relayMessage` on the Horizen messenger `0x4200000000000000000000000000000000000007`, using the nonce, sender, target, gas limit and message of that deposit's `SentMessage` event on Base. Then run `facts` again. Do not deploy across a gap.
 
 ### 5. Deploy the new application
 
@@ -174,6 +179,7 @@ It refuses to send in any of these cases:
 
 **Check**, all `PASS`:
 
+- the first line names `guest 7ce7ce61d90d7c48864d1d9c4d8811dd2b2e49874357d794464a670ccd51ab27 (700282 bytes)`;
 - the endpoint, the trigger and the registry;
 - `guest … in the Railway manager's artifact store`;
 - `application … deployed: its state root is set`, after `DeployRequestCompleted` with status 0;
@@ -223,7 +229,7 @@ OWNER ACCOUNT. Use one `git archive` export of that commit and redeploy each wit
 | b | keeper (not within 30 s before to 60 s after a boundary) | Order-book lane `running … application <new>`; registry lane unchanged. |
 | c | indexer | Same database. It serves at once and logs `waiting` until the reset in `services/indexer/README.md` (Switch-over): once the old indexer deployment is removed, run that SQL; then `indexing` from the new deploy block − 1, prices and the old rows kept. |
 | d | house-bot | Still `--dry-run`. |
-| e | event house | Dry run: `MM_ARGS='run --event --mainnet --dry-run'`. Its log shows `dryRun: true` and the event round. |
+| e | event house (the service from preparation step 7) | Dry run: `MM_ARGS='run --event --mainnet --dry-run'`. Its log shows `dryRun: true` and the event round, then a `market` line every minute whose `price` has `ok: true`. Its `source` is `polymarket` when Polymarket answers from Railway; `kalshi` means Polymarket is unreachable from there and the house prices from Kalshi alone (allowed; never checked from Railway before, plan §12 item 9). |
 | f | Vercel: site and relayer from the same export | The served `index-<hash>.js` equals a local build of the export. `/deployments/26514-orderbook.json` names the new application. A private-trading tab verifies again. |
 
 ### 9. Move the house's money
@@ -238,16 +244,16 @@ OWNER KEY, the house key, with the Railway bot in dry run.
 2. **New application.** From the new commit: `deposit <amount> --mainnet`. Its index is above N.
 
    **Check:** `facts --new …` shows a new credit record at that index and none in the old application. Then set `MM_ARGS` back and redeploy house-bot.
-3. **Event house.** `node services/market-maker/main.mjs deposit 20 --event --mainnet`, then unset `MM_ARGS` on the event-house service and redeploy it to go live. **Check:** its first receipts show cash 20.00, then `op mint status applied` (step 10e).
+3. **Event house.** `node services/market-maker/main.mjs deposit 20 --event --mainnet`, then unset `MM_ARGS` on the event-house service and redeploy it to go live. **Check:** its first receipts show cash 20.00, then `"event":"receipt","op":"mint","status":"applied"` (step 10e).
 
 ### 10. Checks at the next boundaries
 
-- a. The keeper's report opens the round in the new application: a settle record, source 1. `/v1/live` shows house quotes.
+- a. The keeper's report opens the round in the new application: a settle record, source 1. `/v1/live` shows house quotes, and once the event house is live its `event` field is not null (otherwise check `ZEDGE_EVENT_HOUSE_QUOTES_URL` on the indexer, preparation step 7).
 - b. **BTC smoke test** with the owner's test wallet: deposit 1 USDC, buy, close, withdraw.
   - **Check:** the credit record is in the new application only, and vault `Paid(<new>, 1)`.
 - c. **Event smoke test:** buy 1 Yes at the house ask, then close it. The site's one-click orders rest 20 s: one that reaches its tick later is refused as `invalid order` and the share stays (the rehearsal's slow fork did this to the close). Close again.
 - d. `facts --new …`: every check passes. `vault USDC ≥ Σ Deposited − Σ Paid`.
-- e. The event round exists: the event house's first live mint (10 sets) has the receipt `op mint status applied` in its log. There is no separate 1-lot mint command; `status --event` computes the round from the manifests and does not show whether the guest created it. A refusal for an unknown round means the guest did not create it. Then forward-fix: there is no way back once the new application has credited anything.
+- e. The event round exists: the event house's first live mint (10 sets) has the receipt `"event":"receipt","op":"mint","status":"applied"` in its log. There is no separate 1-lot mint command; `status --event` computes the round from the manifests and does not show whether the guest created it. A refusal for an unknown round means the guest did not create it. Then forward-fix: there is no way back once the new application has credited anything.
 - f. Records: `records.txt`, the handoff and the MAINNET docs, with the freeze block, N, the application, the trigger, the transactions and the facts output.
 
 ## Rollback
