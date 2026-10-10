@@ -1083,3 +1083,59 @@ Order-book liquidity and the operator's endpoint — 2026-10-07
 - At 20 USDC with 10-share quotes, a fast BTC move makes the house cancel every quote about once a minute and place
   them back one request (about 20 s) at a time, so one side is often missing. Depth needs capital, or a replace that
   places the new quote before cancelling the old one.
+
+House quoting, gas and the read API — 2026-10-08/09
+---------------------------------------------------
+- A one-click buy priced from an estimate fills at whatever the resting ask is, or not at all. Show the house's real
+  resting prices (the house serves them on the private network; the indexer republishes them) and place the order at
+  exactly that price, resting for a short window. Never pay more than the shown price, never take less on a close.
+- Replacing quotes with cancel_all leaves a gap of one request per side. Rotate by expiry instead: give each side
+  its own expiry grid, a quarter-lifetime apart, and send the replacement when the old quote is within 2 s of
+  expiring, so the tick releases the old quote before the new one activates (one request, no cancel). The guest
+  allows four resting orders per account, so placing a fifth and cancelling after is not an option. cancel_order by
+  ID is only for pulling a stale quote, one at a time, the one furthest in the trader's favour first.
+- When the house cannot afford one side, that side must not block pulling an overpriced quote on the other. A rule
+  that waited for "no side missing" left a 75-cent ask standing against a fair 53 cents.
+- A house whose cash sits in an ended round's shares has nothing affordable, sends nothing and so never sees the
+  receipt that would show the payout. It needs a cheap sync when idle with ended-round shares (at most 3 a round,
+  30 s apart).
+- Gas burn is set by how often the house re-prices, not by trading. 15-share quotes that live 5 minutes and move
+  only on a 6-cent drift cut the house from about 0.0196 to 0.0074 ETH a day and the operator from 0.0144 to 0.0064.
+- The house's own idle USDC is the cheapest gas source: withdraw a few USDC, swap on Base, bridge ETH to Horizen.
+  Read balances again after each step; public Base endpoints lag and refuse history.
+- A Postgres advisory-lock key built from an application ID overflows a signed bigint for IDs at or above 2^63,
+  which is about half of all new IDs. Fold the ID into range before using it as a key.
+
+Adding an event market without stopping BTC — 2026-10-09/10
+-----------------------------------------------------------
+- An application's WASM hash is fixed at deployment, so a new round type means a new application, and the two read
+  one deposit inbox. The safe order: upgrade the old trigger to a withdraw-only implementation (same clock and
+  registry records, no deposit records), read N (the last inbox index the old application processed), then deploy
+  the new one with depositsFrom = N. Never let two applications credit deposits at the same time, and never thaw the
+  old trigger once the new application has credited anything.
+- The guest credits only consecutive inbox indexes. One failed delivery from Base holds every later deposit behind
+  it. On Horizen a delivery is never dropped: it is either not yet derived or failed, and anyone can replay a failed
+  one through the messenger using the Base SentMessage fields. Never deploy across a gap.
+- `base64 < "$F" | ssh ... "base64 -d > $B/$SHA.wasm"` with an empty $SHA still runs and writes an empty file named
+  ".wasm". `test ... || echo STOP` on the line before does not stop the pipe. Put the whole pipe inside an `if` on
+  the file's hash.
+- A request sent at the SDK's exact gas estimate can run out of gas when another sender's request lands in the same
+  block. Add a margin (20 %), as the keeper and the relayer already did.
+- A signed result that settles an event for whoever submits it is a bearer instrument. Write it with an explicit
+  mode 600; umask 022 would leave it world-readable.
+- The all-accounts stake limit is bucketed by a round's end time. An event ending on the 15-minute grid would share
+  its 200-USDC bucket with the BTC round ending then; one second off the grid gives the event its own.
+- A memory soak that applies the heaviest event result in every round stepped once from 96 to 192 MiB (at round
+  262) and stayed there to round 800, which still fails the soak's own no-growth check. Applied once, as a real
+  deployment does, memory stays flat at 96 MiB. Read a soak's load against real use before calling it a leak, and
+  keep a failing gate open until the owner accepts it.
+- A fork rehearsal answers each request in 30-60 s, so a 20-second one-click order can expire before its tick and
+  come back as "invalid order". For a close at the bid that refusal can only be an expiry, but no fork run proved
+  it: the site's one-click close never filled on a fork, so the first mainnet event close is the real check.
+  Mainnet ticks land in about 5-10 s.
+- Proving N assumes the old application's credits start at index 1. An application deployed with depositsFrom = N
+  starts at N + 1, so the proof needs a change before the next replacement.
+- Railway: a sealed variable is not shown by the CLI, and a `${{service.VAR}}` reference to one also reads as empty
+  there; whether it resolves is only visible at the next deploy (the start script prints each secret's byte count).
+  `railway variable set --stdin KEY < file` keeps a secret off the command line. `railway add --service NAME
+  --variables K=V` creates an empty service without deploying it. `railway login` refuses non-interactive shells.
