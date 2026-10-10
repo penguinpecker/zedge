@@ -139,7 +139,7 @@ sequenceDiagram
   E->>O: run the guest: the order matches against the book (for example the house's ask)
   O-->>E: receipt, 8,220 bytes, encrypted to your key — your fill, position and balance
   K->>E: closing Chainlink report (encrypted request, same size)
-  O-->>E: settle record (public: opening and closing price, outcome); every winning share is credited 1 USDC inside the ledger
+  O-->>E: settle record (public: opening and closing price, outcome), and every winning share is credited 1 USDC inside the ledger
   U->>R: encrypted withdrawal request
   O-->>E: payout record (public: your address, amount, ordinal)
   P->>V: withdraw(payout, signature) → Paid(your address, amount)
