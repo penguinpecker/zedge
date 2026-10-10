@@ -63,6 +63,7 @@ None of these steps sends anything.
      4. The manifest writer against the fork.
    - With a manager on the fork (lean e2e stack): the same with `--wait`. This proves the completion, the key registration, the clock record, rounds T1 and T2 and `nextDeposit = N + 1`.
    - The lean e2e `up.sh` still calls the old path `build/mainnet-recipe/deploy-book.mjs`. Point it at `adapters/vela/stack/deploy-book.mjs` and add `--resolver` and `--deposits-from`.
+   - **Done on 2026-10-09/10:** `docs/rehearsal-politics.md` is the full rehearsal with the real manager and executor images, a stand-in old application, the services, the site, the event's result and its timeout void, and the measured gas.
 4. **Wallets** (OWNER, in his own Terminal; never printed, never pasted into a chat).
    - The resolver wallet: a new key, file mode 0600, kept offline with a backup. Only its address is used here, and it must never send a transaction (`deploy-book.mjs` refuses an address with any Horizen transaction).
    - Check the address before step 5: sign a test result with the resolver-signing tool (resolver lane) and check that it recovers to the address you will pass as `--resolver`. A wrong address can never settle the event; it would only void on 31 Jan 2027.
@@ -74,9 +75,11 @@ None of these steps sends anything.
    | Freeze: deploy the implementation | 1,682,544 | about 0.0000034, for both freeze transactions |
    | Freeze: upgrade | 37,865 | (included above) |
    | New trigger proxy | 242,244 | about 0.0000047, for proxy and request |
-   | Deploy request | about 2,117,438 | (included above) |
-   | Key registration | about 1.6M | about 0.00001, for the key and both syncs |
-   | Each of the two syncs | about 1.7M | (included above) |
+   | Deploy request | 2,117,402 (rehearsal) | (included above) |
+   | Key registration | 322,000 (rehearsal: 321,961–322,016) | about 0.0000072, for the key and both syncs |
+   | Each of the two syncs | 1,685,000 (rehearsal: 1,684,977–1,685,032) | (included above) |
+
+   The operator pays for the completion (497,296 in the rehearsal) and for each request's transitions (about 0.95–1.3 M, plus 170,000–380,000 for its tick). The event's result later costs its sender a sync and the result request (1,685,025 in the rehearsal) and the operator 639,566 for the result's transition, which pays every holder.
 
 6. **Old-application balances.** Run `node adapters/vela/stack/cutover.mjs facts`.
    - The line `old application …: private balances (credited − withdrawn)` is everything held there: cash and shares.
@@ -108,12 +111,13 @@ From step 3 until step 8f is live, the site's private trading fails closed, beca
 OWNER ACCOUNT. No restart, no `VELA_HOLD`, never `vela-load-*` or `vela-commit`.
 
 ```sh
-SHA=$(shasum -a 256 adapters/vela/guest/build/zedge_guest.wasm | cut -d' ' -f1); B=/vela/shared-data/artifacts/blobs
-base64 < adapters/vela/guest/build/zedge_guest.wasm | railway ssh -p <zedge-vela project ID> -s manager \
+F=adapters/vela/guest/build/zedge_guest.wasm; test -s "$F" || echo "STOP: $F is missing"
+SHA=$(shasum -a 256 "$F" | cut -d' ' -f1); B=/vela/shared-data/artifacts/blobs
+base64 < "$F" | railway ssh -p <zedge-vela project ID> -s manager \
   "sh -c 'mkdir -p $B && base64 -d > $B/$SHA.wasm.tmp && chmod 644 $B/$SHA.wasm.tmp && mv $B/$SHA.wasm.tmp $B/$SHA.wasm && sha256sum $B/$SHA.wasm'"
 ```
 
-**Check:** the printed hash is `$SHA`. An unused blob is inert, so this can be done any time before step 5. Try the same pipe with a small file first: this stdin path was proven bit-exact at 3 MB on 2026-10-07, through the image's own helpers.
+**Check:** the printed hash is `$SHA`, and `$SHA` is the guest's recorded SHA-256 (with a wrong path `$SHA` is empty: the remote side then writes an empty `.wasm` and prints the empty file's hash, `e3b0c442…`, as happened once in the rehearsal). An unused blob is inert, so this can be done any time before step 5. Try the same pipe with a small file first: this stdin path was proven bit-exact at 3 MB on 2026-10-07, through the image's own helpers.
 
 ### 2. Pause the BTC house
 
@@ -149,6 +153,7 @@ read-only.
   - `old: Σ Deposited(0, N] − Σ Paid = credited − withdrawn + unpaid + not yet credited`;
   - `every inbox record 1…highest is present and equals its Deposited event`.
 - `deliveries in flight from Base` may be above 0: they are indexes above N, and the new application credits them.
+- If `every inbox record 1…highest is present` fails, a Base deposit's delivery to Horizen failed while later ones landed. The guest credits only consecutive indexes, so every deposit after the gap waits too (seen in the rehearsal: one lost delivery held 24 deposits). Replay that deposit's message on Horizen (an OP-stack messenger lets anyone replay a failed message), then run `facts` again.
 
 ### 5. Deploy the new application
 
@@ -179,7 +184,7 @@ Write down the application ID, the trigger, the deploy transaction and the block
 
 The event round does not appear in any public record (the guest never asks the trigger about it). Step 10e confirms it.
 
-A rerun is safe at any point: done steps are read back, and the syncs are repeated only as needed.
+A rerun is safe at any point: done steps are read back, and the syncs are repeated only as needed. In the rehearsal an RPC timeout stopped the script right after `deployed: its state root is set`; the same command, run again, read the deployment back and sent only the key registration and the syncs.
 
 ### 6. The other application's view
 
@@ -218,7 +223,7 @@ OWNER ACCOUNT. Use one `git archive` export of that commit and redeploy each wit
 | b | keeper (not within 30 s before to 60 s after a boundary) | Order-book lane `running … application <new>`; registry lane unchanged. |
 | c | indexer | Same database. It serves at once and logs `waiting` until the reset in `services/indexer/README.md` (Switch-over): once the old indexer deployment is removed, run that SQL; then `indexing` from the new deploy block − 1, prices and the old rows kept. |
 | d | house-bot | Still `--dry-run`. |
-| e | event house | Dry run (event house lane). |
+| e | event house | Dry run: `MM_ARGS='run --event --mainnet --dry-run'`. Its log shows `dryRun: true` and the event round. |
 | f | Vercel: site and relayer from the same export | The served `index-<hash>.js` equals a local build of the export. `/deployments/26514-orderbook.json` names the new application. A private-trading tab verifies again. |
 
 ### 9. Move the house's money
@@ -233,16 +238,16 @@ OWNER KEY, the house key, with the Railway bot in dry run.
 2. **New application.** From the new commit: `deposit <amount> --mainnet`. Its index is above N.
 
    **Check:** `facts --new …` shows a new credit record at that index and none in the old application. Then set `MM_ARGS` back and redeploy house-bot.
-3. **Event house.** Its deposit and go-live (event house lane).
+3. **Event house.** `node services/market-maker/main.mjs deposit 20 --event --mainnet`, then unset `MM_ARGS` on the event-house service and redeploy it to go live. **Check:** its first receipts show cash 20.00, then `op mint status applied` (step 10e).
 
 ### 10. Checks at the next boundaries
 
 - a. The keeper's report opens the round in the new application: a settle record, source 1. `/v1/live` shows house quotes.
 - b. **BTC smoke test** with the owner's test wallet: deposit 1 USDC, buy, close, withdraw.
   - **Check:** the credit record is in the new application only, and vault `Paid(<new>, 1)`.
-- c. **Event smoke test:** buy 1 Yes at the house ask, then close it.
+- c. **Event smoke test:** buy 1 Yes at the house ask, then close it. The site's one-click orders rest 20 s: one that reaches its tick later is refused as `invalid order` and the share stays (the rehearsal's slow fork did this to the close). Close again.
 - d. `facts --new …`: every check passes. `vault USDC ≥ Σ Deposited − Σ Paid`.
-- e. The event round exists: the event house shows it open, and a 1-lot mint for it is accepted. A refusal for an unknown round means the guest did not create it. Then forward-fix: there is no way back once the new application has credited anything.
+- e. The event round exists: the event house's first live mint (10 sets) has the receipt `op mint status applied` in its log. There is no separate 1-lot mint command; `status --event` computes the round from the manifests and does not show whether the guest created it. A refusal for an unknown round means the guest did not create it. Then forward-fix: there is no way back once the new application has credited anything.
 - f. Records: `records.txt`, the handoff and the MAINNET docs, with the freeze block, N, the application, the trigger, the transactions and the facts output.
 
 ## Rollback
@@ -269,3 +274,4 @@ Never use a volume backup or database copy on the manager (`/vela`). The old app
 - About 1,300 deposit-and-withdraw pairs in total.
 - Funds in the event are locked until the result, or until the void on 31 Jan 2027.
 - The site cannot trade the old application after step 3. Its users must withdraw before then (preparation step 6).
+- The next replacement of this application needs a change first: `cutover.mjs` proves N only for an old application whose credit records start at index 1 (the application deployed here starts at N + 1). The rehearsal's second deployment had to take `--deposits-from` unproven, which only a fork allows.
