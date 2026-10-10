@@ -122,7 +122,7 @@ else echo "STOP: $F is not the approved guest $SHA"; fi
 
 `SHA` is the approved build (`adapters/vela/guest/README.md`); nothing is sent unless the local file is exactly that build. Without the `if`, a wrong path leaves `$SHA` empty and the pipe still runs: the manager then gets an empty file named `.wasm` and prints the empty file's hash `e3b0c442…` (seen in the rehearsal; a plain `test … || echo STOP` line does not stop it, checked on the fork's manager).
 
-**Check:** the one printed line is `7ce7ce61d90d7c48864d1d9c4d8811dd2b2e49874357d794464a670ccd51ab27  /vela/shared-data/artifacts/blobs/7ce7ce61…wasm`. An unused blob is inert, so this can be done any time before step 5. Try the same pipe with a small file first (set `F` to it and `SHA` to its `shasum -a 256`): this stdin path was proven bit-exact at 3 MB on 2026-10-07, through the image's own helpers.
+**Check:** the one printed line is `7ce7ce61d90d7c48864d1d9c4d8811dd2b2e49874357d794464a670ccd51ab27  /vela/shared-data/artifacts/blobs/7ce7ce61…wasm`. Then run the exact command `deploy-book.mjs` runs in step 5, after the freeze: `railway ssh -p <zedge-vela project ID> -s manager sha256sum /vela/shared-data/artifacts/blobs/7ce7ce61d90d7c48864d1d9c4d8811dd2b2e49874357d794464a670ccd51ab27.wasm`. It must print that same line; if it does not, stop here, while nothing is frozen (the real `railway ssh` was never rehearsed: both fork runs used a stand-in for it). An unused blob is inert, so this can be done any time before step 5. Try the same pipe with a small file first (set `F` to it and `SHA` to its `shasum -a 256`): this stdin path was proven bit-exact at 3 MB on 2026-10-07, through the image's own helpers.
 
 ### 2. Pause the BTC house
 
