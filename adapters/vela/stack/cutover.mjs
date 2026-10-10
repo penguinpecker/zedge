@@ -14,11 +14,17 @@
 // not withdraw-only, has credited a deposit, or has applied no tick asked after its freeze. Build the contracts first (forge build in contracts/). Horizen is read through the public gateway (1,000-block log windows), never the
 // operator's RPC; Base logs through Tenderly's public gateway unless --base-rpc. deploy-book.mjs takes its checks from here.
 import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { parseArgs } from "node:util";
 import { concat, createPublicClient, decodeFunctionResult, encodeFunctionData, getContractAddress, http, keccak256, padHex, parseAbi, sha256, stringToHex, toHex } from "viem";
 
-export const HORIZEN_RPC = "https://26514.rpc.thirdweb.com", BASE_RPC = "https://base.gateway.tenderly.co";
+// Horizen reads go to Caldera's public gateway (~/.config/zedge/horizen.url overrides it): thirdweb's public tier rate-limits the
+// scans, and its keyed tier shares one 10 req/s budget with the live keeper, payout signer and site.
+export const HORIZEN_RPC = (() => {
+  try { const url = readFileSync(`${homedir()}/.config/zedge/horizen.url`, "utf8").trim(); if (/^https:\/\/\S+$/.test(url)) return url; } catch {}
+  return "https://horizen.calderachain.xyz/http";
+})(), BASE_RPC = "https://base.gateway.tenderly.co";
 export const DEPLOYER = "0x279173ac297ad146bc92f877552c8c2b78334d07"; // owner of every trigger proxy
 export const ENDPOINT = "0x0a2703d21b27757fdf27ab807eae9820788010f3", REGISTRY = "0x4dd4aacdb7e8d2e6d06c5af38238f3deab836744";
 export const HOUSE = "0xac8dfcbfbb5907634fe2bcea58e59e4c55441ab5", MANAGER = "0x3b2619b73840b58d5da81df62c7f1115f8d83861";

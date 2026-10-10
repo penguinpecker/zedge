@@ -28,7 +28,7 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { padHex, parseAbi, toHex } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
-import { ABI, KEEPER_VELA, MANAGER, OLD, RAILWAY, RELAYER, SUB, appRecords, artifact, blobInPlace, chooseDepositsFrom, client as reader, codeIs, depositsFromProblem, eventSpec, newest,
+import { ABI, HORIZEN_RPC, KEEPER_VELA, MANAGER, OLD, RAILWAY, RELAYER, SUB, appRecords, artifact, blobInPlace, chooseDepositsFrom, client as reader, codeIs, depositsFromProblem, eventSpec, newest,
   oldOf, othersCrediting, provenDepositsFrom, resolverProblem, triggersOnTheEndpoint, words } from "./cutover.mjs";
 import { engineConfigJson } from "../../../scripts/write-orderbook-manifest.mjs";
 import { connectVela } from "../../../services/keeper/vela.mjs";
@@ -40,7 +40,7 @@ const { ethers } = await import(`${V}/crypto/node_modules/ethers/lib.esm/index.j
 const sdk = await import(`${V}/crypto/node_modules/@horizen/vela-common-ts/dist/node.js`);
 
 // Owner decisions (2026-10-06, 2026-10-07 and, for the event, 2026-10-09: stake limits and the DON unchanged). Reads of Horizen go to the public gateway, never to the operator's RPC.
-const CHAIN_ID = 26514, RPC_URL = "https://26514.rpc.thirdweb.com";
+const CHAIN_ID = 26514, RPC_URL = HORIZEN_RPC;
 const DEPLOYER = "0x279173ac297ad146bc92f877552c8c2b78334d07"; // also the trigger's owner
 const REGISTRY = "0x4dd4aacdb7e8d2e6d06c5af38238f3deab836744";
 const USDCE = "0xdf7108f8b10f9b9ec1aba01cca057268cbf86b6c"; // the engine's collateral label: the registry rules commit to it

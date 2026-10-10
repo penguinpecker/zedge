@@ -21,8 +21,8 @@ test("the committed manifest is the live deployment; a configured one pins the e
   const live = parseOrderbookManifest(committed);
   assert.equal(live.status, "configured");
   if (live.status !== "configured") return;
-  assert.equal(live.application.id, "7408397676477227659");
-  assert.equal(live.trigger.address, "0x9ca46470b05350384c31c8b236af4df638cbb30d");
+  assert.equal(live.application.id, "3714533467436544392");
+  assert.equal(live.trigger.address, "0xe8122afba04f763d3f0ab43304e8be335efc0e7c");
   assert.equal(live.custody.vault.address, "0xf07b81d96b572007c8ea500db1f8095cf0c73d29");
   assert.equal(live.custody.vault.signer, "0xbd8543eaea45395d444d270bb9450f2a70d61839");
   assert.equal(live.relayer.facilitator, "0x9336887b575f11da697f53614d0f2a262dded024");

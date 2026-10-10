@@ -7,7 +7,7 @@ import { endpointAbi } from "../../src/chain/orderbook-manifest.ts";
 import { SUBTYPES, decodeSettle } from "../../src/chain/vault.ts";
 import { hex, rows } from "./rows.mjs";
 
-const endpoint = "0x0a2703d21b27757fdf27ab807eae9820788010f3", app = 7408397676477227659n;
+const endpoint = "0x0a2703d21b27757fdf27ab807eae9820788010f3", app = 3714533467436544392n;
 const id = `0x${"11".repeat(32)}`, tx = `0x${"ab".repeat(32)}`, sender = "0x44a2f7238002cf6b16719f5e0ad6c080cf3e1419";
 const words = (...n) => `0x${n.map((x) => BigInt(x).toString(16).padStart(64, "0")).join("")}`;
 let next = 0;

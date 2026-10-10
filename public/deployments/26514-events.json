@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "kind": "zedge-events",
+  "chainId": 26514,
+  "release": "orderbook-mainnet-2026-10-10",
+  "application": "3714533467436544392",
+  "deployTx": "0x546c99b38e63711262d93a37d9b6962a93a11945e4300bb39da1a72d5b4949bd",
+  "resolver": "0x32c60a65dc9ab693680b3381eb9983e0b3db8e03",
+  "depositsFrom": 8,
+  "event": {
+    "rules": "/events/us-house-2026.txt",
+    "questionHash": "0xbdb0cdb3b9ddf42f98992b0800e8a4e6c7d64e99a9b29b451bb963e381a0d044",
+    "start": 1791648000,
+    "cutoff": 1793743200,
+    "end": 1793743201,
+    "voidableAfter": 1801439999
+  }
+}

@@ -3,7 +3,7 @@
   "kind": "zedge-private-orderbook",
   "chainId": 26514,
   "status": "configured",
-  "release": "orderbook-mainnet-2026-10-07",
+  "release": "orderbook-mainnet-2026-10-10",
   "endpoint": {
     "address": "0x0a2703d21b27757fdf27ab807eae9820788010f3",
     "runtimeCodeHash": "0x8a91bee7c777af2e1c41d39d0d51284e464b94ebf415f3ac6c917689db0abac5",
@@ -29,7 +29,7 @@
     "runtimeCodeHash": "0x1d49ff43cc47cf16ccf3f3849e71b2fed7e861c8703cc7de7a49e680eb34290c"
   },
   "trigger": {
-    "address": "0x9ca46470b05350384c31c8b236af4df638cbb30d",
+    "address": "0xe8122afba04f763d3f0ab43304e8be335efc0e7c",
     "implementation": "0x6f8500186ccb07e3c14ff7bbf1c9b5c05b8ca9a8",
     "implementationCodeHash": "0x1bc99b091dd42e5e0862e5a4ac237608d00f442137677e248d04220331bee81a",
     "owner": "0x279173ac297ad146bc92f877552c8c2b78334d07",
@@ -39,12 +39,12 @@
     "duration": 900
   },
   "application": {
-    "id": "7408397676477227659",
-    "wasmSha256": "f38fb91ef2a450f050bb6a3ca53491f0c8c9eaa028df03b47fd14ddef3067320",
+    "id": "3714533467436544392",
+    "wasmSha256": "7ce7ce61d90d7c48864d1d9c4d8811dd2b2e49874357d794464a670ccd51ab27",
     "origin": "https://zedge-markets.vercel.app",
     "epoch": "1",
-    "engineConfigJson": "{\"domain\":{\"chainId\":26514,\"endpoint\":\"0x0a2703d21b27757fdf27ab807eae9820788010f3\",\"applicationId\":\"7408397676477227659\",\"rulesVersion\":3},\"authority\":\"0x9ca46470b05350384c31c8b236af4df638cbb30d\",\"collateral\":\"0xdf7108f8b10f9b9ec1aba01cca057268cbf86b6c\",\"feeBps\":0,\"oracle\":{\"chainId\":26514,\"registry\":\"0x4dd4aacdb7e8d2e6d06c5af38238f3deab836744\",\"oracle\":\"0xc800c3f18d35d492ae6b07655d7f31bfe98a4b6b\",\"rulesHash\":\"0x65e485f8468fda2de9d8681ee9fbbff779acabf1451e29a3d2cb2248b2a30ba6\",\"btcFeedId\":\"0x00039d9e45394f473ab1f050a1b963e6b05351e52d71e507509ada0c95ed75b8\",\"ethFeedId\":\"0x000362205e10b3a147d02792eccee483dca6c7b44ecce7012cb8c6e0b68b3ae9\",\"decimals\":18,\"observationWindow\":60,\"openingGrace\":150,\"voidGrace\":300,\"cutoffBuffer\":30}}",
-    "sessionRulesHash": "d0c791d34e871fb563c98788eac2a142414fc5042c220b2c1131d3e3032aed4e",
+    "engineConfigJson": "{\"domain\":{\"chainId\":26514,\"endpoint\":\"0x0a2703d21b27757fdf27ab807eae9820788010f3\",\"applicationId\":\"3714533467436544392\",\"rulesVersion\":3},\"authority\":\"0xe8122afba04f763d3f0ab43304e8be335efc0e7c\",\"collateral\":\"0xdf7108f8b10f9b9ec1aba01cca057268cbf86b6c\",\"feeBps\":0,\"oracle\":{\"chainId\":26514,\"registry\":\"0x4dd4aacdb7e8d2e6d06c5af38238f3deab836744\",\"oracle\":\"0xc800c3f18d35d492ae6b07655d7f31bfe98a4b6b\",\"rulesHash\":\"0x65e485f8468fda2de9d8681ee9fbbff779acabf1451e29a3d2cb2248b2a30ba6\",\"btcFeedId\":\"0x00039d9e45394f473ab1f050a1b963e6b05351e52d71e507509ada0c95ed75b8\",\"ethFeedId\":\"0x000362205e10b3a147d02792eccee483dca6c7b44ecce7012cb8c6e0b68b3ae9\",\"decimals\":18,\"observationWindow\":60,\"openingGrace\":150,\"voidGrace\":300,\"cutoffBuffer\":30}}",
+    "sessionRulesHash": "08ce5449b442a43a1b72a239e7c620c4fd262bc2a9b806cdefdf8fbbfce0f04f",
     "markets": [
       {
         "asset": "BTC",
@@ -57,8 +57,8 @@
       "boundary": "200000000",
       "houseTotal": "2000000000"
     },
-    "deployTx": "0xb46e888baf051de79401d5ea1f2db46b3d1272b886b4bc084fbd9d5546cf0bb2",
-    "deployBlock": 27958309,
+    "deployTx": "0x546c99b38e63711262d93a37d9b6962a93a11945e4300bb39da1a72d5b4949bd",
+    "deployBlock": 28251816,
     "chainlink": {
       "feedId": "0x00039d9e45394f473ab1f050a1b963e6b05351e52d71e507509ada0c95ed75b8",
       "configs": [
