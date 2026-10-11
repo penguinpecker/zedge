@@ -1,6 +1,6 @@
 /* BTC/USD line or candles drawn by Lightweight Charts on a canvas; the round's START, CUTOFF and END lines, the price-to-beat tag
    and the hover tooltip are HTML over it. --axis is the time axis height, set by the chart. */
-.live-chart-head { display: flex; justify-content: flex-end; padding: 0 18px 26px; }
+.live-chart-head { display: flex; justify-content: flex-end; align-items: center; gap: 14px; padding: 0 18px 26px; }
 .chain-segment.live-chart-type button { flex: none; min-height: 28px; padding: 5px 10px; }
 .live-chart-frame { position: relative; height: 320px; margin: 0 18px; }
 .live-chart-canvas { position: absolute; inset: 0; }
@@ -12,6 +12,11 @@
 .live-chart-closed { position: absolute; top: 0; bottom: var(--axis, 28px); background: rgba(255, 255, 255, 0.025); pointer-events: none; }
 .live-chart-target { position: absolute; transform: translate(-100%, calc(-100% - 5px)); white-space: nowrap; font: 11px var(--mono); letter-spacing: 0.3px; color: #e9eddf; text-shadow: 0 0 6px var(--panel), 0 0 2px var(--panel); pointer-events: none; }
 .live-chart-target.below { transform: translate(-100%, 5px); }
+/* The hovered (else latest) candle's open, high, low, close and change; wraps on a phone. */
+.live-chart-ohlc { position: absolute; top: 8px; left: 8px; z-index: 1; display: flex; flex-wrap: wrap; gap: 2px 10px; max-width: calc(100% - 16px); font: 11px var(--mono); color: var(--muted); white-space: nowrap; pointer-events: none; }
+.live-chart-ohlc b { font-weight: 400; color: var(--text); }
+.live-chart-ohlc .up b { color: var(--lime); }
+.live-chart-ohlc .down b { color: var(--coral); }
 .live-chart-tip { position: absolute; z-index: 1; transform: translate(-50%, calc(-100% - 12px)); padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel-raised); color: var(--text); font: 12px var(--mono); white-space: nowrap; pointer-events: none; }
 .live-chart-tip.below { transform: translate(-50%, 12px); }
 .live-chart-source { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; padding: 12px 24px 18px; color: var(--muted); font-size: 12px; line-height: 1.6; }

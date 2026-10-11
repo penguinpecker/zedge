@@ -8,6 +8,7 @@ import { holdingKind } from "./market-view.ts";
 import { engineRound, type VerifiedOrderbook } from "./orderbook-manifest.ts";
 import type { Snapshot } from "./private/client.ts";
 import type { House } from "./read-api.ts";
+import { bookLevels, type Level } from "./book.ts";
 import type { PrivateState } from "./private/use-private.ts";
 
 type Book = VerifiedOrderbook["manifest"];
@@ -132,10 +133,19 @@ export function PrivateHistory({ priv, fromBlock }: { priv: PrivateState; fromBl
   </div>;
 }
 
-/** The house's public quotes for one market: on each side its lowest sell (ask) and highest buy (bid). Display only. The event's
- * quotes have the same shape (read-api.ts EventHouse) and Yes/No names. */
-export function HouseQuotes({ house, names = { up: "Up", down: "Down" } }: { house: Pick<House, "up" | "down"> | null; names?: { up: string; down: string } }) {
-  const rows = house ? (["up", "down"] as const).flatMap((side) => (["ask", "bid"] as const).flatMap((kind) => { const q = house[side][kind]; return q ? [{ side, kind, ...q }] : []; })) : [];
-  if (!rows.length) return <div className="chain-empty chain-book-empty"><ChartLine size={24} /><h3>No quotes right now</h3></div>;
-  return rows.map((r) => <div className="chain-book-row" key={r.side + r.kind}><span><b className={r.side}>{names[r.side]}</b> {r.kind === "ask" ? "Ask" : "Bid"} {r.cents}¢</span><span>{shares(r.shares)}</span><span>{usdc(Math.floor(r.shares / 100) * r.cents)}</span></div>);
+/** The public order book for one outcome, exchange style: the house's ask(s) above the spread row, its bid(s) below, each with a
+ * depth bar scaled to the deeper side (book.ts). Only the chosen outcome's levels show: the engine matches a buy Up against a
+ * sell Up only, so the Down side is never mirrored in. The event's quotes have the same shape (read-api.ts EventHouse), named Yes/No. */
+export function OrderBook({ house, names = { up: "Up", down: "Down" }, outcome, onOutcome }: { house: Pick<House, "up" | "down"> | null; names?: { up: string; down: string }; outcome: "up" | "down"; onOutcome: (side: "up" | "down") => void }) {
+  if (!house || (["up", "down"] as const).every((side) => !house[side].ask && !house[side].bid)) return <div className="chain-empty chain-book-empty"><ChartLine size={24} /><h3>No quotes right now</h3></div>;
+  const { asks, bids, spread, mid, max } = bookLevels(house, outcome), spreadText = `Spread ${spread === null ? "—" : `${spread}¢`}`;
+  // A row click only confirms the outcome for the ticket; the bar sits first in the DOM so the positioned text paints over it.
+  const row = (kind: "ask" | "bid") => (l: Level) => <button type="button" className={`chain-ob-row ${kind}`} key={kind + l.cents} onClick={() => onOutcome(outcome)}><i aria-hidden style={{ width: `${(100 * l.total) / max}%` }} /><b>{l.cents}¢</b><span>{shares(l.shares)}</span><span>{usdc(l.total)}</span></button>;
+  return <>
+    <div className="chain-ob-bar"><div className="chain-segment chain-ob-switch" role="group" aria-label="Outcome">{(["up", "down"] as const).map((side) => <button key={side} className={side} aria-pressed={outcome === side} onClick={() => onOutcome(side)}>Trade {names[side]}</button>)}</div></div>
+    <div className="chain-book-columns"><span>Price <small>asks</small></span><span>Shares</span><span>Total</span></div>
+    {asks.length ? [...asks].reverse().map(row("ask")) : <div className="chain-ob-row chain-ob-none">No asks</div>}
+    <div className="chain-ob-mid">{spreadText}{mid !== null && ` · mid ${mid}¢`}</div>
+    {bids.length ? bids.map(row("bid")) : <div className="chain-ob-row chain-ob-none">No bids</div>}
+  </>;
 }

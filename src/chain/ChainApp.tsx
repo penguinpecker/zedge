@@ -14,7 +14,7 @@ import { confirmSettle, liveNow, readApi, type ApiRound, type House, type Live }
 import { createPriceFeed } from "./price-feed.ts";
 import { engineRound, LOT, OPERATOR_KEYS_CHANGED, type OrderbookManifest, type VerifiedOrderbook } from "./orderbook-manifest.ts";
 import { usePrivate, type PrivateState } from "./private/use-private.ts";
-import { ActionLine, HouseQuotes, PrivateHistory, PrivateOrders, PrivatePortfolio, shares, usdc } from "./PrivatePanels.tsx";
+import { ActionLine, OrderBook, PrivateHistory, PrivateOrders, PrivatePortfolio, shares, usdc } from "./PrivatePanels.tsx";
 import { sharesFor, waitingOrder } from "./private/client.ts";
 import type { DeploymentManifest, VerifiedDeployment } from "./manifest.ts";
 import { STREAMS_MISMATCH_REASON, STREAMS_PLANNED_REASON, StreamsMismatchError } from "./streams-manifest.ts";
@@ -567,7 +567,7 @@ function ChainMarkets() {
               {roundError && verified && <p className="chain-error" role="alert">{roundError} <button className="chain-text-button" onClick={() => setRoundAttempt((n) => n + 1)}>Retry</button></p>}
               <div className="chain-market-foot"><span>{snapshot ? `Updated ${utc(snapshot.timestamp)} UTC` : "Waiting for a network response"}</span><span>Winner 1 · Loser 0 · Void ½ collateral unit</span></div>
             </section>
-            <section className="chain-panel chain-book" aria-label="Order book"><div className="chain-panel-heading"><h2>Order book</h2><div className="chain-segment"><button aria-pressed={book === "quotes"} onClick={() => setBook("quotes")}>Public quotes</button><button aria-pressed={book === "orders"} onClick={() => setBook("orders")}>{unlocked ? <LockKeyOpen size={13} /> : <LockKey size={13} />}My orders</button></div></div>{book === "quotes" ? <><div className="chain-book-columns"><span>Price</span><span>Shares</span><span>Total</span></div><HouseQuotes house={house} /></> : orderbook && unlocked ? <PrivateOrders priv={priv} book={orderbook.manifest} roundStart={live?.round ? Number(live.start) : null} /> : <PrivateEmpty title="Your orders" onOpen={() => openAccount()} open={Boolean(orderbook)} />}</section>
+            <section className="chain-panel chain-book" aria-label="Order book"><div className="chain-panel-heading"><h2>Order book</h2><div className="chain-segment"><button aria-pressed={book === "quotes"} onClick={() => setBook("quotes")}>Public quotes</button><button aria-pressed={book === "orders"} onClick={() => setBook("orders")}>{unlocked ? <LockKeyOpen size={13} /> : <LockKey size={13} />}My orders</button></div></div>{book === "quotes" ? <OrderBook house={house} outcome={outcome} onOutcome={setOutcome} /> : orderbook && unlocked ? <PrivateOrders priv={priv} book={orderbook.manifest} roundStart={live?.round ? Number(live.start) : null} /> : <PrivateEmpty title="Your orders" onOpen={() => openAccount()} open={Boolean(orderbook)} />}</section>
           </div>
           <Ticket priv={priv} orderbook={orderbook} wallet={wallet} round={ticketRound} slot={liveTimes.start} now={now} up={up} house={house} outcome={outcome} onOutcome={setOutcome} loading={loading} onAccount={() => openAccount()} onFunds={() => openAccount("funds")} />
         </div>

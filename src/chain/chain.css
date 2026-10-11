@@ -239,6 +239,26 @@
 .chain-book-row { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; align-items: center; border-bottom: 1px solid var(--line); font: 11px var(--mono); padding: 11px 22px; }
 .chain-book-row span:not(:first-child) { text-align: right; }
 .chain-book-row .chain-text-button { margin-left: 12px; }
+/* Exchange-style book (PrivatePanels.tsx OrderBook): the switch takes the side's colour, rows a depth bar from the right. */
+.chain-ob-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 22px 14px; }
+.chain-ob-switch { flex: 0 1 240px; }
+.chain-ob-switch button.up[aria-pressed="true"] { color: var(--lime); background: rgba(199, 248, 111, .12); }
+.chain-ob-switch button.down[aria-pressed="true"] { color: var(--coral); background: rgba(239, 154, 135, .12); }
+.chain-ob-mid { color: var(--muted); font: 11px var(--mono); white-space: nowrap; }
+.chain-book-columns small { font-size: 9px; letter-spacing: .08em; text-transform: uppercase; margin-left: 6px; }
+.chain-ob-row { position: relative; display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; align-items: center; width: 100%; min-height: 34px; padding: 0 22px; border-bottom: 1px solid var(--line); font: 11px var(--mono); color: var(--text); text-align: left; border-radius: 0; }
+.chain-ob-row > b, .chain-ob-row > span { position: relative; }
+.chain-ob-row > span { text-align: right; }
+.chain-ob-row > b { font-weight: 700; }
+.chain-ob-row.ask > b { color: var(--coral); }
+.chain-ob-row.bid > b { color: var(--lime); }
+.chain-ob-row > i { position: absolute; inset: 0 0 0 auto; }
+.chain-ob-row.ask > i { background: rgba(239, 154, 135, .16); }
+.chain-ob-row.bid > i { background: rgba(199, 248, 111, .16); }
+.chain-ob-row:hover { background: rgb(255 255 255 / .04); }
+button.chain-ob-row:active:not(:disabled) { transform: none; }
+.chain-ob-none { color: var(--muted); }
+.chain-ob-mid { text-align: center; padding: 9px 22px; border-bottom: 1px solid var(--line); }
 .chain-private-list > .button, .chain-private-list > p, .chain-private-list > dl { margin: 16px 22px; }
 .chain-drawer select { padding: 13px; width: 100%; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; color: var(--text); }
 .chain-deposit-address { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px; align-items: start; margin: 0 0 18px; }
