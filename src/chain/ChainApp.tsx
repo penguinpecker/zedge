@@ -12,6 +12,7 @@ import { chainClient, checkDeployment, checkOrderbook, loadManifest, loadOrderbo
 import { clockPhase, countdownLine, eventHouseFor, houseFor, ORDER_MARGIN, roundResults, sidePrice, tradable, versus, type RoundResult, type RoundTimes, roundNumber } from "./market-view.ts";
 import { confirmSettle, liveNow, readApi, type ApiRound, type House, type Live } from "./read-api.ts";
 import { createPriceFeed } from "./price-feed.ts";
+import { opsNotices, readOps, type Ops } from "./ops.ts";
 import { engineRound, LOT, OPERATOR_KEYS_CHANGED, type OrderbookManifest, type VerifiedOrderbook } from "./orderbook-manifest.ts";
 import { usePrivate, type PrivateState } from "./private/use-private.ts";
 import { ActionLine, OrderBook, PrivateHistory, PrivateOrders, PrivatePortfolio, shares, usdc } from "./PrivatePanels.tsx";
@@ -346,6 +347,17 @@ function ChainMarkets() {
     const timer = setInterval(read, 2_000);
     return () => { on = false; clearInterval(timer); };
   }, []);
+  // House and operator gas (ops.ts) every 30 s while the tab is visible, once the book's manifest names them.
+  const [ops, setOps] = useState<Ops | null>(null);
+  const houseAddress = orderbook?.manifest.application.house ?? null, operatorAddress = orderbook?.manifest.endpoint.operator ?? null;
+  useEffect(() => {
+    if (!houseAddress || !operatorAddress) return;
+    let on = true;
+    const read = () => { if (document.visibilityState !== "hidden") void readOps(houseAddress, operatorAddress).then((x) => { if (on) setOps(x); }); };
+    read();
+    const timer = setInterval(read, 30_000);
+    return () => { on = false; clearInterval(timer); };
+  }, [houseAddress, operatorAddress]);
   // The engine's own opening for the current slot opens the ticket before the registry records it, but only once one receipt read
   // shows that exact record on chain, because it feeds the buy limit. Once per round; a failed read is tried again at the next live read.
   const [engineOpen, setEngineOpen] = useState<{ start: number; opening: string } | null>(null);
@@ -468,6 +480,9 @@ function ChainMarkets() {
   const openingPrice = round?.round?.openedAt ? observationPrice(round.round.opening.price, -round.round.opening.decimals) : null;
   const closing = round?.round?.resolvedAt && round.round.outcome !== 3 ? round.round.closing : null;
   const result = round?.round?.outcome === 1 ? "Up wins" : round?.round?.outcome === 2 ? "Down wins" : round?.round?.outcome === 3 ? "Round voided" : null;
+  // A void names which price never came; the pill says it too, so "Voided" alone is never shown.
+  const notices = opsNotices(ops, round?.round ? { outcome: round.round.outcome, opened: Boolean(round.round.openedAt) } : null);
+  const pill = phase === "Voided" && round?.round ? `Voided · ${round.round.openedAt ? "no closing price" : "no opening price"}` : phase;
   // Signed by the exact difference (market-view.ts versus), as settlement is: a tie reads Up, a Down lead under a cent reads Down.
   const tone = (difference: number | null) => difference === null ? "" : difference >= 0 ? "up" : "down";
   const signed = (difference: number) => `${difference >= 0 ? "▲" : "▼"} $${price(Math.abs(difference))}`;
@@ -538,6 +553,9 @@ function ChainMarkets() {
       {!wallet.session && wallet.error && <div className="chain-status-banner warn" role="alert"><Warning size={21} /><div><strong>{wallet.error}</strong></div></div>}
       {(connectionError || (!verified && (planned || offline))) && <div className={`chain-status-banner ${connectionError ? "warn" : ""}`}>{connectionError ? <Warning size={21} /> : <Info size={21} />}<div><strong>{connectionError ? "Market checks unavailable" : planned ? "Public markets not available yet" : "Public markets unavailable"}</strong><p>{connectionError || offline}</p></div><button className="icon-button" aria-label="Refresh markets" disabled={refreshing || cooldownRemaining(network) > 0} onClick={refreshMarkets}><ArrowsClockwise size={20} /></button></div>}
       {orderbook?.withdrawOnly && <div className="chain-status-banner warn" role="status"><Warning size={21} /><div><strong>This order book is closing</strong><p>Deposits and trading are off. You can still withdraw your balance to Base.</p></div></div>}
+      {notices.keeper && <div className="chain-status-banner warn" role="status"><Warning size={21} /><div><strong>Keeper out of gas</strong><p>{notices.keeper}</p></div></div>}
+      {notices.operator && <div className="chain-status-banner warn" role="status"><Warning size={21} /><div><strong>Operator out of gas</strong><p>{notices.operator}</p></div></div>}
+      {notices.house && <div className="chain-status-banner warn" role="status"><Warning size={21} /><div><strong>House out of gas</strong><p>{notices.house}</p></div></div>}
       {page === "markets" ? <>
         <div className="chain-categories"><div className="chain-segment" role="group" aria-label="Market category">{(["crypto", "politics"] as const).map((c) => <button key={c} aria-pressed={category === c} onClick={() => chooseCategory(c)}>{c === "crypto" ? "Crypto" : "Politics"}</button>)}</div></div>
         {category === "politics" ? <>
@@ -550,13 +568,13 @@ function ChainMarkets() {
         <div className="workspace-label"><div><span>CRYPTO</span><CaretRight size={11} /><span>{market.asset}</span><CaretRight size={11} /><strong>{market.duration / 60} MIN UP / DOWN</strong></div></div>
         <div className="chain-workspace">
           <div className="chain-left-column">
-            <section id="chain-round" tabIndex={-1} className="chain-panel chain-market-detail" aria-label="Market and price chart"><div className="chain-panel-heading"><div><span className="eyebrow">{market.name} · {market.duration / 60} minute round{roundNumber(times.start, market.duration) !== null && ` · #${roundNumber(times.start, market.duration)}`}</span><h2>Will {market.name} finish higher?</h2></div><span className="chain-pill">{phase}</span></div>
+            <section id="chain-round" tabIndex={-1} className="chain-panel chain-market-detail" aria-label="Market and price chart"><div className="chain-panel-heading"><div><span className="eyebrow">{market.name} · {market.duration / 60} minute round{roundNumber(times.start, market.duration) !== null && ` · #${roundNumber(times.start, market.duration)}`}</span><h2>Will {market.name} finish higher?</h2></div><span className="chain-pill">{pill}</span></div>
               <div className="chain-round-nav"><button aria-label="Previous round" disabled={!verified || roundOffset <= MIN_OFFSET} onClick={() => setRoundOffset((value) => value - 1)}><CaretLeft /></button><span>{utc(times.start).slice(0, 5)} — {utc(times.end).slice(0, 5)} UTC{offUtc && <small>{viewer(times.start)} — {viewer(times.end, { timeZoneName: "short" })}</small>}</span><button aria-label="Next round" disabled={!verified || roundOffset >= 1} onClick={() => setRoundOffset((value) => value + 1)}><CaretRight /></button></div>
               <div className="chain-strip">
                 <div><span>Price to beat</span><strong title={openingExact ? `$${openingExact}` : undefined}>{openingPrice ?? "—"}</strong><small>{captions.opening}</small></div>
                 {roundOffset < 0 || result ? <div className={tone(closingDelta)}><span>Closing price</span><strong title={closing ? `$${exactObservationPrice(closing.price, closing.decimals)}` : undefined}>{closing ? observationPrice(closing.price, -closing.decimals) : "—"}</strong><small>{closingDelta !== null ? <b>{signed(closingDelta)}</b> : captions.closing}</small></div>
                   : <div className={tone(nowDelta)}><span>Current price</span><strong>{spot ? `$${price(spot.p)}` : "—"}</strong><small title={spot ? `${utc(spot.t / 1000)} UTC` : undefined}>{nowDelta !== null && <b>{signed(nowDelta)} </b>}{spot ? `Chainlink · ${viewer(spot.t / 1000)}` : "Chainlink BTC/USD"}</small></div>}
-                {result ? <div className={`chain-countdown ${round?.round?.outcome === 1 ? "up" : round?.round?.outcome === 2 ? "down" : ""}`}><span>Result</span><strong>{result}</strong></div>
+                {result ? <div className={`chain-countdown ${round?.round?.outcome === 1 ? "up" : round?.round?.outcome === 2 ? "down" : ""}`}><span>Result</span><strong>{result}</strong>{notices.voidCause && <small>{notices.voidCause}</small>}</div>
                   : <div className={`chain-countdown ${line.urgent ? "urgent" : ""}`} role="timer"><span>{line.label}</span><strong>{line.time}</strong><div className="chain-track"><i style={{ transform: `scaleX(${1 - line.progress})` }} /></div></div>}
               </div>
               {chartTimes ? <Suspense fallback={<div className="chain-chart-empty" />}><LiveChart start={chartTimes.start} cutoff={chartTimes.cutoff} end={chartTimes.end} priceToBeat={chartRound?.openedAt ? exactObservationPrice(chartRound.opening.price, chartRound.opening.decimals) : null}
@@ -567,7 +585,7 @@ function ChainMarkets() {
               {roundError && verified && <p className="chain-error" role="alert">{roundError} <button className="chain-text-button" onClick={() => setRoundAttempt((n) => n + 1)}>Retry</button></p>}
               <div className="chain-market-foot"><span>{snapshot ? `Updated ${utc(snapshot.timestamp)} UTC` : "Waiting for a network response"}</span><span>Winner 1 · Loser 0 · Void ½ collateral unit</span></div>
             </section>
-            <section className="chain-panel chain-book" aria-label="Order book"><div className="chain-panel-heading"><h2>Order book</h2><div className="chain-segment"><button aria-pressed={book === "quotes"} onClick={() => setBook("quotes")}>Public quotes</button><button aria-pressed={book === "orders"} onClick={() => setBook("orders")}>{unlocked ? <LockKeyOpen size={13} /> : <LockKey size={13} />}My orders</button></div></div>{book === "quotes" ? <OrderBook house={house} outcome={outcome} onOutcome={setOutcome} /> : orderbook && unlocked ? <PrivateOrders priv={priv} book={orderbook.manifest} roundStart={live?.round ? Number(live.start) : null} /> : <PrivateEmpty title="Your orders" onOpen={() => openAccount()} open={Boolean(orderbook)} />}</section>
+            <section className="chain-panel chain-book" aria-label="Order book"><div className="chain-panel-heading"><h2>Order book</h2><div className="chain-segment"><button aria-pressed={book === "quotes"} onClick={() => setBook("quotes")}>Public quotes</button><button aria-pressed={book === "orders"} onClick={() => setBook("orders")}>{unlocked ? <LockKeyOpen size={13} /> : <LockKey size={13} />}My orders</button></div></div>{book === "quotes" ? <OrderBook house={house} outcome={outcome} onOutcome={setOutcome} reason={notices.house} /> : orderbook && unlocked ? <PrivateOrders priv={priv} book={orderbook.manifest} roundStart={live?.round ? Number(live.start) : null} /> : <PrivateEmpty title="Your orders" onOpen={() => openAccount()} open={Boolean(orderbook)} />}</section>
           </div>
           <Ticket priv={priv} orderbook={orderbook} wallet={wallet} round={ticketRound} slot={liveTimes.start} now={now} up={up} house={house} outcome={outcome} onOutcome={setOutcome} loading={loading} onAccount={() => openAccount()} onFunds={() => openAccount("funds")} />
         </div>

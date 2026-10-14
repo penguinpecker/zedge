@@ -136,8 +136,9 @@ export function PrivateHistory({ priv, fromBlock }: { priv: PrivateState; fromBl
 /** The public order book for one outcome, exchange style: the house's ask(s) above the spread row, its bid(s) below, each with a
  * depth bar scaled to the deeper side (book.ts). Only the chosen outcome's levels show: the engine matches a buy Up against a
  * sell Up only, so the Down side is never mirrored in. The event's quotes have the same shape (read-api.ts EventHouse), named Yes/No. */
-export function OrderBook({ house, names = { up: "Up", down: "Down" }, outcome, onOutcome }: { house: Pick<House, "up" | "down"> | null; names?: { up: string; down: string }; outcome: "up" | "down"; onOutcome: (side: "up" | "down") => void }) {
-  if (!house || (["up", "down"] as const).every((side) => !house[side].ask && !house[side].bid)) return <div className="chain-empty chain-book-empty"><ChartLine size={24} /><h3>No quotes right now</h3></div>;
+export function OrderBook({ house, names = { up: "Up", down: "Down" }, outcome, onOutcome, reason }: { house: Pick<House, "up" | "down"> | null; names?: { up: string; down: string }; outcome: "up" | "down"; onOutcome: (side: "up" | "down") => void; reason?: string | null }) {
+  // `reason`: why the house is silent (ops.ts), so an empty book names its cause instead of a generic line.
+  if (!house || (["up", "down"] as const).every((side) => !house[side].ask && !house[side].bid)) return <div className="chain-empty chain-book-empty"><ChartLine size={24} />{reason ? <><h3>House out of gas</h3><p>{reason}</p></> : <h3>No quotes right now</h3>}</div>;
   const { asks, bids, spread, mid, max } = bookLevels(house, outcome), spreadText = `Spread ${spread === null ? "—" : `${spread}¢`}`;
   // A row click only confirms the outcome for the ticket; the bar sits first in the DOM so the positioned text paints over it.
   const row = (kind: "ask" | "bid") => (l: Level) => <button type="button" className={`chain-ob-row ${kind}`} key={kind + l.cents} onClick={() => onOutcome(outcome)}><i aria-hidden style={{ width: `${(100 * l.total) / max}%` }} /><b>{l.cents}¢</b><span>{shares(l.shares)}</span><span>{usdc(l.total)}</span></button>;

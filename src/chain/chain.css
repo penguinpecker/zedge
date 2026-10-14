@@ -54,6 +54,8 @@
 .chain-strip .down strong, .chain-strip .down b { color: var(--coral); }
 .chain-countdown { text-align: right; min-width: 132px; border-left: 1px solid var(--line); padding-left: 22px; }
 .chain-strip .chain-countdown strong { font-size: clamp(24px, 2.6vw, 34px); }
+/* The void cause is a sentence: let it wrap instead of widening the result column. */
+.chain-strip .chain-countdown small { white-space: normal; max-width: 240px; margin-left: auto; }
 .chain-countdown.urgent strong { color: var(--coral); }
 .chain-track { height: 3px; background: #303c26; border-radius: 2px; overflow: hidden; margin-top: 3px; }
 .chain-track i { display: block; height: 100%; background: var(--lime); transform-origin: left center; transition: transform 1s linear; }

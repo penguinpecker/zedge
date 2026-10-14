@@ -138,8 +138,8 @@ export function priceCaptions(read: RoundRead | null, verified: boolean, failed 
   const opened = Boolean(round?.openedAt);
   const pending = !verified ? loading ? "Loading…" : "Unavailable" : failed && !read ? "Unavailable" : !read ? "Loading…" : phase === 0 ? "No scheduled round" : null;
   return {
-    opening: opened ? "Verified opening observation" : pending ?? (phase === 7 || phase === 8 ? "No opening price recorded" : "Awaiting opening observation"),
-    closing: round?.outcome === 3 ? "Round voided" : round?.resolvedAt ? "Verified closing observation"
+    opening: opened ? "Verified opening observation" : pending ?? (phase === 7 || phase === 8 ? "No opening price was published before the deadline" : "Awaiting opening observation"),
+    closing: round?.outcome === 3 ? opened ? "No closing price delivered in time" : "Round voided" : round?.resolvedAt ? "Verified closing observation"
       : pending ?? (phase === 8 ? opened ? "No closing price delivered" : "Can only be voided" : "Awaiting resolution"),
   };
 }

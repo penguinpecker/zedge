@@ -4,7 +4,7 @@
 // --fork <loopback Anvil URL>. Never prints the key.
 //
 //   node --experimental-strip-types services/market-maker/main.mjs <command> (--mainnet | --fork URL) [--settings FILE] [--event [--events FILE]]
-//   commands: run [--dry-run] | status | deposit <usdc> | withdraw <usdc> | resolve <result file>
+//   commands: run [--dry-run] | status | deposit <usdc> | withdraw <usdc> | cancel | merge <sets> | resolve <result file>
 // Custody is the Base vault: deposit signs a Base USDC permit and calls the vault's depositWithPermit (the house pays its own
 // Base gas); withdraw asks the engine for a payout to the house on Base, which the payout signer pays.
 // --event runs the same commands as the event house (README "Event house"): its own wallet, quoting the Yes/No event.
@@ -49,7 +49,7 @@ const HORIZEN_RPC = (() => {
   try { const id = readFileSync(`${homedir()}/.config/zedge/thirdweb.id`, "utf8").trim(); if (/^[0-9a-f]{32}$/.test(id)) return `https://26514.rpc.thirdweb.com/${id}`; } catch {}
   return "https://26514.rpc.thirdweb.com";
 })();
-const USAGE = "usage: main.mjs <run [--dry-run] | status | deposit <usdc> | withdraw <usdc> | resolve <result file>> (--mainnet | --fork http://127.0.0.1:<port>) [--settings <file>] [--event] [--events <events manifest, with --fork>]";
+const USAGE = "usage: main.mjs <run [--dry-run] | status | deposit <usdc> | withdraw <usdc> | cancel | merge <sets> | resolve <result file>> (--mainnet | --fork http://127.0.0.1:<port>) [--settings <file>] [--event] [--events <events manifest, with --fork>]";
 const COINBASE = "https://api.exchange.coinbase.com/products/BTC-USD", KRAKEN = "https://api.kraken.com/0/public/Ticker?pair=XBTUSD";
 
 const lower = (x) => String(x).toLowerCase();
@@ -229,7 +229,7 @@ async function sigma() {
 export async function main(argv) {
   const { values: a, positionals: [cmd, amount, ...extra] } = parseArgs({ args: argv, allowPositionals: true,
     options: { mainnet: { type: "boolean" }, fork: { type: "string" }, settings: { type: "string" }, "dry-run": { type: "boolean" }, event: { type: "boolean" }, events: { type: "string" } } });
-  const arity = { run: 0, status: 0, deposit: 1, withdraw: 1, resolve: 1 };
+  const arity = { run: 0, status: 0, deposit: 1, withdraw: 1, cancel: 0, merge: 1, resolve: 1 };
   if (!Object.hasOwn(arity, cmd) || (amount === undefined ? 0 : 1) !== arity[cmd] || extra.length) fail(USAGE);
   if (a["dry-run"] && cmd !== "run") fail("--dry-run goes with run");
   const t = target(a), event = !!a.event;
@@ -472,6 +472,18 @@ export async function main(argv) {
     const rc = await (await vault.depositWithPermit(account, atoms, deadline, sig.v, sig.r, sig.s)).wait();
     const index = rc.logs.map((l) => { try { return vault.interface.parseLog(l); } catch { return null; } }).find((e) => e?.name === "Deposited")?.args.index;
     return log("deposited on Base", { usdc: usdc(atoms), index: index?.toString() ?? null, tx: rc.hash, note: "credited by the order book in about a minute; status or run shows the cash" });
+  }
+  if (cmd === "cancel" || cmd === "merge") {
+    // Operator's hands on the house's own book (the running bot must be idle or stopped: it owns the key's nonces): cancel pulls
+    // every resting quote of the current round (the event's for --event); merge turns <sets> Up+Down pairs back into cash, which
+    // withdraw can then pay out.
+    await startup();
+    const roundId = ev ? ev.id : roundAt(Math.floor((await provider.getBlock("latest")).timestamp / DURATION) * DURATION).id;
+    const c = cmd === "cancel" ? { op: "cancel_all", roundId } : { op: "merge", roundId, quantity: Number(units(amount, 1_000_000n)) };
+    const r = await send(c);
+    // A cancel rests as "staged" until the next tick applies it; the receipt's view already shows the orders gone.
+    if (r.body?.status !== "applied" && r.body?.status !== "staged") fail(`${cmd} not applied: ${r.body?.reason || r.done.errorMessage || "unreadable receipt"}`);
+    return log(cmd === "cancel" ? "quotes cancelled" : "sets merged", { round: `0x${roundId}`, ...summary(view) });
   }
   if (cmd === "withdraw") {
     const atoms = units(amount, 1n);

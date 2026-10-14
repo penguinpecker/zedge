@@ -338,10 +338,10 @@ test("price boxes never promise an observation that a voided or void-only round 
     round: { asset: 0, duration: 300, start: 300n, end: 600n, cutoff: 570n, openingDeadline: 510n, voidableAfter: 960n, resolutionDeadline: null, openedAt, resolvedAt, outcome, opening: observation, closing: observation },
   });
   const cases: [string, RoundRead, string, string][] = [
-    ["never opened, can only be voided", read(8, 0n), "No opening price recorded", "Can only be voided"],
-    ["never opened, voided", read(7, 0n, 3, 700n), "No opening price recorded", "Round voided"],
+    ["never opened, can only be voided", read(8, 0n), "No opening price was published before the deadline", "Can only be voided"],
+    ["never opened, voided", read(7, 0n, 3, 700n), "No opening price was published before the deadline", "Round voided"],
     ["opened, no closing price by the timeout", read(8, 400n), "Verified opening observation", "No closing price delivered"],
-    ["opened, voided", read(7, 400n, 3, 700_000n), "Verified opening observation", "Round voided"],
+    ["opened, voided", read(7, 400n, 3, 700_000n), "Verified opening observation", "No closing price delivered in time"],
     ["opened, ended, closing price still expected", read(5, 400n), "Verified opening observation", "Awaiting resolution"],
     ["started, opening price still expected", read(2, 0n), "Awaiting opening observation", "Awaiting resolution"],
     ["resolved", read(6, 400n, 1, 650n), "Verified opening observation", "Verified closing observation"],

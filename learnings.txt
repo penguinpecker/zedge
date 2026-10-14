@@ -1187,3 +1187,35 @@ Source verification of the whole stack — 2026-10-11
 - zsh does not word-split `$pair` in `set -- $pair`: the whole string becomes one argument ("invalid string length").
 - A per-wallet deposits-minus-payouts table over the vault's events decomposes an application's residual balance
   without decrypting anything; it sums to the residual exactly (0.024290 here) and shows whose money it is.
+
+Live testing, gas and the stop/resume manifest — 2026-10-12
+- "Voided" and "no prices" were both gas, on different wallets. The registry keeper publishes every Chainlink report
+  ON BASE (BaseStreamsPublisher, ~7 µETH each, ~0.0007 ETH a day) and only creates/opens/voids rounds on Horizen;
+  the house pays ~0.0002 ETH of Horizen gas per quoted round and the operator about 0.6× that per round again. A
+  keeper short of Base ETH waits through the opening deadline and voids; a house below `minEthWei` logs "waiting:
+  house ETH … is below the floor" and rests nothing while rounds keep opening. Read the balance on the chain the
+  wallet actually sends on before blaming the service.
+- Monthly gas is therefore not one number: ~0.02 ETH of Base publishes plus, per quoting day, ~0.02 ETH house +
+  ~0.012 ETH operator on Horizen. Four hours of two bots quoting cost the operator 0.0016 ETH.
+- The owner's ETH top-ups land on Base. Horizen's native OP-stack bridge on Base
+  (`0xF4A6Cc4171FdA694439f856D912777AA6Ab05369`, `bridgeETHTo(to, 200000, "0x")`) credits Horizen in 1–2 minutes with
+  no third party; USDC on Base becomes gas through Uniswap v3 (router `0x2626…1e481`, fee 500, WETH `0x4200…0006`),
+  unwrap, then the bridge. One resumable script per move (approve/swap/unwrap/send with a JSON state file) survives
+  a revert caused by a stale read right after approve.
+- The vault's Base→Horizen message is the OP-stack cross-domain messenger (vault `MESSENGER` `0x9F5e…953c`, version
+  2.6.0, `otherMessenger` = the `0x4200…0007` predeploy), not LayerZero or Stargate; Horizen's docs name Stargate only
+  for moving ZEN/USDC between chains. The message carries (index, address, amount); the USDC never leaves Base.
+- "Stop" means no wallet of ours sends. The bots alone are not enough: the keeper publishes at every boundary and the
+  manager completes every tick. Order: bots (SIGTERM makes them `cancel_all` then `stopped`), keeper (`railway down`),
+  then — only with the operator's nonce latest == pending — manager `VELA_HOLD=1` + redeploy (log
+  `manager-start: HOLD`). Proof: every wallet's nonce unchanged across a 15-minute boundary. Resume in reverse: the
+  manager first, then the keeper (a boundary it misses is voided), then the bots. STOP_RESUME.md is the checklist.
+- Railway CLI: `railway variable delete KEY -s svc` removes a variable (there is no `--unset`); `--set` triggers a
+  redeploy unless `--skip-deploys`; backboard timeouts on `down`/`up` often land anyway — rerun until "No deployments
+  found" or "Deploy complete".
+- The house's two asks sum to more than 100¢ by design: each side is quoted half a spread above fair, the bids half a
+  spread below; only the midpoints sum to 100. With fees at 0 the spread is the whole margin.
+- The last 30 s of a round show no prices on purpose: the house cancels at the cutoff; "Waiting for the next round"
+  is the panel's correct state until the keeper opens the next one (~30 s after the boundary).
+- Browser automation refuses `file://` pages; serve a scratch HTML on 127.0.0.1 (python `http.server`) instead. A
+  rendering service (kroki) would publish the diagram; render Mermaid client-side from the CDN in the page.
