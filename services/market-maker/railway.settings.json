@@ -1,1 +1,1 @@
-{ "quoteShares": 4, "quoteLifetimeSeconds": 300, "requoteDriftCents": 6 }
+{ "halfSpreadCents": 2, "quoteShares": 10, "quoteLifetimeSeconds": 300, "requoteDriftCents": 6 }
