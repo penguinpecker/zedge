@@ -25,6 +25,34 @@ ZEDGE trades real USDC. Its contracts and engine have not had an independent sec
 - If no result has been posted by 31 January 2027 23:59:59 UTC, the event is void and every Yes and No share pays 0.50 USDC.
 - Stake limits, from the rules: for each account, the gap between what it would be paid if Yes wins and if No wins may not pass 50 USDC; added up over all accounts, including the event house, 200 USDC.
 
+## How your money moves
+
+USDC in, private trade, USDC out. The money never leaves the vault on Base; only messages cross to Horizen.
+
+```mermaid
+flowchart LR
+  subgraph BASE["Base · public · holds the money"]
+    direction TB
+    W["Your wallet<br/>USDC"]
+    V["Vault<br/>all USDC stays here"]
+  end
+  subgraph HZ["Horizen · private order book"]
+    direction LR
+    E["Vela endpoint<br/>sees only ciphertext"]
+    O["Operator<br/>encrypted ledger + matching"]
+    H["House bots"]
+    K["Keeper<br/>Chainlink BTC price"]
+  end
+  W -->|"1 deposit, one signature"| V
+  V -->|"2 bridge: credit message"| E
+  W -->|"3 encrypted order via relayer"| E
+  E -->|"4 match → encrypted receipt"| O
+  H -->|quotes| O
+  K -->|"5 open / close → settle"| O
+  O -->|"6 payout record"| V
+  V -->|"7 withdraw USDC"| W
+```
+
 ## Architecture
 
 ```mermaid
